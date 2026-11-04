@@ -1,8 +1,8 @@
 # Tufa Scholar
 
-本地单用户科研助手。当前提供项目与对话、论文检索和导入、文献列表及单 worker 任务。架构与分阶段目标见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+本地单用户科研助手。当前提供项目与对话、基于文献的科研问答、论文检索与导入、证据和单 worker 任务。架构与分阶段目标见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-本地项目文献通过 SQLite FTS5/BM25 关键词检索，外部结果由 OpenAlex 文本检索提供；选择两者时用 RRF 合并排名并保留来源排名。当前没有向量检索或模型重排，也没有综述、修订、OCR 和引用扩展。上传 PDF 时提取可复制文本；扫描件无可提取文本时保留原文件并标记状态。检索只返回元数据与链接，不自动下载 PDF。
+本地项目文献通过 SQLite FTS5/BM25 关键词检索，外部结果由 OpenAlex 文本检索提供；选择两者时用 RRF 合并排名并保留来源排名。当前没有向量检索或模型重排，尚无完整综述修订、OCR 和引用扩展。上传 PDF 时提取可复制文本；扫描件无可提取文本时保留原文件并标记状态。检索只返回元数据与链接，不自动下载 PDF。
 
 ## 环境与安装
 
@@ -25,7 +25,7 @@ API 与 worker 必须使用同一个 `TUFA_DATA_DIR`；不设置时使用项目�
 $env:TUFA_DATA_DIR = '.cache/data-acceptance'
 ```
 
-OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，目前只保存配置，尚未接入模型调用或综述。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时如果 OpenAlex 请求失败，整个任务会失败；可改用 `local` 独立搜索项目文献。
+OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时如果 OpenAlex 请求失败，整个任务会失败；可改用 `local` 独立搜索项目文献。
 
 推荐在项目根目录的 PowerShell 中一条命令启动全部服务：
 
@@ -60,7 +60,7 @@ worker 按顺序领取任务；重启时将遗留的运行中任务标记为中�
 
 ## 使用与接口
 
-在首页创建项目与对话，输入检索问题并选择本地、OpenAlex 或全部来源；任务完成后可将结果保存到项目文献。也可以上传 PDF；重复字节的文件按内容摘要去重，DOI 或 arXiv ID 用于识别文献。项目内文献跨对话共享。
+在首页创建项目与对话，输入研究问题并选择本地、OpenAlex 或全部来源。任务完成后可查看回答及证据，下载报告与证据表；右上角搜索项目内会话、消息和文献。也可以上传 PDF；重复字节的文件按内容摘要去重，DOI 或 arXiv ID 用于识别文献。项目内文献跨对话共享。
 
 空间右侧菜单可删除空间；有执行中的任务时需等任务结束。删除空间会移除其对话、任务与文献关联，保留全局文献和原文文件以及其他空间的关联。
 
@@ -76,6 +76,10 @@ API 具体字段和交互可在 `/docs` 查看。主要接口：
 | `GET/POST /projects/{project_id}/papers` | 列出文献、保存元数据 |
 | `POST /projects/{project_id}/papers/import` | multipart 上传 PDF，可附 `title`、`doi`、`arxiv_id` |
 | `GET /paper-versions/{version_id}/file` | 查看已上传原文 |
+| `POST /projects/{project_id}/questions` | 提交科研问题，返回任务与会话 ID |
+| `GET /conversations/{conversation_id}/messages` | 读取会话消息及证据 |
+| `GET /projects/{project_id}/search?q=...` | 搜索项目内会话、消息和文献 |
+| `GET /reports/{report_id}/markdown`、`GET /reports/{report_id}/evidence.csv` | 下载报告与证据表 |
 | `GET/POST /projects/{project_id}/runs` | 列出任务、提交检索任务 |
 | `GET /runs/{run_id}` | 查询任务状态、结果或错误 |
 | `POST /runs/{run_id}/retry` | 重新执行失败或中断任务 |
@@ -123,4 +127,15 @@ pnpm build:web
 
 以上 OpenAlex 排名是该次请求的观察结果，服务数据和排名可能变化。OpenAlex 检索参数和默认相关性排序见[官方搜索文档](https://help.openalex.org/api/searching/)。
 
-验收使用独立目录，未向默认 `data/` 写入测试文献；验收服务已停止，测试数据和截图保留在 `.cache/acceptance-retrieval-20261104/` 和 `.cache/acceptance-workspace-settings-20261104/`。未验收开发模式热更新；向量检索、模型调用、模型重排、OCR、综述和修订尚未实现或验收。
+验收使用独立目录，未向默认 `data/` 写入测试文献；验收服务已停止，测试数据和截图保留在 `.cache/acceptance-retrieval-20261104/` 和 `.cache/acceptance-workspace-settings-20261104/`。未验收开发模式热更新；向量检索、模型重排、OCR 和完整综述修订尚未实现；真实模型服务尚未实测。
+
+
+### 科研问答闭环验收
+
+- `uv run --locked python -m unittest discover -s tests -v`：21 项通过，覆盖会话/报告原子保存、重试上下文边界、历史隔离、图分支、补检停止及证据核验。
+- `uv run --locked python scripts/verify_chat.py`：使用本地**模拟** OpenAI 兼容接口、临时 SQLite、实际 API 和 worker 验证 PDF 页码引用、无配置失败、重试、缺失成本证据及 Markdown/CSV 导出。不会调用云端模型。
+- `pnpm check:web`、`pnpm build:web`：通过。浏览器在隔离模拟环境中完成提问、回答、历史搜索命中及返回会话、刷新恢复；预览保存于 `.cache/chat-ui/`。
+
+真实云端模型由用户稍后配置，尚未验证服务兼容性、实际回答质量与调用耗时。当前证据范围和数值格式限制见 `src/literature/README.md`。验收未向默认数据目录写入测试文献或模型配置。
+
+本轮模拟验收服务已停止，未修改默认用户数据；截图中的回答来自测试接口，并非真实云端模型输出。

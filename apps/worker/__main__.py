@@ -13,8 +13,13 @@ def run_once():
     if task is None:
         return False
     try:
-        result = retrieve(task["project_id"], task["query"], task["source"])
-        repository.finish_task(task["id"], result)
+        if task.get('kind') == 'chat':
+            from src.literature.workflow import run
+            content, evidence = run(task)
+            repository.finish_chat_task(task['id'], content, evidence)
+        else:
+            result = retrieve(task["project_id"], task["query"], task["source"])
+            repository.finish_task(task["id"], result)
     except Exception as exc:
         logging.error("Task %s failed: %s", task["id"], exc)
         repository.fail_task(task["id"], str(exc))

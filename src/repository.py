@@ -49,6 +49,8 @@ def delete_project(project_id):
             return 'missing'
         if _one(db, "SELECT id FROM tasks WHERE project_id=? AND status='running' LIMIT 1", (project_id,)):
             return 'running'
+        db.execute('DELETE FROM reports WHERE project_id=?', (project_id,))
+        db.execute('DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id=?)', (project_id,))
         db.execute('DELETE FROM tasks WHERE project_id=?', (project_id,))
         db.execute('DELETE FROM conversations WHERE project_id=?', (project_id,))
         db.execute('DELETE FROM project_papers WHERE project_id=?', (project_id,))
@@ -173,7 +175,11 @@ def retry_task(task_id):
     task = get_task(task_id)
     if task is None or task['status'] not in ('failed', 'interrupted'):
         return None
-    return get_task(create_task(task['project_id'], task['conversation_id'], task['query'], task['source']))
+
+    with connect_database() as db:
+        cur = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,origin_run_id) VALUES (?,?,?,?, 'pending','pending',?,?)", (task['project_id'],task['conversation_id'],task['query'],task['source'],task['kind'],task.get('origin_run_id') or task_id))
+        db.commit()
+        return get_task(cur.lastrowid)
 
 
 def claim_task():
@@ -203,3 +209,80 @@ def interrupt_running_tasks():
     with connect_database() as db:
         db.execute("UPDATE tasks SET status='interrupted',stage='interrupted',error='Worker 重启，任务已中断' WHERE status='running'")
         db.commit()
+
+
+def create_question(project_id, conversation_id, question, source):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
+            return None
+        if conversation_id is None:
+            conversation_id = db.execute('INSERT INTO conversations(project_id,title) VALUES (?,?)', (project_id,question[:80])).lastrowid
+        elif not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id=?', (conversation_id,project_id)):
+            return None
+        run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind) VALUES (?,?,?,?, 'pending','pending','chat')", (project_id,conversation_id,question,source)).lastrowid
+        db.execute("INSERT INTO messages(conversation_id,role,content,run_id) VALUES (?,'user',?,?)", (conversation_id,question,run_id))
+        db.commit()
+        return {'run_id':run_id,'conversation_id':conversation_id}
+
+
+def list_messages(conversation_id):
+    with connect_database() as db:
+        if not _one(db, 'SELECT id FROM conversations WHERE id=?', (conversation_id,)):
+            return None
+        rows = _all(db, 'SELECT * FROM messages WHERE conversation_id=? ORDER BY id', (conversation_id,))
+        for row in rows:
+            row['metadata'] = json.loads(row['metadata']) if row['metadata'] else None
+        return rows
+
+
+def update_stage(task_id, stage):
+    with connect_database() as db:
+        db.execute("UPDATE tasks SET stage=? WHERE id=? AND status='running'", (stage,task_id)); db.commit()
+
+
+def task_history(task_id):
+    with connect_database() as db:
+        task = _one(db, 'SELECT * FROM tasks WHERE id=?', (task_id,))
+        rows = _all(db, 'SELECT role,content FROM messages WHERE conversation_id=? AND run_id<=? ORDER BY id DESC LIMIT 40', (task['conversation_id'], task.get('origin_run_id') or task_id))
+        return list(reversed(rows))
+
+
+def finish_chat_task(task_id, content, evidence):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        task = _one(db, "SELECT * FROM tasks WHERE id=? AND kind='chat' AND status='running'", (task_id,))
+        if not task:
+            raise ValueError('任务不在运行中')
+        encoded = json.dumps(evidence, ensure_ascii=False)
+        report_id = db.execute('INSERT INTO reports(project_id,conversation_id,run_id,content,evidence) VALUES (?,?,?,?,?)', (task['project_id'],task['conversation_id'],task_id,content,encoded)).lastrowid
+        metadata = {'report_id':report_id,'evidence':evidence}
+        db.execute("INSERT INTO messages(conversation_id,role,content,run_id,metadata) VALUES (?,'assistant',?,?,?)", (task['conversation_id'],content,task_id,json.dumps(metadata,ensure_ascii=False)))
+        result = {'report_id':report_id,'content':content,'evidence':evidence}
+        db.execute("UPDATE tasks SET status='succeeded',stage='completed',result=?,error=NULL WHERE id=?", (json.dumps(result,ensure_ascii=False),task_id))
+        db.commit()
+        return result
+
+
+def get_report(report_id):
+    with connect_database() as db:
+        report = _one(db, 'SELECT * FROM reports WHERE id=?', (report_id,))
+        if report: report['evidence'] = json.loads(report['evidence'])
+        return report
+
+
+def project_evidence(project_id):
+    with connect_database() as db:
+        papers = _all(db, 'SELECT p.* FROM papers p JOIN project_papers pp ON pp.paper_id=p.id WHERE pp.project_id=?', (project_id,))
+        for p in papers:
+            p['authors'] = json.loads(p['authors'])
+            p['versions'] = _all(db, 'SELECT id, paper_id, path, filename, text_status FROM paper_versions WHERE paper_id=? ORDER BY id DESC', (p['id'],))
+        return papers
+
+
+def search_project(project_id, query):
+    pattern = '%' + query.replace('\\','\\\\').replace('%','\\%').replace('_','\\_') + '%'
+    with connect_database() as db:
+        conversations = _all(db, "SELECT DISTINCT c.* FROM conversations c LEFT JOIN messages m ON m.conversation_id=c.id WHERE c.project_id=? AND (c.title LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\') ORDER BY c.id DESC", (project_id,pattern,pattern))
+        papers = _all(db, "SELECT DISTINCT p.* FROM papers p JOIN project_papers pp ON pp.paper_id=p.id LEFT JOIN paper_fts f ON f.rowid=p.id WHERE pp.project_id=? AND (p.title LIKE ? ESCAPE '\\' OR p.abstract LIKE ? ESCAPE '\\' OR f.full_text LIKE ? ESCAPE '\\') ORDER BY p.id DESC LIMIT 30", (project_id,pattern,pattern,pattern))
+        return {'conversations':conversations[:30],'papers':[_paper(db,p) for p in papers]}

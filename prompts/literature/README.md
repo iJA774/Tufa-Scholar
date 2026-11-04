@@ -1,3 +1,3 @@
 # 科研提示词
 
-实现对应节点时创建 `plan_review.md`、`rewrite_query.md`、`screen_paper.md`、`extract_evidence.md`、`assess_gap.md`、`synthesize.md`、`verify_claim.md` 与 `revise.md`。提示词正文只存放在 Markdown 文件中。
+当前提示词覆盖问题规划、一般问题回答、补检判断、综合与结论核验；模型输入中的问题、历史和检索材料均作为数据处理。提示词正文只存放在 Markdown 文件中。

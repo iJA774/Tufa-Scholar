@@ -1,5 +1,7 @@
 """Local API for projects, imported papers, and retrieval tasks."""
 from contextlib import asynccontextmanager
+import csv
+import io
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -67,6 +69,12 @@ class PaperInput(BaseModel):
 class RunInput(BaseModel):
     query: str = Field(min_length=1)
     source: Literal['all', 'local', 'openalex'] = 'all'
+    conversation_id: int | None = None
+
+
+class QuestionInput(BaseModel):
+    question: str = Field(min_length=1)
+    source: Literal['all', 'local', 'openalex'] = 'local'
     conversation_id: int | None = None
 
 
@@ -178,6 +186,61 @@ def get_file(version_id: int):
     if not version or not Path(version['path']).is_file():
         raise HTTPException(404, '原文不存在')
     return FileResponse(version['path'], media_type='application/pdf', filename=version['filename'], content_disposition_type='inline')
+
+
+@app.post('/projects/{project_id}/questions', status_code=201)
+def ask_question(project_id: int, body: QuestionInput):
+    if not body.question.strip():
+        raise HTTPException(422, '问题不能为空')
+    result = repo.create_question(project_id, body.conversation_id, body.question.strip(), body.source)
+    if result is None:
+        raise HTTPException(404, '项目或对话不存在')
+    return result
+
+
+@app.get('/conversations/{conversation_id}/messages')
+def conversation_messages(conversation_id: int):
+    result = repo.list_messages(conversation_id)
+    if result is None:
+        raise HTTPException(404, '对话不存在')
+    return result
+
+
+@app.get('/projects/{project_id}/search')
+def search_history(project_id: int, q: str):
+    require_project(project_id)
+    if not q.strip():
+        raise HTTPException(422, '查询不能为空')
+    return repo.search_project(project_id, q.strip())
+
+
+@app.get('/reports/{report_id}')
+def report_details(report_id: int):
+    report = repo.get_report(report_id)
+    if report is None:
+        raise HTTPException(404, '报告不存在')
+    return report
+
+
+@app.get('/reports/{report_id}/markdown')
+def report_markdown(report_id: int):
+    report = repo.get_report(report_id)
+    if report is None:
+        raise HTTPException(404, '报告不存在')
+    return Response(report['content'], media_type='text/markdown; charset=utf-8', headers={'Content-Disposition':f'attachment; filename="report-{report_id}.md"'})
+
+
+@app.get('/reports/{report_id}/evidence.csv')
+def report_csv(report_id: int):
+    report = repo.get_report(report_id)
+    if report is None:
+        raise HTTPException(404, '报告不存在')
+    output = io.StringIO(newline='')
+    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url']
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction='ignore')
+    writer.writeheader()
+    writer.writerows(report['evidence'])
+    return Response('﻿' + output.getvalue(), media_type='text/csv; charset=utf-8', headers={'Content-Disposition':f'attachment; filename="evidence-{report_id}.csv"'})
 
 
 @app.get('/projects/{project_id}/runs')
