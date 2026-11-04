@@ -33,7 +33,7 @@ OpenAlex 支持无密钥试用，可在 worker 进程环境中设置 `OPENALEX_A
 .\start.ps1
 ```
 
-脚本启动 API、单 worker 和前端，前台窗口按 `Ctrl+C` 停止；各服务的标准输出和错误日志保存在启动时显示的 `.cache/start/` 子目录。启动前需完成上面的依赖安装，且 3000、8000 端口必须空闲；脚本不会停止已有服务。脚本固定将前端 `TUFA_API_URL` 设为本次启动的 `http://127.0.0.1:8000`，并向所有子进程继承当前的 `TUFA_DATA_DIR` 和 `OPENALEX_API_KEY`。若执行策略阻止脚本，可单次使用 `powershell -ExecutionPolicy Bypass -File .\start.ps1`，无需修改持久策略。
+脚本启动 API、单 worker 和前端，前台窗口按 `Ctrl+C` 停止；Windows Job Object 管理本次启动的进程树，停止时只清理这些进程；各服务的标准输出和错误日志保存在启动时显示的 `.cache/start/` 子目录。启动前需完成上面的依赖安装，且 3000、8000 端口必须空闲；脚本不会停止已有服务。脚本固定将前端 `TUFA_API_URL` 设为本次启动的 `http://127.0.0.1:8000`，并向所有子进程继承当前的 `TUFA_DATA_DIR` 和 `OPENALEX_API_KEY`。若执行策略阻止脚本，可单次使用 `powershell -ExecutionPolicy Bypass -File .\start.ps1`，无需修改持久策略。
 
 也可以分别在三个 PowerShell 终端进入项目根目录手动启动，并为 API 和 worker 设置同样的数据目录：
 
@@ -87,6 +87,7 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 
 ```powershell
 uv run --locked python -m unittest discover -s tests -v
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_launcher_job.ps1
 uv run --locked python -m apps.worker --check
 pnpm check:web
 pnpm build:web
@@ -103,6 +104,8 @@ pnpm build:web
 | `pnpm check:web`、`pnpm build:web` | 前端类型检查和生产构建通过 |
 | API 与单 worker 共用 `.cache/acceptance-retrieval-20261104`，设置 `TUFA_API_URL=http://127.0.0.1:8000` 后执行 `uv run --locked python scripts/verify_retrieval.py` | 实际 HTTP 与 worker 验收通过：PDF 正文词检索、无可提取文本标记、重复导入、新版本、跨项目和会话、404/422；`/health` 返回 WAL、外键和 FTS5 正常 |
 | 从 `E:\` 使用绝对路径运行 `start.ps1`，数据目录设为 `.cache/acceptance-launcher-20261104` | 首页、健康检查与 `/api/projects` 均 HTTP 200，`scripts/verify_retrieval.py` 通过；重复启动因端口占用退出 1 且原服务保持运行；Ctrl+C 后 3000、8000 端口释放，验收服务已停止 |
+| PowerShell 7.6.9 实际运行 `start.ps1`，数据目录 `.cache/acceptance-shutdown-ps51` | API、前端和代理均 HTTP 200，`scripts/verify_retrieval.py` 通过；连续两次 Ctrl+C 后端口与 worker 无残留；运行时再次启动被拒绝且原服务保持运行 |
+| Windows PowerShell 5.1.26100.9711 交互会话运行 `start.ps1`，数据目录 `.cache/acceptance-shutdown-real-ps51` | 同一宿主连续两次 Ctrl+C 返回提示符后立即重启成功；重启后 `scripts/verify_retrieval.py` 通过，主动结束本次 worker helper 后启动器检测失败并清理所有服务，返回同一提示符 |
 | 前端生产服务 `next start` 监听 3107 端口 | 首页和 `/api/projects` 均 HTTP 200；浏览器提交 OpenAlex 检索，原论文排第 1，保存后刷新仍能看到文献及任务 |
 | `uv run python -c "from src.integrations.openalex import search_works; print([(x['title'], x['doi']) for x in search_works('Attention Is All You Need', 5)])"` | 真实 OpenAlex 无密钥请求成功；《Attention Is All You Need》（DOI `10.48550/arxiv.1706.03762`）第 1，第 2 为《Attention Is All You Need In Speech Separation》，第 3 为《Channel Attention Is All You Need for Video Frame Interpolation》 |
 
