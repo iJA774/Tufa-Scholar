@@ -32,6 +32,7 @@ def initialize_storage() -> dict:
         (directory / child).mkdir(parents=True, exist_ok=True)
     with connect_database() as connection:
         connection.executescript("""
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), title TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS papers (id INTEGER PRIMARY KEY, title TEXT NOT NULL, doi TEXT UNIQUE, arxiv_id TEXT UNIQUE, abstract TEXT, year INTEGER, authors TEXT NOT NULL DEFAULT '[]', source TEXT, open_access INTEGER, pdf_url TEXT, original_url TEXT);

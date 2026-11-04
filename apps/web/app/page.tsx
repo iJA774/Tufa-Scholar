@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
 type Project = { id: number; name: string };
 type Conversation = { id: number; title: string };
@@ -14,6 +15,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     try { const body = await response.json(); message = typeof body.detail === "string" ? body.detail : message; } catch { /* use status */ }
     throw new Error(message);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -22,6 +24,9 @@ const statusText: Record<string, string> = { queued: "等待处理", pending: "�
 const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "检索完成", done: "检索完成" };
 
 export default function Home() {
+  const [menuId, setMenuId] = useState<number>();
+  const [deleteTarget, setDeleteTarget] = useState<Project>();
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number>();
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -41,6 +46,14 @@ export default function Home() {
   const [uploadDoi, setUploadDoi] = useState("");
   const [uploadArxiv, setUploadArxiv] = useState("");
 
+  useEffect(() => {
+    if (menuId === undefined) return;
+    const outside = (event: PointerEvent) => { if (!(event.target as Element).closest(".project-menu-wrap")) setMenuId(undefined); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMenuId(undefined); };
+    document.addEventListener("pointerdown", outside); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
+  }, [menuId]);
+  useEffect(() => { if (deleteTarget) dialogRef.current?.showModal(); }, [deleteTarget]);
   const refreshProjects = useCallback(async () => { const data = await api<Project[]>("/projects"); setProjects(data); return data; }, []);
   const refreshPapers = useCallback(async (id: number) => setPapers(await api<Paper[]>(`/projects/${id}/papers`)), []);
   useEffect(() => { refreshProjects().then(data => { if (data.length) setProjectId(data[0].id); }).catch(e => setError(messageOf(e))); }, [refreshProjects]);
@@ -58,6 +71,13 @@ export default function Home() {
     return () => { current = false; window.clearTimeout(timer); };
   }, [run]);
   const act = async (key: string, fn: () => Promise<void>) => { setBusy(key); setError(""); setNotice(""); try { await fn(); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
+  const deleteProject = () => { if (!deleteTarget) return; void act("delete", async () => {
+    await api(`/projects/${deleteTarget.id}`, { method: "DELETE" });
+    const remaining = projects.filter(p => p.id !== deleteTarget.id);
+    setProjects(remaining);
+    if (deleteTarget.id === projectId) { setRun(undefined); setRuns([]); setConversations([]); setConversationId(undefined); setPapers([]); setProjectId(remaining[0]?.id); }
+    dialogRef.current?.close(); setDeleteTarget(undefined); setNotice("研究空间已删除。");
+  }); };
   const createProject = (event: FormEvent) => { event.preventDefault(); if (!projectName.trim()) return; void act("project", async () => { const created = await api<Project>("/projects", json({ name: projectName.trim() })); await refreshProjects(); setProjectId(created.id); setProjectName(""); }); };
   const createConversation = (event: FormEvent) => { event.preventDefault(); if (!projectId || !conversationName.trim()) return; void act("conversation", async () => { const created = await api<Conversation>(`/projects/${projectId}/conversations`, json({ title: conversationName.trim() })); setConversations(await api<Conversation[]>(`/projects/${projectId}/conversations`)); setConversationId(created.id); setConversationName(""); }); };
   const search = (event: FormEvent) => { event.preventDefault(); if (!projectId || !query.trim()) return; void act("search", async () => { const submitted = await api<{ run_id: number }>(`/projects/${projectId}/runs`, json({ query: query.trim(), source, conversation_id: conversationId ?? null })); setRun(await api<Run>(`/runs/${submitted.run_id}`)); setRuns(await api<Run[]>(`/projects/${projectId}/runs`)); }); };
@@ -69,10 +89,11 @@ export default function Home() {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">✳</span><div><strong>TUFA</strong><small>SCHOLAR</small></div></div>
       <div className="side-heading"><span>研究空间</span><span>{String(projects.length).padStart(2, "0")}</span></div>
-      <nav aria-label="项目" className="project-list">{projects.map(p => <button key={p.id} className={p.id === projectId ? "project active" : "project"} disabled={!!busy} onClick={() => setProjectId(p.id)}><span className="project-icon">▤</span><span>{p.name}</span></button>)}{!projects.length && <p className="side-empty">创建一个项目，开始整理研究。</p>}</nav>
+      <nav aria-label="项目" className="project-list">{projects.map(p => <div className={p.id === projectId ? "project-row active" : "project-row"} key={p.id}><button className="project" disabled={!!busy} onClick={() => setProjectId(p.id)}><span className="project-icon">▤</span><span>{p.name}</span></button><div className="project-menu-wrap"><button className="project-menu-trigger" type="button" disabled={!!busy} aria-label={`${p.name}的操作`} aria-expanded={menuId === p.id} aria-haspopup="menu" onClick={() => setMenuId(menuId === p.id ? undefined : p.id)}>⋯</button>{menuId === p.id && <div className="project-menu" role="menu"><button role="menuitem" onClick={() => { setMenuId(undefined); setError(""); setDeleteTarget(p); }}>删除空间</button></div>}</div></div>)}{!projects.length && <p className="side-empty">创建一个项目，开始整理研究。</p>}</nav>
       <form onSubmit={createProject} className="side-form"><label htmlFor="project-name">新建项目</label><div className="inline-input"><input id="project-name" value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="输入项目名称" /><button aria-label="创建项目" disabled={!projectName.trim() || !!busy}>＋</button></div></form>
-      <div className="side-foot"><span className="status-dot" /> 本地研究空间</div>
+      <div className="side-bottom"><Link className="settings-link" href="/settings">⚙ <span>设置</span></Link><div className="side-foot"><span className="status-dot" /> 本地研究空间</div></div>
     </aside>
+    <dialog ref={dialogRef} className="confirm-dialog" aria-labelledby="delete-title" aria-describedby="delete-description" onClose={() => setDeleteTarget(undefined)} onCancel={e => { if (busy) e.preventDefault(); }}><h2 id="delete-title">删除“{deleteTarget?.name}”？</h2><p id="delete-description">删除空间、会话及检索记录，原文保留，其他空间不受影响。</p>{error && <p className="run-error" role="alert">{error}</p>}<div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={() => dialogRef.current?.close()}>取消</button><button className="button danger" disabled={!!busy} onClick={deleteProject}>{busy === "delete" ? "删除中…" : "确认删除"}</button></div></dialog>
     <main className="main">
       <header className="topbar"><span>研究工作台 <span className="slash">/</span> {currentProject?.name || "开始使用"}</span><span className="top-label">LITERATURE WORKSPACE</span></header>
       {error && <div className="alert error" role="alert">{error}<button onClick={() => setError("")} aria-label="关闭提示">×</button></div>}

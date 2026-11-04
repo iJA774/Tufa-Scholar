@@ -50,4 +50,33 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(client.get('/projects/999/papers').status_code,404)
         self.assertEqual(client.post(f'/projects/{project}/runs',json={'query':'x','source':'bad'}).status_code,422)
 
+    def test_delete_project_preserves_shared_papers_and_rejects_running(self):
+        c = self.client
+        a = c.post('/projects', json={'name':'delete'}).json()['id']
+        b = c.post('/projects', json={'name':'keep'}).json()['id']
+        conversation = c.post(f'/projects/{a}/conversations', json={'title':'chat'}).json()['id']
+        writer = PdfWriter(); writer.add_blank_page(width=200,height=200)
+        stream = io.BytesIO(); writer.write(stream)
+        def upload(project):
+            return c.post(f'/projects/{project}/papers/import', data={'title':'Shared'}, files={'file':('shared.pdf', stream.getvalue(), 'application/pdf')}).json()
+        paper = upload(a)
+        self.assertEqual(upload(b)['id'], paper['id'])
+        pending = c.post(f'/projects/{a}/runs', json={'query':'test','source':'local','conversation_id':conversation}).json()['run_id']
+        self.assertEqual(repo.claim_task()['id'], pending)
+        self.assertEqual(c.delete(f'/projects/{a}').status_code, 409)
+        self.assertEqual(len(c.get(f'/projects/{a}/papers').json()), 1)
+        repo.fail_task(pending, 'failed')
+        queued = c.post(f'/projects/{a}/runs', json={'query':'later','source':'local'}).json()['run_id']
+        response = c.delete(f'/projects/{a}')
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b'')
+        self.assertEqual(c.delete(f'/projects/{a}').status_code, 404)
+        self.assertEqual(c.get(f'/runs/{queued}').status_code, 404)
+        self.assertEqual(c.get(f'/runs/{pending}').status_code, 404)
+        self.assertEqual(c.get(f'/projects/{b}/papers').json()[0]['id'], paper['id'])
+        self.assertEqual(c.get(paper['versions'][0]['file_url']).content, stream.getvalue())
+        from src.storage import connect_database
+        with connect_database() as db:
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+
 if __name__ == '__main__': unittest.main()

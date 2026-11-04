@@ -2,14 +2,26 @@ import io
 import json
 import os
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from src.integrations.openalex import search_works
 from src.literature.retrieval import retrieve
+from src.storage import initialize_storage
 
 
 class RetrievalTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.environ = patch.dict(os.environ, {'TUFA_DATA_DIR': self.tmp.name}, clear=True)
+        self.environ.start()
+        initialize_storage()
+
+    def tearDown(self):
+        self.environ.stop()
+        self.tmp.cleanup()
+
     def test_openalex_response_and_mapping(self):
         fixture = Path(__file__).parent / 'fixtures' / 'openalex_works.json'
         with patch('src.integrations.openalex.urlopen', return_value=io.BytesIO(fixture.read_bytes())) as call:

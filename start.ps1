@@ -1,4 +1,6 @@
-# Start the local API, one worker, and web development server in this window.
+param([switch]$Dev)
+
+# Start the local API, one worker, and web server in this window.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $children = @()
@@ -25,11 +27,12 @@ try {
     $env:TUFA_LAUNCH_LOG_DIR = $logDir
     $job = [TufaLauncherJob]::Create()
     Write-Host "Logs: $logDir"
-    Write-Host 'Starting Tufa Scholar. Press Ctrl+C to stop all three processes.'
+    $mode = if ($Dev) { 'development' } else { 'production' }
+    Write-Host "Starting Tufa Scholar ($mode). Press Ctrl+C to stop."
 
     # Helpers wait for input until assigned; their service descendants inherit the job.
     $helper = Join-Path $root 'scripts/launcher-child.ps1'
-    foreach ($role in @('api', 'worker', 'web')) {
+    function Start-OwnedChild([string]$role) {
         $info = New-Object System.Diagnostics.ProcessStartInfo
         $info.FileName = Join-Path $PSHOME 'powershell.exe'
         if (-not (Test-Path -LiteralPath $info.FileName)) {
@@ -47,9 +50,27 @@ try {
             $child.Kill()
             throw
         }
-        $children += $child
         $child.StandardInput.WriteLine('start')
         $child.StandardInput.Close()
+        return $child
+    }
+
+    if (-not $Dev) {
+        Write-Host 'Building the web application (see build logs for details)...'
+        $build = Start-OwnedChild 'build'
+        $children += $build
+        while (-not $build.HasExited) {
+            Start-Sleep -Seconds 1
+            $build.Refresh()
+        }
+        if ($build.ExitCode -ne 0) {
+            throw "Web build failed (exit code $($build.ExitCode)). See logs in $logDir."
+        }
+        $children = @()
+    }
+    $webRole = if ($Dev) { 'web-dev' } else { 'web' }
+    foreach ($role in @('api', 'worker', $webRole)) {
+        $children += Start-OwnedChild $role
     }
     Write-Host 'Web: http://127.0.0.1:3000  API: http://127.0.0.1:8000'
     while ($true) {
