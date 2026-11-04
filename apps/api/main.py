@@ -5,12 +5,15 @@ from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from src import repository as repo
+from src import settings
 from src.storage import data_directory, initialize_storage
 
 
@@ -21,6 +24,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title='Tufa Scholar', lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    # Pydantic error details can include input values, including submitted secrets.
+    if request.url.path == '/settings':
+        return JSONResponse(status_code=422, content={'detail': '设置参数无效'})
+    return await request_validation_exception_handler(request, exc)
+
+
+class SettingsInput(BaseModel):
+    openalex_api_key: str | None = Field(default=None, repr=False)
+    clear_openalex_api_key: bool = False
+    openai_api_key: str | None = Field(default=None, repr=False)
+    clear_openai_api_key: bool = False
+    openai_base_url: str | None = None
+    openai_model: str | None = None
 
 
 class ProjectInput(BaseModel):
@@ -60,6 +80,19 @@ def health():
     return {'status': 'ok', 'database': initialize_storage()}
 
 
+@app.get('/settings')
+def get_settings():
+    return settings.public_settings()
+
+
+@app.put('/settings')
+def put_settings(body: SettingsInput):
+    try:
+        return settings.update(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.get('/projects')
 def projects():
     return repo.list_projects()
@@ -68,6 +101,16 @@ def projects():
 @app.post('/projects', status_code=201)
 def create_project(body: ProjectInput):
     return repo.create_project(body.name)
+
+
+@app.delete('/projects/{project_id}', status_code=204)
+def delete_project(project_id: int):
+    result = repo.delete_project(project_id)
+    if result == 'missing':
+        raise HTTPException(404, '项目不存在')
+    if result == 'running':
+        raise HTTPException(409, '项目有正在运行的任务，请等待完成后删除')
+    return Response(status_code=204)
 
 
 @app.get('/projects/{project_id}/conversations')

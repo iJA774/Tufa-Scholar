@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][ValidateSet('api', 'worker', 'web')][string]$Role)
+param([Parameter(Mandatory = $true)][ValidateSet('api', 'worker', 'build', 'web', 'web-dev')][string]$Role)
 $ErrorActionPreference = 'Stop'
 # If the launcher exits before assigning this helper to its job, EOF prevents startup.
 if ([Console]::ReadLine() -ne 'start') { exit 1 }
@@ -14,7 +14,8 @@ try {
     } else {
         $pnpm = (Get-Command pnpm.cmd -CommandType Application -ErrorAction Stop).Source
         $exe = $env:ComSpec
-        $arguments = @('/d', '/c', "`"$pnpm`" dev:web")
+        $command = switch ($Role) { 'build' { 'build:web' } 'web' { 'start:web' } 'web-dev' { 'dev:web' } }
+        $arguments = @('/d', '/c', "`"$pnpm`" $command")
     }
     $process = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir "$Role.out.log") -RedirectStandardError (Join-Path $logDir "$Role.err.log") -PassThru -Wait
     exit $process.ExitCode

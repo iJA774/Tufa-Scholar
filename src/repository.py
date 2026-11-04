@@ -42,6 +42,21 @@ def create_project(name):
         return {'id': cur.lastrowid, 'name': name}
 
 
+def delete_project(project_id):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
+            return 'missing'
+        if _one(db, "SELECT id FROM tasks WHERE project_id=? AND status='running' LIMIT 1", (project_id,)):
+            return 'running'
+        db.execute('DELETE FROM tasks WHERE project_id=?', (project_id,))
+        db.execute('DELETE FROM conversations WHERE project_id=?', (project_id,))
+        db.execute('DELETE FROM project_papers WHERE project_id=?', (project_id,))
+        db.execute('DELETE FROM projects WHERE id=?', (project_id,))
+        db.commit()
+        return 'deleted'
+
+
 def project_exists(project_id):
     with connect_database() as db:
         return bool(_one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)))

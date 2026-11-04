@@ -1,10 +1,11 @@
 """OpenAlex works search; network operations run outside database transactions."""
 import json
-import os
 import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from src.settings import openalex_key
 
 
 def normalize_work(work):
@@ -33,7 +34,7 @@ def normalize_work(work):
 
 def search_works(query, limit=20):
     params = {"search": query, "per_page": limit}
-    key = os.environ.get("OPENALEX_API_KEY")
+    key = openalex_key()
     headers = {"Accept": "application/json", "User-Agent": "Tufa-Scholar/0.1"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
