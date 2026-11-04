@@ -1,0 +1,53 @@
+import io
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from fastapi.testclient import TestClient
+from pypdf import PdfWriter
+from apps.api.main import app
+from src import repository as repo
+
+class ApiTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.previous = os.environ.get('TUFA_DATA_DIR')
+        os.environ['TUFA_DATA_DIR'] = self.tmp.name
+        self.client = TestClient(app)
+        self.client.__enter__()
+
+    def tearDown(self):
+        self.client.__exit__(None, None, None)
+        if self.previous is None: os.environ.pop('TUFA_DATA_DIR', None)
+        else: os.environ['TUFA_DATA_DIR'] = self.previous
+        self.tmp.cleanup()
+
+    def test_import_search_and_task_history(self):
+        client = self.client
+        project = client.post('/projects', json={'name': 'test'}).json()['id']
+        conv = client.post(f'/projects/{project}/conversations', json={'title': 'chat'}).json()['id']
+        def pdf(width):
+            writer = PdfWriter(); writer.add_blank_page(width=width, height=200)
+            out = io.BytesIO(); writer.write(out); return out.getvalue()
+        def upload(width):
+            return client.post(f'/projects/{project}/papers/import', data={'title':'Quantum Paper','doi':'10.1000/ABC'}, files={'file':('a.pdf',pdf(width),'application/pdf')})
+        one = upload(200).json(); duplicate = upload(200).json(); two = upload(210).json()
+        self.assertTrue(duplicate['duplicate']); self.assertEqual(one['id'],two['id'])
+        self.assertEqual(one['imported_text_status'], 'no_extractable_text')
+        self.assertEqual(duplicate['imported_text_status'], 'no_extractable_text')
+        self.assertEqual(len(two['versions']),2)
+        self.assertEqual(two['versions'][0]['text_status'], 'no_extractable_text')
+        self.assertEqual(client.get(two['versions'][0]['file_url']).content,pdf(200))
+        self.assertEqual(repo.local_search(project,'Quantum')[0]['id'],one['id'])
+        run = client.post(f'/projects/{project}/runs', json={'query':'Quantum','source':'local','conversation_id':conv}).json()['run_id']
+        self.assertEqual(repo.claim_task()['id'],run)
+        repo.fail_task(run,'failure')
+        retried = client.post(f'/runs/{run}/retry').json()
+        self.assertNotEqual(retried['id'],run)
+        self.assertEqual(client.get(f'/runs/{run}').json()['status'],'failed')
+        history = client.get(f'/projects/{project}/runs', params={'conversation_id':conv}).json()
+        self.assertEqual([item['id'] for item in history], [retried['id'], run])
+        self.assertEqual(client.get('/projects/999/papers').status_code,404)
+        self.assertEqual(client.post(f'/projects/{project}/runs',json={'query':'x','source':'bad'}).status_code,422)
+
+if __name__ == '__main__': unittest.main()

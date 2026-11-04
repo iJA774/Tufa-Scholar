@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "id": "https://openalex.org/W123",
+      "title": "Attention Is All You Need",
+      "doi": "https://doi.org/10.48550/arXiv.1706.03762",
+      "publication_year": 2017,
+      "authorships": [{"author": {"display_name": "Ashish Vaswani"}}],
+      "abstract_inverted_index": {"Attention": [0], "models": [1]},
+      "primary_location": {"landing_page_url": "https://arxiv.org/abs/1706.03762", "source": {"display_name": "arXiv"}},
+      "best_oa_location": {"pdf_url": "https://arxiv.org/pdf/1706.03762"},
+      "open_access": {"is_oa": true}
+    }
+  ]
+}

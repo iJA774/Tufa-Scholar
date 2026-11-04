@@ -1,0 +1,11 @@
+{
+  "name": "tufa-scholar",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @tufa-scholar/web dev",
+    "build:web": "pnpm --filter @tufa-scholar/web build",
+    "start:web": "pnpm --filter @tufa-scholar/web start",
+    "check:web": "pnpm --filter @tufa-scholar/web typecheck"
+  }
+}
