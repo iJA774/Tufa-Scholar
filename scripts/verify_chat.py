@@ -9,9 +9,11 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 ROOT = Path(__file__).resolve().parents[1]
 
 class ModelFixture(BaseHTTPRequestHandler):
+    requests = []
     def log_message(self, *args): pass
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        ModelFixture.requests.append(req)
         prompt = req['messages'][0]['content']
         data = json.loads(req['messages'][1]['content'])
         if '检索规划' in prompt:
@@ -50,7 +52,7 @@ def main():
         env=os.environ.copy()
         for key in ('OPENAI_API_KEY','OPENAI_BASE_URL','OPENAI_MODEL','OPENALEX_API_KEY'): env.pop(key,None)
         env['TUFA_DATA_DIR']=directory
-        port=free_port(); base=f'http://127.0.0.1:{port}'
+        port=int(os.environ.get('TUFA_VERIFY_API_PORT','0')) or free_port(); base=f'http://127.0.0.1:{port}'
         with open(os.devnull,'wb') as sink:
             for args in ([sys.executable,'-m','uvicorn','apps.api.main:app','--host','127.0.0.1','--port',str(port)], [sys.executable,'-m','apps.worker']):
                 processes.append(subprocess.Popen(args,cwd=ROOT,env=env,stdout=sink,stderr=sink))
@@ -84,6 +86,23 @@ def main():
                 assert 'accuracy was 92%' in c.get(f'/reports/{report}/evidence.csv').text
                 assert len(call('GET',f"/conversations/{q['conversation_id']}/messages"))==2
                 assert call('GET',f'/projects/{p}/search',params={'q':'accuracy'})['papers']
+                outside=call('POST',f'/projects/{p}/papers',json={'title':'OUTSIDE_SECRET','abstract':'OUTSIDE_SECRET content'})
+                prior=call('POST',f'/projects/{p}/questions',json={'question':'OUTSIDE_SECRET','conversation_id':q['conversation_id'],'source':'local'})
+                assert wait(prior['run_id'])['status']=='succeeded'
+                collection=call('POST',f'/projects/{p}/collections',json={'name':'fixture collection'})['id']
+                path=f'/projects/{p}/collections/{collection}/papers'
+                call('POST',path,json={'paper_id':paper['id']})
+                ModelFixture.requests.clear()
+                selected=call('POST',f'/projects/{p}/questions',json={'question':'accuracy','source':'collection','collection_id':collection,'conversation_id':q['conversation_id']})
+                call('POST',path,json={'paper_id':outside['id']})
+                assert c.delete(path+'/'+str(paper['id'])).status_code==204
+                selected_task=wait(selected['run_id'])
+                assert selected_task['paper_ids']==[paper['id']], selected_task
+                assert selected_task['status']=='succeeded', selected_task
+                assert all(e['paper_id']==paper['id'] for e in selected_task['result']['evidence'])
+                assert selected_task['result']['evidence'], selected_task
+                assert 'OUTSIDE_SECRET' not in json.dumps(ModelFixture.requests,ensure_ascii=False)
+                print('Collection snapshot and model isolation checks passed', flush=True)
                 print('Simulated model: API, worker, evidence, retry and report checks passed', flush=True)
                 if '--serve' in sys.argv:
                     print(f'API: {base}  isolated data: {directory}', flush=True)

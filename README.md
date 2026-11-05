@@ -25,7 +25,7 @@ API 与 worker 必须使用同一个 `TUFA_DATA_DIR`；不设置时使用项目�
 $env:TUFA_DATA_DIR = '.cache/data-acceptance'
 ```
 
-OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时如果 OpenAlex 请求失败，整个任务会失败；可改用 `local` 独立搜索项目文献。
+OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时若 OpenAlex 请求失败，保留本地结果并提示外部检索不可用；单独选择 OpenAlex 时返回错误。
 
 推荐在项目根目录的 PowerShell 中一条命令启动全部服务：
 
@@ -58,9 +58,15 @@ pnpm dev:web
 
 worker 按顺序领取任务；重启时将遗留的运行中任务标记为中断，可在界面或 API 重新执行。`uv run --locked python -m apps.worker --once` 最多处理一个待处理任务并退出，`--check` 只检查存储并退出。不要同时运行多个 worker。
 
+## 日志
+
+API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `worker.log`，单文件达到 5 MiB 后轮转，最多保留 3 个备份；直接启动服务同样生效。日志记录请求路由、状态、耗时、任务阶段和服务调用状态，不记录密钥、请求正文或完整问题。启动器的标准输出日志仍保存在 `.cache/start/`。
+
 ## 使用与接口
 
 在首页创建项目与对话，输入研究问题并选择本地、OpenAlex 或全部来源。任务完成后可查看回答及证据，下载报告与证据表；右上角搜索项目内会话、消息和文献。也可以上传 PDF；重复字节的文件按内容摘要去重，DOI 或 arXiv ID 用于识别文献。项目内文献跨对话共享。
+
+文献搜索可查询本地项目和 OpenAlex，并将结果保存到项目。可创建收藏夹、管理成员，在提问时选择收藏夹：任务提交时固定文献列表，检索和引用仅限该列表与当前项目的交集，不使用其他对话历史或外部检索；空收藏夹直接报告证据不足。
 
 空间右侧菜单可删除空间；有执行中的任务时需等任务结束。删除空间会移除其对话、任务与文献关联，保留全局文献和原文文件以及其他空间的关联。
 
@@ -127,6 +133,8 @@ pnpm build:web
 
 以上 OpenAlex 排名是该次请求的观察结果，服务数据和排名可能变化。OpenAlex 检索参数和默认相关性排序见[官方搜索文档](https://help.openalex.org/api/searching/)。
 
+本次改动的真实 `attention` 检索在默认配置下成功返回结果；独立空配置、无密钥测试中，原 urllib 请求发生 TLS 超时或异常 EOF，同一端点的 httpx 请求返回 3 篇结果。现已使用项目已有的 httpx；外部网络可用性仍可能波动。
+
 验收使用独立目录，未向默认 `data/` 写入测试文献；验收服务已停止，测试数据和截图保留在 `.cache/acceptance-retrieval-20261104/` 和 `.cache/acceptance-workspace-settings-20261104/`。未验收开发模式热更新；向量检索、模型重排、OCR 和完整综述修订尚未实现；真实模型服务尚未实测。
 
 
@@ -139,3 +147,14 @@ pnpm build:web
 真实云端模型由用户稍后配置，尚未验证服务兼容性、实际回答质量与调用耗时。当前证据范围和数值格式限制见 `src/literature/README.md`。验收未向默认数据目录写入测试文献或模型配置。
 
 本轮模拟验收服务已停止，未修改默认用户数据；截图中的回答来自测试接口，并非真实云端模型输出。
+
+
+### 文献搜索、收藏夹与日志验收
+
+- `uv run --locked python -m unittest discover -s tests -v`：31 项通过；包含收藏夹项目隔离、提问快照、重试、模型输入排除其他论文、日志脱敏和轮转。
+- `uv run --locked python scripts/verify_chat.py --serve`：在独立数据库、模拟模型和真实 API/worker 中验证收藏夹成员变更不改变已提交问题的论文范围；真实云端模型仍未实测。
+- `pnpm check:web`、`pnpm build:web`：通过。浏览器已验证自定义收藏夹创建，搜索结果和本地论文加入后变为减号、再次点击移除，以及收藏夹列表移除、空夹禁用提问和限定收藏夹问答。截图位于 `.cache/collections-ui/collections.jpg`。
+- 修改后的 OpenAlex 浏览器入口实测匿名请求返回 HTTP 429，页面正确显示限流/外部检索未完成提示，不再误报没有结果。可在设置中配置 OpenAlex 密钥或稍后重试，外部服务可用性不由本地应用保证。
+- 真实 API/worker 的日志文件已核对，包含路由、任务阶段、模型调用耗时和状态；没有测试正文或密钥。默认路径是 `data/logs/api.log` 和 `data/logs/worker.log`，自定义数据目录下使用相同的 `logs/` 子目录。
+
+本轮验收服务已停止，未向用户默认数据库写入测试论文、收藏夹或模型配置。

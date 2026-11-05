@@ -1,11 +1,12 @@
 """OpenAlex works search; network operations run outside database transactions."""
-import json
 import re
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+import logging
+import time
+import httpx
 
 from src.settings import openalex_key
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_work(work):
@@ -38,13 +39,17 @@ def search_works(query, limit=20):
     headers = {"Accept": "application/json", "User-Agent": "Tufa-Scholar/0.1"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    request = Request("https://api.openalex.org/works?" + urlencode(params),
-                      headers=headers)
+    start = time.monotonic()
+    logger.info('openalex_search started')
     try:
-        with urlopen(request, timeout=20) as response:
-            data = json.load(response)
-    except HTTPError as exc:
-        raise RuntimeError(f"OpenAlex 请求失败 (HTTP {exc.code})；请检查网络、额度或 OPENALEX_API_KEY") from exc
-    except (URLError, TimeoutError, OSError, ValueError) as exc:
-        raise RuntimeError("OpenAlex 请求失败；请检查网络或稍后重试") from exc
-    return [normalize_work(work) for work in data["results"]]
+        response = httpx.get("https://api.openalex.org/works", params=params, headers=headers, timeout=20)
+        response.raise_for_status()
+        results = [normalize_work(work) for work in response.json()["results"]]
+        logger.info('openalex_search completed elapsed_ms=%d status=%d result_count=%d', int((time.monotonic() - start) * 1000), response.status_code, len(results))
+        return results
+    except httpx.HTTPStatusError as exc:
+        logger.warning('openalex_search failed elapsed_ms=%d status=%d error_type=%s', int((time.monotonic() - start) * 1000), exc.response.status_code, type(exc).__name__)
+        raise RuntimeError(f"OpenAlex 请求失败 (HTTP {exc.response.status_code})；请检查网络、额度或 OPENALEX_API_KEY") from None
+    except (httpx.RequestError, ValueError, KeyError, TypeError) as exc:
+        logger.warning('openalex_search failed elapsed_ms=%d error_type=%s', int((time.monotonic() - start) * 1000), type(exc).__name__)
+        raise RuntimeError("OpenAlex 请求失败；请检查网络或稍后重试") from None

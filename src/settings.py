@@ -76,6 +76,8 @@ def update(values):
             else:
                 db.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (name, value))
         db.commit()
+    from src.logging_setup import refresh_secrets
+    refresh_secrets()
     return public_settings()
 
 

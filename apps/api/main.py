@@ -2,6 +2,8 @@
 from contextlib import asynccontextmanager
 import csv
 import io
+import logging
+import time
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -17,15 +19,43 @@ from pypdf import PdfReader
 from src import repository as repo
 from src import settings
 from src.storage import data_directory, initialize_storage
+from src.logging_setup import configure_logging, close_logging, safe_stack
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize_storage()
-    yield
+    configure_logging('api')
+    try:
+        yield
+    finally:
+        close_logging()
 
 
 app = FastAPI(title='Tufa Scholar', lifespan=lifespan)
+
+
+@app.middleware('http')
+async def log_request(request: Request, call_next):
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        logging.getLogger('tufa.api').error('request_failed method=%s type=%s stack=%s', request.method, type(exc).__name__, safe_stack(exc))
+        response = JSONResponse(status_code=500, content={'detail': '服务内部错误'})
+    route = request.scope.get('route')
+    path = getattr(route, 'path_format', '<unmatched>')
+    allowed_ids = ('project_id', 'run_id', 'conversation_id', 'collection_id', 'paper_id', 'version_id', 'report_id')
+    params = request.scope.get('path_params', {})
+    ids = {}
+    for name in allowed_ids:
+        value = params.get(name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            ids[name] = value
+        elif isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 18:
+            ids[name] = int(value)
+    logging.getLogger('tufa.api').info('request method=%s path=%s ids=%s status=%s elapsed_ms=%.1f', request.method, path, ids, response.status_code, (time.monotonic()-started)*1000)
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -74,8 +104,18 @@ class RunInput(BaseModel):
 
 class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
-    source: Literal['all', 'local', 'openalex'] = 'local'
+    source: Literal['all', 'local', 'openalex', 'collection'] = 'local'
     conversation_id: int | None = None
+    collection_id: int | None = None
+
+
+class CollectionInput(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class CollectionPaperInput(PaperInput):
+    title: str | None = None
+    paper_id: int | None = None
 
 
 def require_project(project_id):
@@ -192,7 +232,9 @@ def get_file(version_id: int):
 def ask_question(project_id: int, body: QuestionInput):
     if not body.question.strip():
         raise HTTPException(422, '问题不能为空')
-    result = repo.create_question(project_id, body.conversation_id, body.question.strip(), body.source)
+    if (body.source == 'collection') != (body.collection_id is not None):
+        raise HTTPException(422, '选择收藏夹来源时必须指定收藏夹')
+    result = repo.create_question(project_id, body.conversation_id, body.question.strip(), body.source, body.collection_id)
     if result is None:
         raise HTTPException(404, '项目或对话不存在')
     return result
@@ -241,6 +283,57 @@ def report_csv(report_id: int):
     writer.writeheader()
     writer.writerows(report['evidence'])
     return Response('﻿' + output.getvalue(), media_type='text/csv; charset=utf-8', headers={'Content-Disposition':f'attachment; filename="evidence-{report_id}.csv"'})
+
+
+@app.get('/projects/{project_id}/paper-search')
+def paper_search(project_id: int, q: str, source: Literal['all','local','openalex'] = 'all'):
+    require_project(project_id)
+    if not q.strip(): raise HTTPException(422, '查询不能为空')
+    from src.literature.retrieval import retrieve
+    try:
+        return retrieve(project_id, q.strip(), source)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get('/projects/{project_id}/collections')
+def get_collections(project_id: int):
+    require_project(project_id)
+    return repo.collections(project_id)
+
+
+@app.post('/projects/{project_id}/collections', status_code=201)
+def new_collection(project_id: int, body: CollectionInput):
+    require_project(project_id)
+    if not body.name.strip(): raise HTTPException(422, '名称不能为空')
+    return repo.create_collection(project_id,body.name.strip())
+
+
+@app.get('/projects/{project_id}/collections/{collection_id}/papers')
+def collection_list(project_id: int, collection_id: int):
+    result = repo.collection_papers(project_id,collection_id)
+    if result is None: raise HTTPException(404, '收藏夹不存在')
+    return result
+
+
+@app.post('/projects/{project_id}/collections/{collection_id}/papers', status_code=201)
+def collection_add(project_id: int, collection_id: int, body: CollectionPaperInput):
+    if body.paper_id is not None:
+        result = repo.collection_add_existing(project_id,collection_id,body.paper_id)
+    else:
+        if not body.title or not body.title.strip(): raise HTTPException(422, '文献标题不能为空')
+        try:
+            result = repo.save_paper(project_id,body.model_dump(exclude={'paper_id'}),collection_id=collection_id)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc)) from exc
+    if result is None: raise HTTPException(404, '收藏夹或项目文献不存在')
+    return result
+
+
+@app.delete('/projects/{project_id}/collections/{collection_id}/papers/{paper_id}', status_code=204)
+def collection_remove(project_id: int, collection_id: int, paper_id: int):
+    if not repo.collection_remove(project_id,collection_id,paper_id): raise HTTPException(404, '收藏记录不存在')
+    return Response(status_code=204)
 
 
 @app.get('/projects/{project_id}/runs')

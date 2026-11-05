@@ -1,7 +1,11 @@
 """Combine ranked local keyword results and OpenAlex search results."""
 import re
+import logging
+import time
 from src import repository
 from src.integrations.openalex import search_works
+
+logger = logging.getLogger(__name__)
 
 
 def _identifiers(item):
@@ -14,13 +18,21 @@ def _identifiers(item):
 
 
 def retrieve(project_id, query, source="all"):
+    start = time.monotonic()
+    logger.info('retrieval started project_id=%s source=%s', project_id, source)
     if source not in {"local", "openalex", "all"}:
         raise ValueError("不支持的检索来源")
     groups = []
+    warnings = []
     if source in {"local", "all"}:
         groups.append(("local", repository.local_search(project_id, query)))
     if source in {"openalex", "all"}:
-        groups.append(("openalex", search_works(query)))
+        try:
+            groups.append(("openalex", search_works(query)))
+        except RuntimeError as exc:
+            if source == 'openalex':
+                raise
+            warnings.append(str(exc))
     combined = []
     for name, items in groups:
         for rank, item in enumerate(items, 1):
@@ -45,4 +57,5 @@ def retrieve(project_id, query, source="all"):
         paper["retrieval_sources"] = entry["sources"]
         paper["rank"] = rank
         results.append(paper)
-    return {"query": query, "source": source, "method": "keyword search; rank fusion when both sources are used", "results": results}
+    logger.info('retrieval completed project_id=%s source=%s elapsed_ms=%d result_count=%d warning_count=%d', project_id, source, int((time.monotonic() - start) * 1000), len(results), len(warnings))
+    return {"query": query, "source": source, "method": "keyword search; rank fusion when both sources are used", "results": results, "warnings": warnings}

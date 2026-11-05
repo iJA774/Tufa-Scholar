@@ -20,8 +20,10 @@ class ModelTests(unittest.TestCase):
         request = httpx.Request('POST', 'https://example.invalid')
         response = httpx.Response(401, request=request, text='secret-key')
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': 'secret-key'}
-        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response):
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response), self.assertLogs('src.integrations.model', level='INFO') as logs:
             with self.assertRaises(RuntimeError) as error:
                 structured('literature/direct', {}, Output)
         self.assertNotIn('secret-key', str(error.exception))
+        self.assertNotIn('secret-key', ' '.join(logs.output))
+        self.assertIn('elapsed_ms=', ' '.join(logs.output))
         self.assertIn('401', str(error.exception))

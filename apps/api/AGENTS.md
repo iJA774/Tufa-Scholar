@@ -3,3 +3,7 @@
 API 使用根目录 uv 环境，与单 worker 共用 `TUFA_DATA_DIR` 和 SQLite。导入 PDF 的解析在数据库事务外进行；无可提取文本时返回 `no_extractable_text`，不执行 OCR。文件以内容摘要去重，同一 DOI 或 arXiv 文献的新文件保留独立版本。项目内文献由各对话共享；检索候选仅在用户选择保存后进入项目。任务失败或中断后重试创建新任务并保留原记录。
 
 设置保存在 `TUFA_DATA_DIR` 的 SQLite；界面提交的 OpenAlex 和 OpenAI 兼容模型密钥为用户明确要求的本地配置例外。`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先；接口只返回密钥是否配置及来源，不返回密钥。OpenAlex 每次请求读取设置；模型配置用于 LangGraph 科研问答；真实模型服务尚未实测。删除项目的短事务禁止删除运行中任务所属项目，保留共享文献和原文。
+
+文献检索 `GET /projects/{id}/paper-search` 按来源查询本地与 OpenAlex；同时搜索时外部失败保留本地结果并返回 warnings。收藏夹按项目隔离，加入外部文献时同时保存项目关联；收藏夹问答在提交时固定论文 ID 快照，重试保留该范围，报告证据也检查是否属于快照。
+
+API 日志写入数据目录 logs/api.log；仅记录路由模板、状态与耗时，不记录查询字符串、请求正文或异常消息。
