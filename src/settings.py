@@ -47,8 +47,7 @@ def public_settings():
                       'key_configured': bool(key), 'key_source': key_source}}
 
 
-def update(values):
-    url = values.get('openai_base_url')
+def validate_base_url(url):
     if url is not None and url.strip():
         try:
             parsed = urlsplit(url.strip())
@@ -59,7 +58,23 @@ def update(values):
             valid = False
         if not valid:
             raise ValueError('模型地址必须是有效的 HTTP 或 HTTPS URL，且不含凭据、查询参数或片段')
+
+
+def origin(url):
+    parsed = urlsplit(url)
+    return (parsed.scheme.lower(), parsed.hostname.lower(), parsed.port or (443 if parsed.scheme.lower() == 'https' else 80))
+
+
+def update(values):
+    url = values.get('openai_base_url')
+    validate_base_url(url)
+    current_url = model_config()['base_url']
+    changed_origin = bool(not os.environ.get('OPENAI_BASE_URL') and url and url.strip() and current_url and origin(url.strip()) != origin(current_url))
+    if changed_origin and os.environ.get('OPENAI_API_KEY') and not os.environ.get('OPENAI_BASE_URL'):
+        raise ValueError('更换服务地址前，请先更新环境变量中的模型密钥')
     with connect_database() as db:
+        if changed_origin and not (values.get('openai_api_key') or '').strip():
+            db.execute("DELETE FROM settings WHERE key='openai_api_key'")
         for name in ENV:
             value = values.get(name)
             if name in ('openalex_api_key', 'openai_api_key'):

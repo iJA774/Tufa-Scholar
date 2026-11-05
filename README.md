@@ -25,7 +25,7 @@ API 与 worker 必须使用同一个 `TUFA_DATA_DIR`；不设置时使用项目�
 $env:TUFA_DATA_DIR = '.cache/data-acceptance'
 ```
 
-OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时若 OpenAlex 请求失败，保留本地结果并提示外部检索不可用；单独选择 OpenAlex 时返回错误。
+OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。模型地址或密钥变动后，设置页自动获取模型列表，也可刷新或手动填写；更换服务来源时若未输入新密钥，将清除旧的本地模型密钥。环境变量中的地址、模型名和密钥仍优先。支持 OpenAI 兼容模型列表，包括火山方舟、腾讯 TokenHub；百炼兼容列表不可用时使用其官方分页列表。列表包含的模型不一定都支持本应用所需的对话和 JSON 输出。自定义地址应填写 OpenAI 兼容 Base URL，未提供模型列表的服务可手动填写。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时若 OpenAlex 请求失败，保留本地结果并提示外部检索不可用；单独选择 OpenAlex 时返回错误。
 
 推荐在项目根目录的 PowerShell 中一条命令启动全部服务：
 
@@ -78,6 +78,7 @@ API 具体字段和交互可在 `/docs` 查看。主要接口：
 | `GET/POST /projects` | 列出、创建项目 |
 | `DELETE /projects/{project_id}` | 删除空间；存在运行中任务时返回 409 |
 | `GET/PUT /settings` | 读取配置状态或保存本机配置；不返回密钥原文 |
+| `POST /settings/models` | 使用草稿地址与密钥查询模型列表，不保存设置或回显密钥 |
 | `GET/POST /projects/{project_id}/conversations` | 列出、创建对话 |
 | `GET/POST /projects/{project_id}/papers` | 列出文献、保存元数据 |
 | `POST /projects/{project_id}/papers/import` | multipart 上传 PDF，可附 `title`、`doi`、`arxiv_id` |
@@ -164,3 +165,10 @@ pnpm build:web
 - `uv run --locked python -m unittest discover -s tests -v`：33 项通过；`pnpm check:web` 和 `pnpm build:web` 均通过。
 - 在隔离模拟 API 和模型环境中，浏览器验证了取消不收藏、确认后显示减号、刷新后保持、点击减号移除，以及侧栏浏览收藏夹、从当前夹移除文献和打开删除确认弹窗；最终删除由后端 API 测试验证。
 - 页面滚动到 `scrollY=720` 时，侧栏顶部为 0、高度为 720，且不再显示旧的“本地研究空间”标签。本轮未验证真实云端模型或 OpenAlex 联网。
+
+### 模型列表验收
+
+- `uv run --locked python -m unittest discover -s tests -v`：38 项通过，覆盖模型列表获取、密钥优先级和脱敏、百炼分页与路径、设置保存。
+- `pnpm check:web`、`pnpm build:web` 和 `git diff --check` 均通过。
+- 使用 `uv run --locked python -m tests.model_discovery_server --serve` 启动临时数据库和本地模拟模型服务；设置 `TUFA_API_URL=http://127.0.0.1:18180`，执行 `pnpm --filter @tufa-scholar/web exec next dev --hostname 127.0.0.1 --port 18300`。通过 PowerShell `Invoke-WebRequest` 和 `Invoke-RestMethod` 验证前端 HTTP 首页、设置页、模型发现及选中模型保存和回读，以及空列表与上游错误脱敏。
+- 本轮未完成浏览器交互验收，也未连接真实云端模型服务。验收服务已停止，18180、18181 和 18300 端口无监听；未修改默认用户数据。
