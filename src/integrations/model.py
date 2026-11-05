@@ -45,13 +45,13 @@ def bailian_url(url):
     return None
 
 
-def discover(url, key):
+def discover(url, key, *, details=False):
     headers = {'Authorization': 'Bearer ' + key} if key else {}
     try:
         catalog = bailian_url(url)
         response = httpx.get(base_url(url) + '/models', headers=headers, timeout=15, follow_redirects=False)
         if catalog and response.status_code in (404, 405):
-            ids = []
+            rows = []
             page = 1
             received = 0
             while True:
@@ -62,7 +62,7 @@ def discover(url, key):
                 total = output['total']
                 if not isinstance(data, list) or not isinstance(total, int) or total < 0:
                     raise ValueError()
-                ids.extend(item['model'] for item in data if isinstance(item, dict) and isinstance(item.get('model'), str) and item['model'])
+                rows.extend(dict(item, id=item['model']) for item in data if isinstance(item, dict) and isinstance(item.get('model'), str) and item['model'])
                 received += len(data)
                 if received >= total:
                     break
@@ -74,10 +74,24 @@ def discover(url, key):
             data = response.json()['data']
             if not isinstance(data, list):
                 raise ValueError()
-            ids = [item['id'] for item in data if isinstance(item, dict) and isinstance(item.get('id'), str) and item['id']]
+            rows = [item for item in data if isinstance(item, dict) and isinstance(item.get('id'), str) and item['id']]
+        ids = [item['id'] for item in rows]
         if key and any(key in model for model in ids):
             raise ValueError()
-        return list(dict.fromkeys(ids))
+        if not details:
+            return list(dict.fromkeys(ids))
+        models = {}
+        for item in rows:
+            effort = item.get('effort')
+            levels = effort.get('supported_levels', []) if isinstance(effort, dict) else []
+            levels = list(dict.fromkeys(v for v in levels if isinstance(v, str) and v)) if isinstance(levels, list) else []
+            default = effort.get('default_level') if isinstance(effort, dict) else None
+            models[item['id']] = {'id': item['id'], 'reasoning_efforts': levels,
+                                  'default_effort': default if default in levels else None}
+        result = list(models.values())
+        if key and key in json.dumps(result, ensure_ascii=False):
+            raise ValueError()
+        return result
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(f'获取模型失败 (HTTP {exc.response.status_code})，请检查地址和密钥，或手动填写模型名称') from None
     except httpx.RequestError:
@@ -86,8 +100,10 @@ def discover(url, key):
         raise RuntimeError('模型服务返回的数据无效，请手动填写模型名称') from None
 
 
-def structured(prompt_id, payload, schema):
+def structured(prompt_id, payload, schema, *, model_options=None):
     config = settings.model_config()
+    if model_options and model_options.get('model_name'):
+        config = dict(config, model=model_options['model_name'])
     if not config.get('base_url') or not config.get('model'):
         raise RuntimeError('请先在设置中配置模型地址和模型名称')
     prompt = (Path(__file__).resolve().parents[2] / 'prompts' / (prompt_id + '.md')).read_text(encoding='utf-8')
@@ -99,7 +115,8 @@ def structured(prompt_id, payload, schema):
         response = httpx.post(base_url(config['base_url']) + '/chat/completions', headers=headers,
                               json={'model': config['model'], 'messages': [{'role': 'system', 'content': prompt},
                                     {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}],
-                                    'response_format': {'type': 'json_object'}}, timeout=90)
+                                    'response_format': {'type': 'json_object'},
+                                    **({'reasoning_effort': model_options['reasoning_effort']} if model_options and model_options.get('reasoning_effort') else {})}, timeout=90)
         response.raise_for_status()
         content = response.json()['choices'][0]['message']['content']
         result = schema.model_validate_json(content)

@@ -192,6 +192,7 @@ def retry_task(task_id):
 
     with connect_database() as db:
         cur = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,origin_run_id,collection_id,paper_ids) VALUES (?,?,?,?, 'pending','pending',?,?,?,?)", (task['project_id'],task['conversation_id'],task['query'],task['source'],task['kind'],task.get('origin_run_id') or task_id,task.get('collection_id'),json.dumps(task['paper_ids']) if task.get('paper_ids') is not None else None))
+        db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (task.get('model_name'),task.get('reasoning_effort'),cur.lastrowid))
         db.commit()
         return get_task(cur.lastrowid)
 
@@ -225,7 +226,7 @@ def interrupt_running_tasks():
         db.commit()
 
 
-def create_question(project_id, conversation_id, question, source, collection_id=None):
+def create_question(project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
         if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
@@ -240,6 +241,7 @@ def create_question(project_id, conversation_id, question, source, collection_id
         elif not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id=?', (conversation_id,project_id)):
             return None
         run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,collection_id,paper_ids) VALUES (?,?,?,?, 'pending','pending','chat',?,?)", (project_id,conversation_id,question,source,collection_id,json.dumps(paper_ids) if paper_ids is not None else None)).lastrowid
+        db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (model_name, reasoning_effort, run_id))
         db.execute("INSERT INTO messages(conversation_id,role,content,run_id) VALUES (?,'user',?,?)", (conversation_id,question,run_id))
         db.commit()
         return {'run_id':run_id,'conversation_id':conversation_id}

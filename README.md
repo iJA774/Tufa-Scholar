@@ -36,7 +36,7 @@ API 与 worker 必须使用同一个 `TUFA_DATA_DIR`；不设置时使用项目�
 $env:TUFA_DATA_DIR = '.cache/data-acceptance'
 ```
 
-OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页也可保存 OpenAI 兼容模型的地址、模型名和密钥，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。模型地址或密钥变动后，设置页自动获取模型列表，也可刷新或手动填写；更换服务来源时若未输入新密钥，将清除旧的本地模型密钥。环境变量中的地址、模型名和密钥仍优先。支持 OpenAI 兼容模型列表，包括火山方舟、腾讯 TokenHub；百炼兼容列表不可用时使用其官方分页列表。列表包含的模型不一定都支持本应用所需的对话和 JSON 输出。自定义地址应填写 OpenAI 兼容 Base URL，未提供模型列表的服务可手动填写。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时若 OpenAlex 请求失败，保留本地结果并提示外部检索不可用；单独选择 OpenAlex 时返回错误。
+OpenAlex 支持无密钥试用，可在 `/settings` 配置密钥，或在 worker 进程环境中设置 `OPENALEX_API_KEY` 使用自己的额度；额度与限制见 [OpenAlex 认证说明](https://help.openalex.org/api/authentication/)。设置页可保存 OpenAI 兼容模型的地址和密钥，提问页选择模型和思考强度，用于 LangGraph 科研问答，需配置有效服务与模型；真实模型服务尚未在本次验收中实测。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存储在该本机数据库中；`OPENALEX_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 环境变量优先于本机设置。接口只返回密钥是否配置及来源，不回显密钥；清除密钥仅删除本机保存值，环境变量仍然生效。服务配置保存后，提问页从有效设置获取模型列表，可刷新或手动填写模型；更换服务来源时若未输入新密钥，将清除旧的本地模型密钥。环境变量中的地址、模型名和密钥仍优先。支持 OpenAI 兼容模型列表，包括火山方舟、腾讯 TokenHub；百炼兼容列表不可用时使用其官方分页列表。列表包含的模型不一定都支持本应用所需的对话和 JSON 输出。自定义地址应填写 OpenAI 兼容 Base URL，未提供模型列表的服务可手动填写。OpenAlex 配置在每次请求时读取，无需重启 worker。选择 `all` 时若 OpenAlex 请求失败，保留本地结果并提示外部检索不可用；单独选择 OpenAlex 时返回错误。
 
 推荐在项目根目录的 PowerShell 中一条命令启动全部服务：
 
@@ -74,6 +74,17 @@ worker 按顺序领取任务；重启时将遗留的运行中任务标记为中�
 API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `worker.log`，单文件达到 5 MiB 后轮转，最多保留 3 个备份；直接启动服务同样生效。日志记录请求路由、状态、耗时、任务阶段和服务调用状态，不记录密钥、请求正文或完整问题。启动器的标准输出日志仍保存在 `.cache/start/`。
 
 ## 使用与接口
+
+科研问答输入框下方，文献范围旁可选择模型和思考强度。优先使用供应商 `effort.supported_levels` 与 `default_level`；未声明档位或目录暂不可用时，提供低、中、高三个选项，映射为 `reasoning_effort` 的 `low`、`medium`、`high`。“供应商默认”不发送该参数。通用回退不保证每个模型支持显式强度，服务拒绝时可改回默认。能力字段参考 [DeepSeek](https://api-docs.deepseek.com/api/list-models/) 与 [火山方舟](https://console.volcengine.com/ark/region%3Acn-beijing/docs/models-api) 官方文档。
+
+模型与强度随本次问题存入任务，重试沿用；环境变量 `OPENAI_MODEL` 在提交时优先。任务各科研节点使用保存的选择，服务地址与密钥仍在调用时从有效配置读取。`GET /models` 返回已配置服务的模型 ID、思考档位与默认档位；提问接口可传 `model_name` 和 `reasoning_effort`，省略时使用配置模型和供应商默认行为。
+
+### 提问模型与思考强度验收（2026-11-05）
+
+- `uv run --locked python -m unittest discover -s tests -v`：43 项通过；覆盖供应商档位、三档回退、环境变量优先、快照与重试，以及实际模型调用函数发送的参数。模型 HTTP 使用模拟响应。
+- `pnpm check:web`、`pnpm build:web`：通过。
+- `uv run --locked python -m tests.model_discovery_server --serve` 配合 `TUFA_API_URL=http://127.0.0.1:18180` 和 18300 端口的 Next dev，以 `Invoke-WebRequest` / `Invoke-RestMethod` 检查首页、设置页均为 200、代理目录返回两项模型、提问后任务保存指定模型与 medium 强度，保持 pending；未启动 worker。
+- 隔离服务已停止，未修改默认用户数据；未运行真实模型链路，浏览器交互与真实供应商参数兼容性留待用户验证。
 
 在首页创建项目与对话，输入研究问题并选择本地、OpenAlex 或全部来源。任务完成后可查看回答及证据，下载报告与证据表；右上角搜索项目内会话、消息和文献。也可以上传 PDF；重复字节的文件按内容摘要去重，DOI 或 arXiv ID 用于识别文献。项目内文献跨对话共享。
 
