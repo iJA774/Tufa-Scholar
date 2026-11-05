@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import csv
 import io
 import logging
+import os
 import time
 from hashlib import sha256
 from io import BytesIO
@@ -18,6 +19,7 @@ from pypdf import PdfReader
 
 from src import repository as repo
 from src import settings
+from src.integrations.model import discover
 from src.storage import data_directory, initialize_storage
 from src.logging_setup import configure_logging, close_logging, safe_stack
 
@@ -61,7 +63,7 @@ async def log_request(request: Request, call_next):
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError):
     # Pydantic error details can include input values, including submitted secrets.
-    if request.url.path == '/settings':
+    if request.url.path in ('/settings', '/settings/models'):
         return JSONResponse(status_code=422, content={'detail': '设置参数无效'})
     return await request_validation_exception_handler(request, exc)
 
@@ -73,6 +75,12 @@ class SettingsInput(BaseModel):
     clear_openai_api_key: bool = False
     openai_base_url: str | None = None
     openai_model: str | None = None
+
+
+class ModelDiscoveryInput(BaseModel):
+    base_url: str
+    api_key: str | None = Field(default=None, repr=False)
+    clear_local_key: bool = False
 
 
 class ProjectInput(BaseModel):
@@ -139,6 +147,31 @@ def put_settings(body: SettingsInput):
         return settings.update(body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/settings/models')
+def discover_models(body: ModelDiscoveryInput):
+    url = body.base_url.strip()
+    try:
+        settings.validate_base_url(url)
+        if not url:
+            raise ValueError('请填写模型地址')
+        current = settings.model_config()
+        same_origin = bool(current['base_url'] and settings.origin(url) == settings.origin(current['base_url']))
+        draft_key = None if body.clear_local_key else ((body.api_key or '').strip() or None)
+        if same_origin:
+            key = os.environ.get('OPENAI_API_KEY') or draft_key or (None if body.clear_local_key else current['api_key'])
+        else:
+            key = draft_key
+        models = discover(url, key)
+        secrets = [secret for secret in (current['api_key'], draft_key) if secret]
+        if any(secret in model for model in models for secret in secrets):
+            raise RuntimeError('模型服务返回的数据无效，请手动填写模型名称')
+        return {'models': models}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from None
 
 
 @app.get('/projects')
