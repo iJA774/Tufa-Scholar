@@ -54,17 +54,24 @@ def _stage(state, stage):
     repository.update_stage(state['task']['id'], stage)
 
 
+def _model(state, prompt_id, payload, schema):
+    task = state['task']
+    if task.get('model_name') or task.get('reasoning_effort'):
+        return structured(prompt_id, payload, schema, model_options=task)
+    return structured(prompt_id, payload, schema)
+
+
 def plan(s):
     _stage(s, 'planning')
     collection = s['task']['source'] == 'collection'
     history = [] if collection else repository.task_history(s['task']['id'])
-    p = structured('literature/plan_review', {'question': s['task']['query'], 'history': history}, Plan)
+    p = _model(s, 'literature/plan_review', {'question': s['task']['query'], 'history': history}, Plan)
     return {'history': history, 'direct': p.direct and not collection, 'queries': p.queries or [s['task']['query']], 'papers': [], 'evidence': [], 'round': 0, 'warnings': []}
 
 
 def direct(s):
     _stage(s, 'answering')
-    a = structured('literature/direct', {'question': s['task']['query'], 'history': s['history']}, Answer)
+    a = _model(s, 'literature/direct', {'question': s['task']['query'], 'history': s['history']}, Answer)
     return {'content': '模型回答（未使用文献证据）：\n\n' + a.answer}
 
 
@@ -124,13 +131,13 @@ def assess(s):
     _stage(s, 'assessing')
     if s['round'] >= 2 or (s['round'] and len(s['evidence']) <= s['previous_count']):
         return {'queries': []}
-    g = structured('literature/assess_gap', {'question': s['task']['query'], 'evidence': s['evidence']}, Gap)
+    g = _model(s, 'literature/assess_gap', {'question': s['task']['query'], 'evidence': s['evidence']}, Gap)
     return {'queries': [g.query] if g.query else [], 'round': s['round'] + 1}
 
 
 def synthesize(s):
     _stage(s, 'synthesizing')
-    d = structured('literature/synthesize', {'question': s['task']['query'], 'history': s['history'], 'evidence': s['evidence']}, Draft)
+    d = _model(s, 'literature/synthesize', {'question': s['task']['query'], 'history': s['history'], 'evidence': s['evidence']}, Draft)
     return {'draft': d}
 
 
@@ -152,7 +159,7 @@ def verify(s):
         if re.search(r'成本|费用|cost|expense', c.text, re.I) and not any(re.search(r'成本|费用|cost|expense|\$|美元', e['text'], re.I) for e in cited):
             rejected = True
             continue
-        v = structured('literature/verify_claim', {'claim': c.text, 'evidence': cited}, Verdict)
+        v = _model(s, 'literature/verify_claim', {'claim': c.text, 'evidence': cited}, Verdict)
         if v.supported:
             used.update(c.citations)
             lines.append(c.text + ' ' + ' '.join(f'[{i}]' for i in c.citations))

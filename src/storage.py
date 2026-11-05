@@ -46,7 +46,7 @@ def initialize_storage() -> dict:
             connection.execute("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'search'")
         if 'origin_run_id' not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:
             connection.execute('ALTER TABLE tasks ADD COLUMN origin_run_id INTEGER REFERENCES tasks(id)')
-        for name, definition in [('collection_id','INTEGER'), ('paper_ids','TEXT')]:
+        for name, definition in [('collection_id','INTEGER'), ('paper_ids','TEXT'), ('model_name','TEXT'), ('reasoning_effort','TEXT')]:
             if name not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:
                 connection.execute(f'ALTER TABLE tasks ADD COLUMN {name} {definition}')
         connection.execute("CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), name TEXT NOT NULL)")

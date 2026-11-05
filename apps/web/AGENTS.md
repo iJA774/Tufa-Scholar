@@ -1,6 +1,7 @@
 # 前端开发约定
 
 - 前端面向用户，保持美观、简洁，不加入开发者说明或不可用的功能入口。
+- `app/ModelControls.tsx` 管理提问模型与思考强度：供应商声明优先，未声明提供低、中、高，默认选项不发送强度参数；切换模型清除旧强度，取消过时目录请求。选择随问题提交，不通过修改全局设置影响已提交任务。
 - 使用 Next.js App Router 与 TypeScript；依赖由根目录 pnpm workspace 和 `pnpm-lock.yaml` 管理。
 - 在项目根目录执行 `pnpm dev:web`，默认只监听 `127.0.0.1:3000`；服务端通过 `/api` 代理本地 API，`TUFA_API_URL` 可覆盖默认的 `http://127.0.0.1:8000`。
 - `app/page.tsx` 负责研究工作台，`app/layout.tsx` 与 `app/globals.css` 负责共用布局和样式；`next.config.ts` 管理 API 代理。修改设置页时继续读取 [设置页规则](app/settings/AGENTS.md)。

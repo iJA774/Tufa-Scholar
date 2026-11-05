@@ -112,6 +112,8 @@ class RunInput(BaseModel):
 
 class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
+    model_name: str | None = Field(default=None, min_length=1, max_length=300)
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
     source: Literal['all', 'local', 'openalex', 'collection'] = 'local'
     conversation_id: int | None = None
     collection_id: int | None = None
@@ -177,6 +179,17 @@ def discover_models(body: ModelDiscoveryInput):
 @app.get('/projects')
 def projects():
     return repo.list_projects()
+
+
+@app.get('/models')
+def available_models():
+    config = settings.model_config()
+    if not config.get('base_url'):
+        raise HTTPException(422, '请先在设置页保存模型服务地址和密钥')
+    try:
+        return {'models': discover(config['base_url'], config['api_key'], details=True)}
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from None
 
 
 @app.post('/projects', status_code=201)
@@ -267,7 +280,22 @@ def ask_question(project_id: int, body: QuestionInput):
         raise HTTPException(422, '问题不能为空')
     if (body.source == 'collection') != (body.collection_id is not None):
         raise HTTPException(422, '选择收藏夹来源时必须指定收藏夹')
-    result = repo.create_question(project_id, body.conversation_id, body.question.strip(), body.source, body.collection_id)
+    model_name = os.environ.get('OPENAI_MODEL') or (body.model_name or '').strip() or settings.model_config()['model']
+    effort = body.reasoning_effort
+    if effort:
+        if not repo.project_exists(project_id):
+            raise HTTPException(404, '项目不存在')
+        try:
+            models = available_models()['models']
+        except HTTPException as exc:
+            if exc.status_code != 502:
+                raise
+            models = []
+        selected = next((m for m in models if m['id'] == model_name), None)
+        levels = selected['reasoning_efforts'] if selected and selected['reasoning_efforts'] else ['low', 'medium', 'high']
+        if effort not in levels:
+            raise HTTPException(422, '所选模型未声明支持该思考强度，请刷新模型列表或使用供应商默认')
+    result = repo.create_question(project_id, body.conversation_id, body.question.strip(), body.source, body.collection_id, model_name, effort)
     if result is None:
         raise HTTPException(404, '项目或对话不存在')
     return result
