@@ -1,7 +1,7 @@
-import io
 import os
 import tempfile
 import unittest
+import httpx
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from apps.api.main import app
@@ -43,9 +43,10 @@ class SettingsTests(unittest.TestCase):
         c = self.client
         c.put('/settings', json={'openalex_api_key':'first-key', 'openai_api_key':'saved-key', 'openai_base_url':'http://localhost:8080/v1','openai_model':'saved'})
         def request_key():
-            with patch('src.integrations.openalex.urlopen', return_value=io.BytesIO(b'{"results":[]}')) as call:
+            response = httpx.Response(200, json={'results': []}, request=httpx.Request('GET', 'https://api.openalex.org/works'))
+            with patch('src.integrations.openalex.httpx.get', return_value=response) as call:
                 search_works('test')
-                return call.call_args.args[0].get_header('Authorization')
+                return call.call_args.kwargs['headers']['Authorization']
         self.assertEqual(request_key(), 'Bearer first-key')
         c.put('/settings', json={'openalex_api_key':'second-key'})
         self.assertEqual(request_key(), 'Bearer second-key')

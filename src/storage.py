@@ -41,6 +41,18 @@ def initialize_storage() -> dict:
         CREATE VIRTUAL TABLE IF NOT EXISTS paper_fts USING fts5(title, abstract, full_text);
         CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER REFERENCES conversations(id), query TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL, result TEXT, error TEXT);
         """)
+        connection.execute("BEGIN IMMEDIATE")
+        if 'kind' not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:
+            connection.execute("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'search'")
+        if 'origin_run_id' not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:
+            connection.execute('ALTER TABLE tasks ADD COLUMN origin_run_id INTEGER REFERENCES tasks(id)')
+        for name, definition in [('collection_id','INTEGER'), ('paper_ids','TEXT')]:
+            if name not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:
+                connection.execute(f'ALTER TABLE tasks ADD COLUMN {name} {definition}')
+        connection.execute("CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), name TEXT NOT NULL)")
+        connection.execute("CREATE TABLE IF NOT EXISTS collection_papers (collection_id INTEGER NOT NULL REFERENCES collections(id), paper_id INTEGER NOT NULL REFERENCES papers(id), PRIMARY KEY(collection_id,paper_id))")
+        connection.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id), role TEXT NOT NULL, content TEXT NOT NULL, run_id INTEGER REFERENCES tasks(id), metadata TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        connection.execute("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER NOT NULL REFERENCES conversations(id), run_id INTEGER NOT NULL REFERENCES tasks(id), content TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
         connection.commit()
         # Exercise FTS5 indexing/querying without inserting test papers.
         connection.execute("CREATE VIRTUAL TABLE temp.fts_probe USING fts5(content)")

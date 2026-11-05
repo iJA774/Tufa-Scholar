@@ -76,4 +76,11 @@ def update(values):
             else:
                 db.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (name, value))
         db.commit()
+    from src.logging_setup import refresh_secrets
+    refresh_secrets()
     return public_settings()
+
+
+def model_config():
+    local = _local()
+    return {'base_url': _resolve('openai_base_url', local)[0], 'api_key': _resolve('openai_api_key', local)[0], 'model': _resolve('openai_model', local)[0]}

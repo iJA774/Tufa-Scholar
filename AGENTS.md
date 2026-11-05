@@ -14,4 +14,4 @@
 
 - 根目录 `pyproject.toml`、`uv.lock` 管理 API、worker 与 `src/` 共用的 Python 环境；根目录 pnpm workspace 与 `pnpm-lock.yaml` 管理 `apps/web/`。
 - `src/storage.py` 和 `src/repository.py` 负责共用 SQLite、项目文献和任务存储；运行数据在被 Git 忽略的 `data/` 中。`TUFA_DATA_DIR` 可指定独立验收目录。
-- 当前里程碑为论文检索与导入：本地 FTS5/BM25、OpenAlex 检索、单 worker 任务和 PDF 导入。向量检索、模型重排、综述和修订尚未实现。启动和验证命令见 `README.md`，前端约定见 `apps/web/AGENTS.md`。
+- 当前实现包含本地 FTS5/BM25、OpenAlex 检索、PDF 导入和单 worker 的 LangGraph 科研问答；真实模型服务尚未实测。向量检索、模型重排和完整综述修订尚未实现。启动和验证命令见 `README.md`，前端约定见 `apps/web/AGENTS.md`。
