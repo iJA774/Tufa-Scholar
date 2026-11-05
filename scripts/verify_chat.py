@@ -54,7 +54,8 @@ def main():
         env['TUFA_DATA_DIR']=directory
         port=int(os.environ.get('TUFA_VERIFY_API_PORT','0')) or free_port(); base=f'http://127.0.0.1:{port}'
         with open(os.devnull,'wb') as sink:
-            for args in ([sys.executable,'-m','uvicorn','apps.api.main:app','--host','127.0.0.1','--port',str(port)], [sys.executable,'-m','apps.worker']):
+            api_app = 'scripts.fixture_api:app' if '--paper-fixture' in sys.argv else 'apps.api.main:app'
+            for args in ([sys.executable,'-m','uvicorn',api_app,'--host','127.0.0.1','--port',str(port)], [sys.executable,'-m','apps.worker']):
                 processes.append(subprocess.Popen(args,cwd=ROOT,env=env,stdout=sink,stderr=sink))
             with httpx.Client(base_url=base,timeout=10,trust_env=False) as c:
                 for _ in range(100):
@@ -72,6 +73,10 @@ def main():
                         time.sleep(.2)
                     raise AssertionError('worker timed out')
                 p=call('POST','/projects',json={'name':'fixture'})['id']
+                if '--paper-fixture' in sys.argv:
+                    found=call('GET',f'/projects/{p}/paper-search',params={'q':'attention','source':'openalex'})
+                    assert found['results'][0]['doi']=='https://doi.org/10.1234/ATTENTION'
+                    print('Simulated external paper search verified', flush=True)
                 pdf=make_pdf()
                 paper=call('POST',f'/projects/{p}/papers/import',data={'title':'accuracy research'},files={'file':('fixture.pdf',pdf,'application/pdf')})
                 q=call('POST',f'/projects/{p}/questions',json={'question':'accuracy and cost?', 'source':'local'})
@@ -107,6 +112,7 @@ def main():
                 if '--serve' in sys.argv:
                     print(f'API: {base}  isolated data: {directory}', flush=True)
                     print('Simulated model is active; Ctrl+C stops the fixture.', flush=True)
+                    if '--paper-fixture' in sys.argv: print('Simulated external paper search is active.', flush=True)
                     try:
                         while True: time.sleep(1)
                     except KeyboardInterrupt: pass

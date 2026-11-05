@@ -36,4 +36,27 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(c.delete(f'/projects/{a}').status_code,204)
         with connect_database() as db: self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(),[])
 
+    def test_delete_collection_keeps_papers_and_task_snapshot(self):
+        c=self.c
+        a=c.post('/projects',json={'name':'A'}).json()['id']
+        b=c.post('/projects',json={'name':'B'}).json()['id']
+        one=c.post(f'/projects/{a}/collections',json={'name':'one'}).json()['id']
+        two=c.post(f'/projects/{a}/collections',json={'name':'two'}).json()['id']
+        paper=c.post(f'/projects/{a}/papers',json={'title':'shared'}).json()['id']
+        for collection in (one,two):
+            self.assertEqual(c.post(f'/projects/{a}/collections/{collection}/papers',json={'paper_id':paper}).status_code,201)
+        task=c.post(f'/projects/{a}/questions',json={'question':'test','source':'collection','collection_id':one}).json()['run_id']
+        self.assertEqual(c.delete(f'/projects/{b}/collections/{one}').status_code,404)
+        self.assertEqual(c.delete(f'/projects/{a}/collections/{one}').status_code,204)
+        self.assertEqual(c.delete(f'/projects/{a}/collections/{one}').status_code,404)
+        self.assertEqual(c.get(f'/projects/{a}/papers').json()[0]['id'],paper)
+        self.assertEqual(c.get(f'/projects/{a}/collections/{two}/papers').json()[0]['id'],paper)
+        claimed=repo.claim_task(); self.assertEqual(claimed['paper_ids'],[paper])
+        repo.fail_task(task,'retry')
+        retried=c.post(f'/runs/{task}/retry').json()
+        self.assertEqual(retried['paper_ids'],[paper])
+        self.assertEqual(retried['collection_id'],one)
+        with connect_database() as db:
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(),[])
+
 if __name__=='__main__': unittest.main()

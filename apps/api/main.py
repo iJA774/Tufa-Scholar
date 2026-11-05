@@ -309,6 +309,13 @@ def new_collection(project_id: int, body: CollectionInput):
     return repo.create_collection(project_id,body.name.strip())
 
 
+@app.delete('/projects/{project_id}/collections/{collection_id}', status_code=204)
+def remove_collection(project_id: int, collection_id: int):
+    if not repo.delete_collection(project_id, collection_id):
+        raise HTTPException(404, '收藏夹不存在')
+    return Response(status_code=204)
+
+
 @app.get('/projects/{project_id}/collections/{collection_id}/papers')
 def collection_list(project_id: int, collection_id: int):
     result = repo.collection_papers(project_id,collection_id)

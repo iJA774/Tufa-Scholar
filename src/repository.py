@@ -325,6 +325,17 @@ def create_collection(project_id, name):
         return {'id':cur.lastrowid,'project_id':project_id,'name':name}
 
 
+def delete_collection(project_id, collection_id):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if not _one(db, 'SELECT id FROM collections WHERE id=? AND project_id=?', (collection_id,project_id)):
+            return False
+        db.execute('DELETE FROM collection_papers WHERE collection_id=?', (collection_id,))
+        db.execute('DELETE FROM collections WHERE id=?', (collection_id,))
+        db.commit()
+        return True
+
+
 def collection_papers(project_id, collection_id):
     with connect_database() as db:
         if not _one(db, 'SELECT id FROM collections WHERE id=? AND project_id=?', (collection_id,project_id)): return None
