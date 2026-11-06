@@ -21,7 +21,14 @@ def run_once():
     try:
         if task.get('kind') == 'chat':
             from src.agents.literature import run
-            content, evidence = run(task)
+            research = {key: task.get(key) for key in (
+                'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'
+            )}
+            history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
+            content, evidence = run(
+                research, history=history,
+                on_stage=lambda stage: repository.update_stage(task['id'], stage),
+            )
             repository.finish_chat_task(task['id'], content, evidence)
         else:
             result = ToolRegistry().invoke('search_papers', {'query': task['query']}, context=ToolContext(task['project_id'], task['source']))

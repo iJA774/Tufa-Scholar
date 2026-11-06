@@ -35,6 +35,8 @@ evidence = registry.invoke(
 
 收藏夹上下文示例：`ToolContext(project_id=1, source="collection", paper_ids=(3, 7))`。调用方使用任务提交时保存的论文 ID 快照，不在执行时重新读取收藏夹当前成员。冻结的上下文复制论文 ID 序列，避免后续修改原列表改变范围。
 
+`search_papers` 的收藏夹结果保留完整快照与项目交集，六篇上限仅属于取证调用。Agent 在独立候选池中融合跨轮排名，再将选中的最多六篇传给 `collect_evidence`，不会在搜索结果入池前截断。
+
 目录只列出当前来源可用的工具，执行时再次检查。`project_id`、`source`、`paper_ids` 不属于工具参数，传入会被拒绝。未知工具、不适用的工具及无效参数抛出安全的 `ValueError`；外部服务失败保留集成层的安全错误，混合论文检索保留本地结果及 `warnings`。
 
 ## 能力边界

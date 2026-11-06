@@ -56,7 +56,7 @@ class QuestionModelTests(unittest.TestCase):
             result = {'direct': True, 'queries': []} if len(calls) == 1 else {'answer': 'hello'}
             return httpx.Response(200, request=httpx.Request('POST', url), json={'choices': [{'message': {'content': json.dumps(result)}}]})
         with patch('src.integrations.model.httpx.post', side_effect=post):
-            content, _ = run(retry)
+            content, _ = run({k: retry[k] for k in ('project_id', 'query', 'source', 'paper_ids', 'model_name', 'reasoning_effort')}, history=[])
         self.assertIn('hello', content)
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(c['model'] == 'selected' and c['reasoning_effort'] == 'max' for c in calls))

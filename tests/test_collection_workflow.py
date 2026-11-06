@@ -29,12 +29,12 @@ class CollectionWorkflowTests(unittest.TestCase):
                 if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
                 if name.endswith('verify_claim'): return w.Verdict(supported=True)
                 raise AssertionError(name)
-            with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve') as external, patch.object(w.repository, 'task_history') as history:
-                content, evidence = w.run(task)
+            with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve') as external, patch.object(repo, 'task_history') as history:
+                content, evidence = w.run({k: task[k] for k in ('project_id', 'query', 'source', 'paper_ids')}, history=[])
                 repo.fail_task(run_id, 'test retry')
                 retried = repo.retry_task(run_id)
                 self.assertEqual(retried['paper_ids'], [selected])
-                retry_content, retry_evidence = w.run(repo.claim_task())
+                retry_content, retry_evidence = w.run({k: retried[k] for k in ('project_id', 'query', 'source', 'paper_ids')}, history=[])
             external.assert_not_called()
             history.assert_not_called()
             self.assertTrue(all('OUTSIDE_SECRET' not in payload for payload in payloads))
@@ -45,14 +45,14 @@ class CollectionWorkflowTests(unittest.TestCase):
 
     def test_empty_never_calls_model_or_network(self):
         with patch.object(w, 'structured') as model, patch('src.tools.search.retrieve') as retrieve:
-            content, evidence = w.run({'source': 'collection', 'paper_ids': []})
+            content, evidence = w.run({'source': 'collection', 'paper_ids': []}, history=[])
         self.assertIn('证据不足', content)
         self.assertEqual(evidence, [])
         model.assert_not_called()
         retrieve.assert_not_called()
 
     def test_isolated_graph_filters_other_papers_and_history(self):
-        task = {'id': 1, 'project_id': 1, 'query': 'summarize', 'source': 'collection', 'paper_ids': [3]}
+        task = {'project_id': 1, 'query': 'summarize', 'source': 'collection', 'paper_ids': [3]}
         allowed = {'id': 3, 'title': 'selected', 'abstract': 'selected evidence', 'versions': []}
         decoy = {'id': 4, 'title': 'forbidden', 'abstract': 'forbidden text', 'versions': []}
         payloads = []
@@ -63,9 +63,8 @@ class CollectionWorkflowTests(unittest.TestCase):
             if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
             if name.endswith('verify_claim'): return w.Verdict(supported=True)
             raise AssertionError(name)
-        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'task_history', return_value=[{'content': 'OUTSIDE_SECRET forbidden history'}]) as history, patch.object(w.repository, 'project_evidence', return_value=[allowed, decoy]), patch.object(w.repository, 'local_search', return_value=[]) as local, patch('src.tools.search.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
-            content, evidence = w.run(task)
-        history.assert_not_called()
+        with patch.object(repo, 'project_evidence', return_value=[allowed, decoy]), patch.object(repo, 'local_search', return_value=[]) as local, patch('src.tools.search.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
+            content, evidence = w.run({k: task[k] for k in ('project_id', 'query', 'source', 'paper_ids')}, history=[])
         retrieve.assert_not_called()
         external.assert_not_called()
         self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_papers', 'collect_evidence', 'search_papers', 'collect_evidence'])
@@ -77,17 +76,26 @@ class CollectionWorkflowTests(unittest.TestCase):
         self.assertNotIn('forbidden', content)
         self.assertEqual([e['paper_id'] for e in evidence], [3])
 
+    def test_full_collection_is_available_to_candidate_pool(self):
+        papers = [{'id': i, 'title': f'paper {i}', 'abstract': f'evidence {i}', 'versions': []} for i in range(1, 9)]
+        research = {'project_id': 1, 'query': 'topic', 'source': 'collection', 'paper_ids': list(range(1, 9))}
+        with patch.object(repo, 'project_evidence', return_value=papers), patch.object(repo, 'local_search', return_value=papers):
+            result = w.search({'research': research, 'queries': ['topic'], 'query_results': {}, 'warnings': []})
+        self.assertEqual(len(result['candidates']), 8)
+        self.assertEqual(len(result['papers']), 6)
+        self.assertEqual({p['id'] for p in result['candidates']}, set(research['paper_ids']))
+
     def test_collection_evidence_uses_repository_text_not_forged_search_result(self):
-        task = {'id': 1, 'project_id': 1, 'query': 'selected', 'source': 'collection', 'paper_ids': [3]}
+        task = {'project_id': 1, 'query': 'selected', 'source': 'collection', 'paper_ids': [3]}
         stored = {'id': 3, 'title': 'Stored title', 'abstract': 'Stored evidence', 'versions': []}
         forged = {'id': 3, 'title': 'Forged title', 'abstract': 'Forged evidence'}
-        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'project_evidence', return_value=[stored]):
-            evidence = w.evidence({'task': task, 'papers': [forged]})['evidence']
+        with patch.object(repo, 'project_evidence', return_value=[stored]):
+            evidence = w.evidence({'research': task, 'papers': [forged]})['evidence']
         self.assertEqual([(e['title'], e['text']) for e in evidence], [('Stored title', 'Stored evidence')])
 
     def test_verify_rejects_unselected_paper(self):
-        state = {'task': {'id': 1, 'source': 'collection', 'paper_ids': [3]}, 'draft': w.Draft(claims=[w.Claim(text='result', citations=['x'])]), 'evidence': [{'id': 'x', 'paper_id': 4, 'text': 'result', 'title': 'other'}]}
-        with patch.object(w.repository, 'update_stage'), patch.object(w, 'structured') as model:
+        state = {'research': { 'source': 'collection', 'paper_ids': [3]}, 'draft': w.Draft(claims=[w.Claim(text='result', citations=['x'])]), 'evidence': [{'id': 'x', 'paper_id': 4, 'text': 'result', 'title': 'other'}]}
+        with patch.object(w, 'structured') as model:
             result = w.verify(state)
         model.assert_not_called()
         self.assertEqual(result['evidence'], [])

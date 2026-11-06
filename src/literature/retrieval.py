@@ -2,6 +2,7 @@
 import re
 import logging
 import time
+from urllib.parse import urlsplit, urlunsplit
 from src.persistence import repository
 from src.integrations.openalex import search_works
 
@@ -69,4 +70,51 @@ def retrieve_collection(project_id, query, paper_ids):
     ranked = repository.local_search(project_id, query, list(allowed)) if allowed else []
     order = {p['id']: i for i, p in enumerate(ranked) if p['id'] in allowed}
     candidates.sort(key=lambda p: order.get(p['id'], len(order)))
-    return {'query': query, 'source': 'collection', 'method': 'project collection keyword ranking', 'results': candidates[:6], 'warnings': []}
+    return {'query': query, 'source': 'collection', 'method': 'project collection keyword ranking', 'results': candidates, 'warnings': []}
+
+
+def _candidate_ids(paper, source):
+    if source == 'web':
+        parts = urlsplit(paper['url'])
+        return {'url:' + urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ''))}
+    ids = _identifiers(paper)
+    if paper.get('id') is not None:
+        ids.add('local:' + str(paper['id']))
+    if paper.get('openalex_id'):
+        ids.add('openalex:' + str(paper['openalex_id']).lower().rstrip('/'))
+    if paper.get('original_url'):
+        parts = urlsplit(paper['original_url'])
+        ids.add('url:' + urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, '')))
+    return ids
+
+
+def rank_candidates(query_results, source):
+    """Fuse per-query ranks, retaining all candidates and merging linked identifiers."""
+    groups = []
+    for query, results in query_results.items():
+        for item in results:
+            paper = item['paper']
+            rank = item['rank']
+            ids = _candidate_ids(paper, source)
+            title = (paper.get('title') or '').strip().casefold()
+            matches = [g for g in groups if ids & g['ids'] or (not ids and not g['ids'] and title and title == g['title'])]
+            if matches:
+                group = matches[0]
+                for other in matches[1:]:
+                    group['ids'].update(other['ids'])
+                    for key, value in other['ranks'].items():
+                        group['ranks'][key] = min(group['ranks'].get(key, value), value)
+                    for key, value in other['paper'].items():
+                        if value is not None and not group['paper'].get(key):
+                            group['paper'][key] = value
+                    groups.remove(other)
+                for key, value in paper.items():
+                    if value is not None and not group['paper'].get(key):
+                        group['paper'][key] = value
+            else:
+                group = {'paper': dict(paper), 'ids': set(), 'title': title, 'ranks': {}}
+                groups.append(group)
+            group['ids'].update(ids)
+            group['ranks'][query] = min(group['ranks'].get(query, rank), rank)
+    groups.sort(key=lambda group: -sum(1 / (60 + rank) for rank in group['ranks'].values()))
+    return [group['paper'] for group in groups]
