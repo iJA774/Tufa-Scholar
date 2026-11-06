@@ -1,5 +1,6 @@
 """Local configuration; environment values take precedence over SQLite."""
 import os
+import re
 from urllib.parse import urlsplit
 from src.storage import connect_database, data_directory
 
@@ -8,7 +9,27 @@ ENV = {
     'openai_api_key': 'OPENAI_API_KEY',
     'openai_base_url': 'OPENAI_BASE_URL',
     'openai_model': 'OPENAI_MODEL',
+    'web_search_engine': 'SEARCH_API',
+    'tavily_api_key': 'TAVILY_API_KEY',
+    'infoquest_api_key': 'INFOQUEST_API_KEY',
+    'brave_search_api_key': 'BRAVE_SEARCH_API_KEY',
+    'serper_api_key': 'SERPER_API_KEY',
+    'searx_base_url': 'SEARX_HOST',
+    'wikipedia_lang': 'WIKIPEDIA_LANG',
 }
+
+SEARCH_PROVIDERS = (
+    ('tavily', 'Tavily', True),
+    ('infoquest', 'InfoQuest', True),
+    ('duckduckgo', 'DuckDuckGo', False),
+    ('brave_search', 'Brave Search', True),
+    ('serper', 'Serper', True),
+    ('arxiv', 'arXiv', False),
+    ('searx', 'SearX', False),
+    ('wikipedia', 'Wikipedia', False),
+)
+SECRET_FIELDS = ('openalex_api_key', 'openai_api_key', 'tavily_api_key',
+                 'infoquest_api_key', 'brave_search_api_key', 'serper_api_key')
 
 
 def _local():
@@ -41,13 +62,30 @@ def public_settings():
     key, key_source = _resolve('openai_api_key', local)
     url, url_source = _resolve('openai_base_url', local)
     model, model_source = _resolve('openai_model', local)
+    engine, engine_source = _resolve_default('web_search_engine', local, 'duckduckgo')
+    searx_url, searx_source = _resolve('searx_base_url', local)
+    language, language_source = _resolve_default('wikipedia_lang', local, 'zh')
+    providers = []
+    for provider_id, name, requires_key in SEARCH_PROVIDERS:
+        provider_key, source = _resolve(provider_id + '_api_key', local) if requires_key else (None, 'none')
+        providers.append({'id': provider_id, 'name': name, 'requires_key': requires_key,
+                          'key_configured': bool(provider_key), 'key_source': source})
     return {'openalex': {'key_configured': bool(alex), 'key_source': alex_source},
             'model': {'base_url': url, 'base_url_source': url_source,
                       'model': model, 'model_source': model_source,
-                      'key_configured': bool(key), 'key_source': key_source}}
+                      'key_configured': bool(key), 'key_source': key_source},
+            'web_search': {'engine': engine, 'engine_source': engine_source,
+                           'providers': providers, 'searx_base_url': searx_url,
+                           'searx_base_url_source': searx_source,
+                           'wikipedia_lang': language, 'wikipedia_lang_source': language_source}}
 
 
-def validate_base_url(url):
+def _resolve_default(name, local, default):
+    value, source = _resolve(name, local)
+    return (value, source) if value else (default, 'default')
+
+
+def validate_base_url(url, label='模型地址'):
     if url is not None and url.strip():
         try:
             parsed = urlsplit(url.strip())
@@ -57,7 +95,15 @@ def validate_base_url(url):
         except ValueError:
             valid = False
         if not valid:
-            raise ValueError('模型地址必须是有效的 HTTP 或 HTTPS URL，且不含凭据、查询参数或片段')
+            raise ValueError(f'{label}必须是有效的 HTTP 或 HTTPS URL，且不含凭据、查询参数或片段')
+
+
+def validate_web_search(engine, searx_url, language):
+    if engine and engine.strip() and engine.strip() not in {provider[0] for provider in SEARCH_PROVIDERS}:
+        raise ValueError('不支持的网页搜索引擎')
+    validate_base_url(searx_url, 'SearX 地址')
+    if language and language.strip() and not re.fullmatch(r'[a-z]{2,12}(?:-[a-z0-9]{1,12})*', language.strip()):
+        raise ValueError('维基百科语言必须是有效的小写语言代码')
 
 
 def origin(url):
@@ -68,6 +114,7 @@ def origin(url):
 def update(values):
     url = values.get('openai_base_url')
     validate_base_url(url)
+    validate_web_search(values.get('web_search_engine'), values.get('searx_base_url'), values.get('wikipedia_lang'))
     current_url = model_config()['base_url']
     changed_origin = bool(not os.environ.get('OPENAI_BASE_URL') and url and url.strip() and current_url and origin(url.strip()) != origin(current_url))
     if changed_origin and os.environ.get('OPENAI_API_KEY') and not os.environ.get('OPENAI_BASE_URL'):
@@ -77,7 +124,7 @@ def update(values):
             db.execute("DELETE FROM settings WHERE key='openai_api_key'")
         for name in ENV:
             value = values.get(name)
-            if name in ('openalex_api_key', 'openai_api_key'):
+            if name in SECRET_FIELDS:
                 if values.get('clear_' + name):
                     db.execute('DELETE FROM settings WHERE key=?', (name,))
                     continue
@@ -99,3 +146,16 @@ def update(values):
 def model_config():
     local = _local()
     return {'base_url': _resolve('openai_base_url', local)[0], 'api_key': _resolve('openai_api_key', local)[0], 'model': _resolve('openai_model', local)[0]}
+
+
+def web_search_config():
+    # Resolve on each call so the worker picks up changes without restarting.
+    local = _local()
+    engine = _resolve_default('web_search_engine', local, 'duckduckgo')[0].strip() or 'duckduckgo'
+    base_url = _resolve('searx_base_url', local)[0] if engine == 'searx' else None
+    base_url = base_url.strip() if base_url else None
+    language = _resolve_default('wikipedia_lang', local, 'zh')[0].strip() or 'zh'
+    validate_web_search(engine, base_url, language)
+    requires_key = next(provider[2] for provider in SEARCH_PROVIDERS if provider[0] == engine)
+    key = _resolve(engine + '_api_key', local)[0] if requires_key else None
+    return {'engine': engine, 'api_key': key, 'base_url': base_url, 'wikipedia_lang': language}

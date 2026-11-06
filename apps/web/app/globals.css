@@ -11,3 +11,4 @@
 .model-select { min-width: 150px; max-width: 260px; }
 .model-select select, .model-select input { width: 100%; min-width: 0; }
 .model-hint { flex-basis: 100%; color: var(--muted); }
+.web-search-settings { margin-top: 24px; }

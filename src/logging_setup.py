@@ -13,10 +13,9 @@ _secrets = ()
 def refresh_secrets():
     global _secrets
     # Called at startup and after a settings update, never during formatting.
-    from src.settings import _local
+    from src.settings import ENV, SECRET_FIELDS, _local
     local = _local()
-    values = [os.environ.get('OPENALEX_API_KEY'), os.environ.get('OPENAI_API_KEY'),
-              local.get('openalex_api_key'), local.get('openai_api_key')]
+    values = [value for name in SECRET_FIELDS for value in (os.environ.get(ENV[name]), local.get(name))]
     _secrets = tuple(sorted(set(_secrets) | {v for v in values if v}, key=len, reverse=True))
 
 

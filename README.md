@@ -75,6 +75,8 @@ API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `wor
 
 ## 使用与接口
 
+网页搜索默认使用免密钥 DuckDuckGo；可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia。右上角搜索窗口新增“网页搜索”；提问范围选择“网页搜索”时使用搜索结果生成带来源的回答。原“全部来源”仍为项目文献与 OpenAlex。服务配置、环境变量与证据限制见 [网页搜索说明](docs/WEB_SEARCH.md)。
+
 科研问答输入框下方，文献范围旁可选择模型和思考强度。优先使用供应商 `effort.supported_levels` 与 `default_level`；未声明档位或目录暂不可用时，提供低、中、高三个选项，映射为 `reasoning_effort` 的 `low`、`medium`、`high`。“供应商默认”不发送该参数。通用回退不保证每个模型支持显式强度，服务拒绝时可改回默认。能力字段参考 [DeepSeek](https://api-docs.deepseek.com/api/list-models/) 与 [火山方舟](https://console.volcengine.com/ark/region%3Acn-beijing/docs/models-api) 官方文档。
 
 模型与强度随本次问题存入任务，重试沿用；环境变量 `OPENAI_MODEL` 在提交时优先。任务各科研节点使用保存的选择，服务地址与密钥仍在调用时从有效配置读取。`GET /models` 返回已配置服务的模型 ID、思考档位与默认档位；提问接口可传 `model_name` 和 `reasoning_effort`，省略时使用配置模型和供应商默认行为。
@@ -123,6 +125,14 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ```
 
 ## 验证
+
+### 网页搜索验收（2026-11-06）
+
+- `uv run --locked python -m unittest discover -s tests -v`：63 项通过，涵盖八种搜索协议、配置脱敏、证据层级、范围隔离和失败处理；Wikipedia 多页正文参数补正后对应测试再次通过。
+- `pnpm check:web`、`pnpm build:web`：通过。
+- `uv run --locked python -m scripts.verify_web_search`：临时 SQLite、本地模拟 Searx/模型 HTTP 与实际 API/worker 通过搜索、空结果、错误响应、网页问答、证据导出、全失败与重试验收。
+- 同一脚本加 `--serve`，配合 `TUFA_VERIFY_API_PORT=18180`、前端 `TUFA_API_URL=http://127.0.0.1:18180` 和 18300 端口的 Next dev：浏览器验证网页搜索结果与失败提示、八种引擎选项、切换清除草稿密钥、保存不回显、清除密钥及网页问答完成后的引用。首页、设置页及代理请求正常。
+- 未调用真实搜索供应商或云端模型；未修改默认用户数据。验收服务已停止。供应商实际可用性和模型效果由用户后续验证。
 
 ```powershell
 uv run --locked python -m unittest discover -s tests -v

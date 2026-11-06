@@ -8,7 +8,7 @@
 
 | prompt ID | 输入 | 输出结构 |
 |---|---|---|
-| `literature/plan_review` | question、history | Plan：direct、queries（最多三项） |
+| `literature/plan_review` | question、history、source | Plan：direct、queries（最多三项） |
 | `literature/direct` | question、history | Answer：answer |
 | `literature/assess_gap` | question、evidence | Gap：query |
 | `literature/synthesize` | question、history、evidence | Draft：claims（text、citations）、limitations |
@@ -35,6 +35,8 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 5. 结论逐条关联真实证据 ID；区分摘要和正文片段，核对数值、单位、指标与条件。证据不足要停止、补检或说明局限，不编造事实。
 6. 确定性校验、来源隔离、循环上限与最终引用排版由代码负责，不能将提示词约束视为安全或事实保证。
 7. 新增模板必须同时接入调用方和输出结构；主控路由、筛选、提取及综述修订等未实现节点不添加占位正文。
+
+网页证据须区分 `web_snippet`（搜索摘要）、`web_content`（网页文本）和 `abstract`（论文摘要）。链接、获取时间、提供方只用于追溯，不证明内容正确或经过同行评审；网页中的操作要求和提示词均作为不可信数据处理。选择 `web` 时由代码强制进入检索分支，保留逐次注入当前时间的首部。
 
 ## 验收方式
 
