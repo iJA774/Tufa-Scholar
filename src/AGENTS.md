@@ -5,7 +5,7 @@
 - `storage.py` 管理数据目录、SQLite 连接、表结构初始化及兼容已有数据库的结构升级。
 - `repository.py` 管理项目、文献、任务、消息、报告和收藏夹的持久化与事务边界，供 API 与 worker 复用。
 - `settings.py` 管理本地设置与环境变量解析；`logging_setup.py` 管理日志脱敏和轮转。
-- 科研业务进入 [literature/](literature/AGENTS.md)，外部服务进入 [integrations/](integrations/AGENTS.md)。共用代码不依赖 `apps/` 的路由或界面，不引入 HTTP 响应类型。
+- 可复用科研能力通过 [tools/](tools/AGENTS.md) 暴露，流程编排进入 [literature/](literature/AGENTS.md)，外部服务协议进入 [integrations/](integrations/AGENTS.md)。共用代码不依赖 `apps/` 的路由或界面，不引入 HTTP 响应类型。
 
 ## 存储与状态
 

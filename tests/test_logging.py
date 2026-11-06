@@ -38,7 +38,7 @@ class LoggingTests(unittest.TestCase):
     def test_worker_failure_logs_safe_frames_and_phase(self):
         configure_logging('worker')
         task={'id':7,'project_id':2,'source':'local','kind':'search','query':'secret question','collection_id':None}
-        with patch('apps.worker.__main__.repository.claim_task',return_value=task), patch('apps.worker.__main__.repository.fail_task') as fail, patch('apps.worker.__main__.retrieve',side_effect=RuntimeError('https://example.test?key=env-secret-abc')):
+        with patch('apps.worker.__main__.repository.claim_task',return_value=task), patch('apps.worker.__main__.repository.fail_task') as fail, patch('apps.worker.__main__.ToolRegistry.invoke',side_effect=RuntimeError('https://example.test?key=env-secret-abc')):
             run_once()
         text=(Path(self.tmp.name)/'logs/worker.log').read_text(encoding='utf-8')
         self.assertIn('task_start run_id=7',text); self.assertIn('task_failed run_id=7',text); self.assertIn('RuntimeError',text)
@@ -51,10 +51,10 @@ class LoggingTests(unittest.TestCase):
         configure_logging('worker')
         task={'id':8,'project_id':2,'source':'local','kind':'search','query':'q','collection_id':None}
         with patch('apps.worker.__main__.repository.claim_task',return_value=task), patch('apps.worker.__main__.repository.fail_task') as fail:
-            with patch('apps.worker.__main__.retrieve',side_effect=RuntimeError('模型服务请求失败 (HTTP 401)')):
+            with patch('apps.worker.__main__.ToolRegistry.invoke',side_effect=RuntimeError('模型服务请求失败 (HTTP 401)')):
                 run_once()
             self.assertEqual(fail.call_args.args[1],'模型服务请求失败 (HTTP 401)')
-            with patch('apps.worker.__main__.retrieve',side_effect=RuntimeError('模型服务请求失败 (HTTP 401) env-secret-abc')):
+            with patch('apps.worker.__main__.ToolRegistry.invoke',side_effect=RuntimeError('模型服务请求失败 (HTTP 401) env-secret-abc')):
                 run_once()
             self.assertNotIn('env-secret-abc',fail.call_args.args[1])
 

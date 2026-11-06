@@ -28,7 +28,7 @@ class WebApiTests(unittest.TestCase):
         result = {'title': '研究网页', 'url': 'https://example.org/research', 'content': '测试证据',
                   'source_level': 'web_snippet', 'provider': 'duckduckgo', 'retrieved_at': '2026-11-06T00:00:00+00:00'}
         path = f'/projects/{self.project}/web-search'
-        with patch('src.integrations.web_search.search_web', return_value=[result]) as search:
+        with patch('src.tools.research.search_web', return_value=[result]) as search:
             self.assertEqual(self.client.get(path, params={'q': '  测试  '}).json()['results'], [result])
             search.assert_called_once_with('测试', limit=5)
             self.assertEqual(self.client.get(path, params={'q': ' '}).status_code, 422)
@@ -36,7 +36,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(self.client.get('/projects/999/web-search', params={'q': 'test'}).status_code, 404)
             self.assertEqual(search.call_count, 1)
         self.assertEqual(self.client.get(f'/projects/{self.project}/papers').json(), [])
-        with patch('src.integrations.web_search.search_web', side_effect=RuntimeError('搜索服务暂不可用')):
+        with patch('src.tools.research.search_web', side_effect=RuntimeError('搜索服务暂不可用')):
             response = self.client.get(path, params={'q': 'test'})
             self.assertEqual(response.status_code, 503)
             self.assertIn('暂不可用', response.json()['detail'])

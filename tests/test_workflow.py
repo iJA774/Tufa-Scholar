@@ -15,7 +15,7 @@ class WorkflowTests(unittest.TestCase):
     def test_direct_graph(self):
         def model(name, payload, schema):
             return w.Plan(direct=True) if name.endswith('plan_review') else w.Answer(answer='你好')
-        with patch.object(w.repository, 'task_history', return_value=[]), patch.object(w, 'structured', side_effect=model), patch.object(w, 'retrieve') as retrieve:
+        with patch.object(w.repository, 'task_history', return_value=[]), patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as retrieve:
             content, evidence = w.run(TASK)
         self.assertIn('模型回答', content)
         self.assertEqual(evidence, [])
@@ -29,10 +29,12 @@ class WorkflowTests(unittest.TestCase):
             if name.endswith('assess_gap'): return w.Gap(query='more')
             if name.endswith('synthesize'): return w.Draft(claims=[])
             raise AssertionError(name)
-        paper = {'title': 'paper', 'abstract': 'attention study'}
-        with patch.object(w.repository, 'task_history', return_value=[]), patch.object(w.repository, 'project_evidence', return_value=[]), patch.object(w, 'structured', side_effect=model), patch.object(w, 'retrieve', return_value={'results': [paper]}) as retrieval:
+        paper = {'id': 3, 'title': 'paper', 'abstract': 'attention study', 'versions': []}
+        with patch.object(w.repository, 'task_history', return_value=[]), patch.object(w.repository, 'project_evidence', return_value=[paper]), patch.object(w, 'structured', side_effect=model), patch('src.tools.research.retrieve', return_value={'results': [paper]}) as retrieval, patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
             content, _ = w.run(TASK)
         self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_papers', 'collect_evidence', 'search_papers', 'collect_evidence'])
+        self.assertTrue(all(call.kwargs['context'].project_id == 2 and call.kwargs['context'].source == 'local' for call in invoke.call_args_list))
         self.assertEqual(sum(x.endswith('assess_gap') for x in calls), 1)
         self.assertIn('证据不足', content)
 
@@ -63,7 +65,7 @@ class WorkflowTests(unittest.TestCase):
     def test_pdf_page_and_version_anchor(self):
         pages = [SimpleNamespace(extract_text=lambda: 'other'), SimpleNamespace(extract_text=lambda: 'attention 95%')]
         paper = {'id': 3, 'title': 'paper'}
-        local = [{'id': 3, 'versions': [{'id': 7, 'path': 'fixture.pdf', 'text_status': 'text_available'}]}]
-        with patch.object(w.repository, 'project_evidence', return_value=local), patch.object(w, 'PdfReader', return_value=SimpleNamespace(pages=pages)):
+        local = [{'id': 3, 'title': 'paper', 'versions': [{'id': 7, 'path': 'fixture.pdf', 'text_status': 'text_available'}]}]
+        with patch.object(w.repository, 'project_evidence', return_value=local), patch('src.tools.research.PdfReader', return_value=SimpleNamespace(pages=pages)):
             result = w.evidence({'task': TASK, 'papers': [paper]})['evidence']
         self.assertEqual((result[0]['version_id'], result[0]['page'], result[0]['id']), (7, 2, 'p3v7p2'))

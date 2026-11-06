@@ -1,15 +1,18 @@
 """Evidence-based chat graph; external text is always passed as data."""
-import hashlib
 import re
 from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
 from langgraph.graph import StateGraph, START, END
 from src import repository
 from src.integrations.model import structured
-from src.integrations.web_search import search_web
-from src.literature.retrieval import retrieve
+from src.tools import ToolContext, ToolRegistry
+
+registry = ToolRegistry()
+
+
+def _context(task):
+    return ToolContext(task["project_id"], task["source"], tuple(task.get("paper_ids") or ()))
 
 
 class Plan(BaseModel):
@@ -86,18 +89,13 @@ def search(s):
     papers = list(s['papers'])
     warnings = list(s.get('warnings', []))
     if s['task']['source'] == 'collection':
-        allowed = set(s['task'].get('paper_ids') or [])
-        candidates = repository.project_evidence(s['task']['project_id'], list(allowed)) if allowed else []
-        candidates = [p for p in candidates if p['id'] in allowed]
-        ranked = repository.local_search(s['task']['project_id'], ' '.join(s['queries']), list(allowed)) if allowed else []
-        order = {p['id']: i for i, p in enumerate(ranked) if p['id'] in allowed}
-        candidates.sort(key=lambda p: order.get(p['id'], len(order)))
-        return {'papers': candidates[:6], 'previous_count': len(s['evidence'])}
+        result = registry.invoke('search_papers', {'query': ' '.join(s['queries'])}, context=_context(s['task']))
+        return {'papers': result['results'], 'previous_count': len(s['evidence'])}
     if s['task']['source'] == 'web':
         succeeded = False
         for query in s['queries']:
             try:
-                results = search_web(query, limit=5)
+                results = registry.invoke('search_web', {'query': query, 'limit': 5}, context=_context(s['task']))
                 succeeded = True
             except RuntimeError:
                 warnings.append('web_search_failed')
@@ -111,7 +109,7 @@ def search(s):
             raise RuntimeError('网页检索失败，无法获取证据，请检查搜索设置或稍后重试。')
         return {'papers': papers[:6], 'previous_count': len(s['evidence']), 'warnings': warnings}
     for query in s['queries']:
-        result = retrieve(s['task']['project_id'], query, s['task']['source'])
+        result = registry.invoke('search_papers', {'query': query}, context=_context(s['task']))
         warnings.extend(result.get('warnings', []))
         for paper in result['results']:
             key = paper.get('id') or paper.get('doi') or paper.get('openalex_id') or paper.get('title')
@@ -122,47 +120,7 @@ def search(s):
 
 def evidence(s):
     _stage(s, 'evidence')
-    if s['task']['source'] == 'web':
-        found = []
-        for item in s['papers']:
-            text = item.get('content', '').strip()[:1200]
-            if not text:
-                continue
-            entry = {
-                'id': 'w' + hashlib.sha256(item['_dedup_url'].encode('utf-8')).hexdigest()[:16],
-                'title': item['title'], 'original_url': item['url'],
-                'source_level': item['source_level'], 'provider': item['provider'],
-                'retrieved_at': item['retrieved_at'], 'text': text,
-            }
-            if item.get('published_at'):
-                entry['published_at'] = item['published_at']
-            found.append(entry)
-        return {'evidence': found}
-    allowed = s['task'].get('paper_ids') or [] if s['task']['source'] == 'collection' else None
-    local = {p['id']: p for p in repository.project_evidence(s['task']['project_id'], allowed)} if allowed is not None else {p['id']: p for p in repository.project_evidence(s['task']['project_id'])}
-    found = []
-    for p in s['papers']:
-        if allowed is not None and (p.get('id') not in allowed or p.get('id') not in local):
-            continue
-        record = local.get(p.get('id'))
-        if record:
-            for v in record['versions']:
-                if v['text_status'] != 'text_available':
-                    continue
-                reader = PdfReader(v['path'])
-                terms = [t.lower() for t in re.findall(r'\w+', s['task']['query']) if len(t) > 1]
-                pages = []
-                for page_num, page in enumerate(reader.pages[:20], 1):
-                    text = (page.extract_text() or '').strip()
-                    if text:
-                        positions = [text.lower().find(term) for term in terms if term in text.lower()]
-                        start = max(0, min(positions) - 200) if positions else 0
-                        pages.append((len(positions), page_num, text[start:start + 1200]))
-                for _, page_num, text in sorted(pages, key=lambda x: (-x[0], x[1]))[:3]:
-                    found.append({'id': f"p{p['id']}v{v['id']}p{page_num}", 'paper_id': p['id'], 'title': p['title'], 'source_level': 'full_text', 'version_id': v['id'], 'page': page_num, 'text': text})
-                break
-        if not any(e['title'] == p['title'] for e in found) and p.get('abstract'):
-            found.append({'id': f"a{len(found)+1}", 'paper_id': p.get('id'), 'title': p['title'], 'source_level': 'abstract', 'version_id': None, 'page': None, 'text': p['abstract'][:1200], 'original_url': p.get('original_url')})
+    found = registry.invoke('collect_evidence', {'query': s['task']['query'], 'papers': s['papers']}, context=_context(s['task']))
     return {'evidence': found}
 
 

@@ -361,9 +361,9 @@ def report_csv(report_id: int):
 def paper_search(project_id: int, q: str, source: Literal['all','local','openalex'] = 'all'):
     require_project(project_id)
     if not q.strip(): raise HTTPException(422, '查询不能为空')
-    from src.literature.retrieval import retrieve
+    from src.tools import ToolContext, ToolRegistry
     try:
-        return retrieve(project_id, q.strip(), source)
+        return ToolRegistry().invoke('search_papers', {'query': q.strip()}, context=ToolContext(project_id, source))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -373,9 +373,9 @@ def web_search(project_id: int, q: str = Query(min_length=1, max_length=2000)):
     require_project(project_id)
     if not q.strip():
         raise HTTPException(422, '查询不能为空')
-    from src.integrations.web_search import search_web
+    from src.tools import ToolContext, ToolRegistry
     try:
-        return {'results': search_web(q.strip(), limit=5)}
+        return {'results': ToolRegistry().invoke('search_web', {'query': q.strip(), 'limit': 5}, context=ToolContext(project_id, 'web'))}
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(503, str(exc)) from None
 

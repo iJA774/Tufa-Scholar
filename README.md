@@ -8,6 +8,8 @@
 
 中文提示词的节点契约、当前时间注入与维护规范见 [docs/PROMPTS.md](docs/PROMPTS.md)。
 
+可独立调用的科研工具及扩展方式见 [src/tools/README.md](src/tools/README.md)。架构重构系列默认在 `codex/architecture-refactor` 或从其创建的子分支开发，并随改动更新文档。
+
 ### 中文提示词接入验收（2026-11-05）
 
 - `uv run --locked python -m unittest discover -s tests -v`：39 项通过。新增模拟 HTTP 边界测试通过实际 `structured()` 加载五个模板，检查 system 消息开头北京时间、跨年逐次更新、用户输入不参与模板替换和输出结构解析。
@@ -125,6 +127,26 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ```
 
 ## 验证
+
+### 工具目录与调用入口重构验收（2026-11-06）
+
+在仓库根目录执行，临时目录固定到被忽略的 `.cache/architecture-refactor-tmp`：
+
+```powershell
+New-Item -ItemType Directory -Force .cache/architecture-refactor-tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/architecture-refactor-tmp).Path
+$env:TMP = $env:TEMP
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m scripts.verify_chat
+uv run --locked python -m scripts.verify_web_search
+git diff --check
+```
+
+- 后端回归 73 项通过，含 9 项工具专项测试：按上下文发现、参数校验、独立调用、显式注册扩展、冻结快照、收藏夹交集、本地证据真实性及网页证据去重。
+- `verify_chat` 使用临时 SQLite、本地模拟模型及实际 API/worker，通过原文页码与版本引用、数值拒绝、报告导出、失败重试及收藏夹快照隔离。
+- `verify_web_search` 使用临时 SQLite、本地模拟 Searx/模型及实际 API/worker，通过搜索、空结果、服务失败、网页引用与 CSV 导出、论文库隔离及重试。
+- 文档本地链接与 `git diff --check` 通过。首轮沙箱执行遇到服务启动与临时目录访问限制，以上结果来自允许本机进程和网络访问后的隔离重跑。
+- 未修改默认用户数据，未调用真实搜索供应商或云端模型，未重新运行浏览器交互或前端构建。工具独立调用已实现，科研问答仍使用现有 LangGraph 编排。
 
 ### 网页搜索验收（2026-11-06）
 

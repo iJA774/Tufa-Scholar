@@ -8,7 +8,7 @@ import time
 from threading import Event
 
 from src import repository
-from src.literature.retrieval import retrieve
+from src.tools import ToolContext, ToolRegistry
 from src.storage import initialize_storage
 from src.logging_setup import configure_logging, safe_stack
 def run_once():
@@ -24,7 +24,7 @@ def run_once():
             content, evidence = run(task)
             repository.finish_chat_task(task['id'], content, evidence)
         else:
-            result = retrieve(task["project_id"], task["query"], task["source"])
+            result = ToolRegistry().invoke('search_papers', {'query': task['query']}, context=ToolContext(task['project_id'], task['source']))
             repository.finish_task(task["id"], result)
         log.info('task_complete run_id=%s elapsed_ms=%.1f', task['id'], (time.monotonic()-started)*1000)
     except Exception as exc:

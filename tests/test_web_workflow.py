@@ -35,9 +35,11 @@ class WebWorkflowTests(unittest.TestCase):
             [result('https://example.com/a'), result('https://example.com/b', 'web_content')],
             [result('https://arxiv.org/abs/1234', 'abstract')],
         ]
-        with patch.object(w, 'structured', side_effect=model), patch.object(w, 'search_web', side_effect=pages) as search, patch.object(w, 'retrieve') as retrieve, patch.object(w.repository, 'project_evidence') as local:
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.search_web', side_effect=pages) as search, patch('src.tools.research.retrieve') as retrieve, patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke, patch.object(w.repository, 'project_evidence') as local:
             content, evidence = w.run(TASK)
         self.assertEqual(search.call_count, 3)
+        self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_web', 'collect_evidence', 'search_web', 'collect_evidence', 'search_web', 'collect_evidence'])
+        self.assertTrue(all(call.kwargs['context'].project_id == 2 and call.kwargs['context'].source == 'web' for call in invoke.call_args_list))
         self.assertEqual(len(rounds), 2)
         self.assertEqual(rounds[0][0]['id'], rounds[1][0]['id'])
         self.assertEqual(len(evidence), 3)
@@ -62,12 +64,12 @@ class WebWorkflowTests(unittest.TestCase):
                 self.assertEqual(len(payload['evidence'][0]['text']), 1200)
                 return w.Draft()
             raise AssertionError(name)
-        with patch.object(w, 'structured', side_effect=model), patch.object(w, 'search_web', return_value=[result('https://example.com', content='a' * 2000)]) as search:
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.search_web', return_value=[result('https://example.com', content='a' * 2000)]) as search:
             w.run(TASK)
         self.assertEqual(search.call_count, 2)
 
     def test_all_failed_requests_fail_safely_and_can_be_retried(self):
-        with patch.object(w, 'structured', return_value=w.Plan(queries=['first'])), patch.object(w, 'search_web', side_effect=RuntimeError('secret')):
+        with patch.object(w, 'structured', return_value=w.Plan(queries=['first'])), patch('src.tools.research.search_web', side_effect=RuntimeError('secret')):
             with self.assertRaisesRegex(RuntimeError, '网页检索失败') as error:
                 w.run(TASK)
         self.assertNotIn('secret', str(error.exception))
@@ -80,7 +82,7 @@ class WebWorkflowTests(unittest.TestCase):
                 return w.Draft(claims=[w.Claim(text='Research found 95%.', citations=[payload['evidence'][0]['id']])])
             if name.endswith('verify_claim'): return w.Verdict(supported=True)
             raise AssertionError(name)
-        with patch.object(w, 'structured', side_effect=model), patch.object(w, 'search_web', side_effect=[[result('https://example.com')], RuntimeError('secret')]):
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.search_web', side_effect=[[result('https://example.com')], RuntimeError('secret')]):
             content, evidence = w.run(TASK)
         self.assertIn('失败', content)
         self.assertIn('不完整', content)
@@ -93,7 +95,7 @@ class WebWorkflowTests(unittest.TestCase):
             if name.endswith('assess_gap'): return w.Gap()
             if name.endswith('synthesize'): return w.Draft()
             raise AssertionError(name)
-        with patch.object(w, 'structured', side_effect=model), patch.object(w, 'search_web', return_value=[]):
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.search_web', return_value=[]):
             content, evidence = w.run(TASK)
         self.assertIn('未找到可用文本证据', content)
         self.assertNotIn('失败', content)
@@ -107,7 +109,7 @@ class WebWorkflowTests(unittest.TestCase):
             if name.endswith('assess_gap'): return w.Gap()
             if name.endswith('synthesize'): return w.Draft()
             raise AssertionError(name)
-        with patch.object(w, 'structured', side_effect=model), patch.object(w, 'search_web') as search, patch.object(w.repository, 'project_evidence', return_value=[paper]), patch.object(w.repository, 'local_search', return_value=[]):
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.search_web') as search, patch.object(w.repository, 'project_evidence', return_value=[paper]), patch.object(w.repository, 'local_search', return_value=[]):
             w.run(task)
         search.assert_not_called()
         self.history.assert_not_called()

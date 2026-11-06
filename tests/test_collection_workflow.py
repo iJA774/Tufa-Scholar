@@ -29,7 +29,7 @@ class CollectionWorkflowTests(unittest.TestCase):
                 if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
                 if name.endswith('verify_claim'): return w.Verdict(supported=True)
                 raise AssertionError(name)
-            with patch.object(w, 'structured', side_effect=model), patch.object(w, 'retrieve') as external, patch.object(w.repository, 'task_history') as history:
+            with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.retrieve') as external, patch.object(w.repository, 'task_history') as history:
                 content, evidence = w.run(task)
                 repo.fail_task(run_id, 'test retry')
                 retried = repo.retry_task(run_id)
@@ -44,7 +44,7 @@ class CollectionWorkflowTests(unittest.TestCase):
             self.assertIn('selected evidence', retry_content)
 
     def test_empty_never_calls_model_or_network(self):
-        with patch.object(w, 'structured') as model, patch.object(w, 'retrieve') as retrieve:
+        with patch.object(w, 'structured') as model, patch('src.tools.research.retrieve') as retrieve:
             content, evidence = w.run({'source': 'collection', 'paper_ids': []})
         self.assertIn('证据不足', content)
         self.assertEqual(evidence, [])
@@ -63,17 +63,27 @@ class CollectionWorkflowTests(unittest.TestCase):
             if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
             if name.endswith('verify_claim'): return w.Verdict(supported=True)
             raise AssertionError(name)
-        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'task_history', return_value=[{'content': 'OUTSIDE_SECRET forbidden history'}]) as history, patch.object(w.repository, 'project_evidence', return_value=[allowed, decoy]), patch.object(w.repository, 'local_search', return_value=[]) as local, patch.object(w, 'retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model):
+        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'task_history', return_value=[{'content': 'OUTSIDE_SECRET forbidden history'}]) as history, patch.object(w.repository, 'project_evidence', return_value=[allowed, decoy]), patch.object(w.repository, 'local_search', return_value=[]) as local, patch('src.tools.research.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
             content, evidence = w.run(task)
         history.assert_not_called()
         retrieve.assert_not_called()
         external.assert_not_called()
+        self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_papers', 'collect_evidence', 'search_papers', 'collect_evidence'])
+        self.assertTrue(all(call.kwargs['context'].project_id == 1 and call.kwargs['context'].source == 'collection' and call.kwargs['context'].paper_ids == (3,) for call in invoke.call_args_list))
         self.assertEqual(local.call_count, 2)
         self.assertTrue(all(call.args[2] == [3] for call in local.call_args_list))
         self.assertTrue(all('OUTSIDE_SECRET' not in payload for payload in payloads))
         self.assertTrue(all('forbidden' not in payload for payload in payloads))
         self.assertNotIn('forbidden', content)
         self.assertEqual([e['paper_id'] for e in evidence], [3])
+
+    def test_collection_evidence_uses_repository_text_not_forged_search_result(self):
+        task = {'id': 1, 'project_id': 1, 'query': 'selected', 'source': 'collection', 'paper_ids': [3]}
+        stored = {'id': 3, 'title': 'Stored title', 'abstract': 'Stored evidence', 'versions': []}
+        forged = {'id': 3, 'title': 'Forged title', 'abstract': 'Forged evidence'}
+        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'project_evidence', return_value=[stored]):
+            evidence = w.evidence({'task': task, 'papers': [forged]})['evidence']
+        self.assertEqual([(e['title'], e['text']) for e in evidence], [('Stored title', 'Stored evidence')])
 
     def test_verify_rejects_unselected_paper(self):
         state = {'task': {'id': 1, 'source': 'collection', 'paper_ids': [3]}, 'draft': w.Draft(claims=[w.Claim(text='result', citations=['x'])]), 'evidence': [{'id': 'x', 'paper_id': 4, 'text': 'result', 'title': 'other'}]}

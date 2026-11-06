@@ -21,6 +21,7 @@
 | `apps/web/` | Next.js App Router、TypeScript 界面与 API 代理 | [前端](apps/web/AGENTS.md) |
 | `src/` | 共用存储、仓储、设置和日志 | [共享代码](src/AGENTS.md) |
 | `src/literature/` | 检索、科研问答、证据与核验 | [科研流程](src/literature/AGENTS.md) |
+| `src/tools/` | 可独立发现与调用的科研工具、参数契约与范围约束 | [工具](src/tools/AGENTS.md) |
 | `src/integrations/` | 外部检索与模型调用 | [外部集成](src/integrations/AGENTS.md) |
 | `prompts/` | Markdown 提示词正文 | [提示词](prompts/AGENTS.md) |
 | `tests/` | 回归测试、固定样例与模拟服务 | [测试](tests/AGENTS.md) |
@@ -41,6 +42,7 @@
 ## 开发与交付
 
 - 以任务为单位管理 Git 分支。新任务从 `main` 创建 `codex/*` 分支；同一任务的后续修改、修复和验收反馈沿用原分支，不直接在 `main` 开发。
+- 当前架构重构系列默认沿用 `codex/architecture-refactor`，需要隔离时从该分支创建子分支；用户另有要求时遵从新要求。后续修改及时同步职责、能力和验证文档。
 - 完成后仅暂存并本地提交本次任务产生的改动，用户明确要求合并提交的已有改动除外。不得擅自提交、覆盖或清理用户已有修改；若工作区改动妨碍安全切换分支，保留现场并说明冲突。
 - 从实际调用入口验证改动，按模块规则运行相关检查。纯文档修改验证路径、链接与规则一致性，不为此启动应用或全量构建。
 - 交付说明修改内容、实测命令、结果及未验证部分；区分模拟服务与真实外部服务验收，不把构建通过当成交互验证通过。

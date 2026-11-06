@@ -16,6 +16,7 @@
 |---|---|
 | HTTP、项目与文献 | `test_api.py`、`test_chat_api.py`、`test_collections_api.py` |
 | 检索、科研与证据范围 | `test_retrieval.py`、`test_workflow.py`、`test_collection_workflow.py` |
+| 工具发现、参数与独立调用 | `test_tools.py`，以及 API、worker、workflow 的调用入口回归 |
 | 设置、模型与日志 | `test_settings.py`、`test_model.py`、`test_model_discovery.py`、`test_logging.py` |
 | Worker 生命周期 | `test_worker.py`，隔离数据下的实际 `python -m apps.worker` 入口 |
 | Windows 进程树 | `test_launcher_job.ps1`、`launcher_wrapper.ps1`；先读参数与 [脚本规则](../scripts/AGENTS.md) |
