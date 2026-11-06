@@ -35,6 +35,7 @@ def run_once():
             '模型服务连接失败或超时，请检查设置',
             '模型返回的结构化结果无效',
             'OpenAlex 请求失败；请检查网络或稍后重试',
+            '网页检索失败，无法获取证据，请检查搜索设置或稍后重试。',
         }
         safe_http = re.fullmatch(r'(?:模型服务请求失败 \(HTTP [0-9]{3}\)|OpenAlex 请求失败 \(HTTP [0-9]{3}\)；请检查网络、额度或 OPENALEX_API_KEY)', message)
         if message not in safe_errors and not safe_http:

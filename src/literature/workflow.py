@@ -1,11 +1,14 @@
 """Evidence-based chat graph; external text is always passed as data."""
+import hashlib
 import re
+from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from langgraph.graph import StateGraph, START, END
 from src import repository
 from src.integrations.model import structured
+from src.integrations.web_search import search_web
 from src.literature.retrieval import retrieve
 
 
@@ -65,8 +68,11 @@ def plan(s):
     _stage(s, 'planning')
     collection = s['task']['source'] == 'collection'
     history = [] if collection else repository.task_history(s['task']['id'])
-    p = _model(s, 'literature/plan_review', {'question': s['task']['query'], 'history': history}, Plan)
-    return {'history': history, 'direct': p.direct and not collection, 'queries': p.queries or [s['task']['query']], 'papers': [], 'evidence': [], 'round': 0, 'warnings': []}
+    p = _model(s, 'literature/plan_review', {'question': s['task']['query'], 'history': history, 'source': s['task']['source']}, Plan)
+    queries = p.queries
+    if s['task']['source'] == 'web':
+        queries = [q.strip() for q in queries if q.strip()]
+    return {'history': history, 'direct': p.direct and not collection and s['task']['source'] != 'web', 'queries': queries or [s['task']['query']], 'papers': [], 'evidence': [], 'round': 0, 'warnings': []}
 
 
 def direct(s):
@@ -87,6 +93,23 @@ def search(s):
         order = {p['id']: i for i, p in enumerate(ranked) if p['id'] in allowed}
         candidates.sort(key=lambda p: order.get(p['id'], len(order)))
         return {'papers': candidates[:6], 'previous_count': len(s['evidence'])}
+    if s['task']['source'] == 'web':
+        succeeded = False
+        for query in s['queries']:
+            try:
+                results = search_web(query, limit=5)
+                succeeded = True
+            except RuntimeError:
+                warnings.append('web_search_failed')
+                continue
+            for item in results:
+                parts = urlsplit(item['url'])
+                url = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ''))
+                if item.get('content', '').strip() and not any(p['_dedup_url'] == url for p in papers):
+                    papers.append({**item, '_dedup_url': url})
+        if not succeeded and not papers:
+            raise RuntimeError('网页检索失败，无法获取证据，请检查搜索设置或稍后重试。')
+        return {'papers': papers[:6], 'previous_count': len(s['evidence']), 'warnings': warnings}
     for query in s['queries']:
         result = retrieve(s['task']['project_id'], query, s['task']['source'])
         warnings.extend(result.get('warnings', []))
@@ -99,6 +122,22 @@ def search(s):
 
 def evidence(s):
     _stage(s, 'evidence')
+    if s['task']['source'] == 'web':
+        found = []
+        for item in s['papers']:
+            text = item.get('content', '').strip()[:1200]
+            if not text:
+                continue
+            entry = {
+                'id': 'w' + hashlib.sha256(item['_dedup_url'].encode('utf-8')).hexdigest()[:16],
+                'title': item['title'], 'original_url': item['url'],
+                'source_level': item['source_level'], 'provider': item['provider'],
+                'retrieved_at': item['retrieved_at'], 'text': text,
+            }
+            if item.get('published_at'):
+                entry['published_at'] = item['published_at']
+            found.append(entry)
+        return {'evidence': found}
     allowed = s['task'].get('paper_ids') or [] if s['task']['source'] == 'collection' else None
     local = {p['id']: p for p in repository.project_evidence(s['task']['project_id'], allowed)} if allowed is not None else {p['id']: p for p in repository.project_evidence(s['task']['project_id'])}
     found = []
@@ -132,7 +171,8 @@ def assess(s):
     if s['round'] >= 2 or (s['round'] and len(s['evidence']) <= s['previous_count']):
         return {'queries': []}
     g = _model(s, 'literature/assess_gap', {'question': s['task']['query'], 'evidence': s['evidence']}, Gap)
-    return {'queries': [g.query] if g.query else [], 'round': s['round'] + 1}
+    query = g.query.strip() if s['task']['source'] == 'web' else g.query
+    return {'queries': [query] if query else [], 'round': s['round'] + 1}
 
 
 def synthesize(s):
@@ -166,15 +206,26 @@ def verify(s):
         else:
             rejected = True
     if s['draft'].limitations:
-        lines.append('局限：模型指出现有证据存在不足，需进一步核查原文。')
-    if rejected or not lines:
+        lines.append('局限：模型指出现有证据存在不足，需进一步核查来源。')
+    if rejected or not used:
         lines.append('证据不足：部分结论无法由所引材料支持。')
+    web = s['task']['source'] == 'web'
     if s.get('warnings'):
-        lines.append('外部检索不可用，本次仅使用可获得的本地结果。')
-    lines.append('正文仅检查每篇首个可提取版本前 20 页中按问题词挑选的最多 3 页、每页最多 1200 字符；摘要不等同于全文证据。')
+        lines.append('网页检索部分或全部失败，结果不完整，请稍后重试。' if web else '外部检索不可用，本次仅使用可获得的本地结果。')
+    if web:
+        if not s['evidence'] and not s.get('warnings'):
+            lines.append('本次网页检索未找到可用文本证据。')
+        lines.append('网页结果仅使用每条最多 1200 字符的片段；搜索摘要、网页文本与论文摘要的来源层级不同，不能视为论文全文。')
+    else:
+        lines.append('正文仅检查每篇首个可提取版本前 20 页中按问题词挑选的最多 3 页、每页最多 1200 字符；摘要不等同于全文证据。')
     kept = [e for e in s['evidence'] if e['id'] in used and (allowed is None or e.get('paper_id') in allowed)]
     if kept:
-        lines.append('参考证据：\n' + '\n'.join(f"[{e['id']}] {e['title']} · " + (f"原文版本 {e['version_id']}，第 {e['page']} 页" if e.get('version_id') else '仅摘要') for e in kept))
+        def reference(e):
+            if web:
+                level = {'web_snippet': '搜索摘要', 'web_content': '网页文本', 'abstract': '论文摘要'}.get(e['source_level'], e['source_level'])
+                return f"[{e['id']}] {e['title']} · {level} · {e['original_url']} · {e['provider']} · 获取于 {e['retrieved_at']}"
+            return f"[{e['id']}] {e['title']} · " + (f"原文版本 {e['version_id']}，第 {e['page']} 页" if e.get('version_id') else '仅摘要')
+        lines.append('参考证据：\n' + '\n'.join(reference(e) for e in kept))
     return {'content': '\n\n'.join(lines), 'evidence': kept}
 
 

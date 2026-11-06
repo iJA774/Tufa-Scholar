@@ -43,6 +43,8 @@ API 和 worker 连接同一个本机 SQLite 文件，启用 WAL，每个连接�
 
 ## 4. 提示词
 
+网页搜索为显式 `web` 来源，配置、协议与证据边界见 [WEB_SEARCH.md](WEB_SEARCH.md)。搜索服务结果经统一集成函数进入有限补检流程，保存 URL、获取时间、引擎及摘要/正文层级；不写入论文库，不改变收藏夹隔离或 `all` 的文献范围。模型只读取作为数据传入的网页文本。
+
 提示词写作与加载契约见 [PROMPTS.md](PROMPTS.md)。每个已接入模板以 `CURRENT_TIME` 占位符开头，统一调用入口逐次注入带 UTC+08:00 偏移的北京时间后作为 system 消息发送；业务输入单独作为 user JSON，不参与模板求值。
 
 主控使用 `prompts/runtime/route.md`。科研节点使用 `prompts/literature/` 下的 plan_review、rewrite_query、screen_paper、extract_evidence、assess_gap、synthesize、verify_claim、revise 等同名 Markdown 文件；实现对应节点时创建。统一模型调用函数按 ID 加载文件，代码传入结构化数据并用 Pydantic 校验输出。提示词正文不得散落在代码中。用 Git 跟踪修改；用固定输入检查调词后的输出行为。首版不建设提示词快照仓库，不要求逐调用计算哈希。

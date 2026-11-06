@@ -10,7 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -69,6 +69,17 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 
 class SettingsInput(BaseModel):
+    web_search_engine: str | None = None
+    tavily_api_key: str | None = Field(default=None, repr=False)
+    infoquest_api_key: str | None = Field(default=None, repr=False)
+    brave_search_api_key: str | None = Field(default=None, repr=False)
+    serper_api_key: str | None = Field(default=None, repr=False)
+    clear_tavily_api_key: bool = False
+    clear_infoquest_api_key: bool = False
+    clear_brave_search_api_key: bool = False
+    clear_serper_api_key: bool = False
+    searx_base_url: str | None = None
+    wikipedia_lang: str | None = None
     openalex_api_key: str | None = Field(default=None, repr=False)
     clear_openalex_api_key: bool = False
     openai_api_key: str | None = Field(default=None, repr=False)
@@ -114,7 +125,7 @@ class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
-    source: Literal['all', 'local', 'openalex', 'collection'] = 'local'
+    source: Literal['all', 'local', 'openalex', 'collection', 'web'] = 'local'
     conversation_id: int | None = None
     collection_id: int | None = None
 
@@ -339,7 +350,7 @@ def report_csv(report_id: int):
     if report is None:
         raise HTTPException(404, '报告不存在')
     output = io.StringIO(newline='')
-    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url']
+    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url','provider','retrieved_at','published_at']
     writer = csv.DictWriter(output, fieldnames=fields, extrasaction='ignore')
     writer.writeheader()
     writer.writerows(report['evidence'])
@@ -355,6 +366,18 @@ def paper_search(project_id: int, q: str, source: Literal['all','local','openale
         return retrieve(project_id, q.strip(), source)
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+@app.get('/projects/{project_id}/web-search')
+def web_search(project_id: int, q: str = Query(min_length=1, max_length=2000)):
+    require_project(project_id)
+    if not q.strip():
+        raise HTTPException(422, '查询不能为空')
+    from src.integrations.web_search import search_web
+    try:
+        return {'results': search_web(q.strip(), limit=5)}
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(503, str(exc)) from None
 
 
 @app.get('/projects/{project_id}/collections')
