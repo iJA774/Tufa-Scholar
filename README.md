@@ -163,6 +163,14 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 
 ## 验证
 
+### 前端工作台分责验收（2026-11-06）
+
+- `pnpm check:web`、`pnpm build:web`：最终版本通过。构建前设置 `TUFA_API_URL=http://127.0.0.1:18180`，使用 E 盘 `.cache/frontend-refactor-tmp` 作为 `TEMP`/`TMP`，设置 `NEXT_TELEMETRY_DISABLED=1` 与 `NODE_OPTIONS=--max-old-space-size=1536`。
+- `pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck`，随后 `node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)`：2 项通过，覆盖无重叠、终态停止、取消、中止与旧响应忽略、错误后停止。
+- `.venv/Scripts/python.exe -B -m scripts.fixture_api --data-dir E:\Tufa-Scholar\.cache\frontend-refactor-acceptance-20261106 --port 18180` 配合前端目录下 `node --max-old-space-size=1024 node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 18300`：实际浏览器通过项目创建/切换、删除确认取消、收藏确认/取消/移除、创建空夹及问答禁用、草稿保留、论文搜索空态/失败恢复/收藏、网页检索、历史跳转、PDF 上传与列表刷新。
+- 模拟任务通过 `POST /__fixture/advance` 显式推进；浏览器验证 pending、failed、重试 succeeded 与回答/引用刷新。HTTP 回读确认选择的模型和 medium 强度保存，证据 CSV 返回 200；任务在旧项目完成时未污染新项目。最终构建复查同一会话历史跳转保持四条消息，以及移除后的成功提示；浏览器错误日志为空。
+- 预览位于 `.cache/frontend-refactor-tmp/workspace.jpg`。本轮 API、前端均已停止，18180/18300 端口无监听；未启动 worker、未修改默认用户数据、未调用真实模型或搜索服务。仅使用模拟目录和任务结果，不推定真实供应商质量或完整后端工作流验证通过；未重跑后端全量回归或根启动器验收。
+
 ### 候选池与 Agent 解耦验收（2026-11-06）
 
 在仓库根目录使用隔离临时目录执行：

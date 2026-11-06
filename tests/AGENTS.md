@@ -21,6 +21,6 @@
 | 设置、模型与日志 | `test_settings.py`、`test_model.py`、`test_model_discovery.py`、`test_logging.py` |
 | Worker 生命周期 | `test_worker.py`，隔离数据下的实际 `python -m apps.worker` 入口 |
 | Windows 进程树 | `test_launcher_job.ps1`、`launcher_wrapper.ps1`；先读参数与 [脚本规则](../scripts/AGENTS.md) |
-| 前端 | `pnpm check:web`、`pnpm build:web`、页面实际 HTTP 与交互入口 |
+| 前端 | `pnpm check:web`、`pnpm build:web`、轮询调度测试与页面实际 HTTP/交互，命令见 [前端说明](../apps/web/README.md) |
 
 跨进程行为可用 `scripts/verify_*.py` 验收，运行前确认各脚本隔离条件。结果写入 README 验收部分，区分单测、模拟 HTTP、浏览器与真实云端验证。
