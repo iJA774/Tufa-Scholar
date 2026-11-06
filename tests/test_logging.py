@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from apps.api.main import app
-from src.logging_setup import configure_logging
-from src.storage import initialize_storage
+from src.infrastructure.logging_setup import configure_logging
+from src.persistence.storage import initialize_storage
 from apps.worker.__main__ import run_once
 
 
@@ -44,7 +44,7 @@ class LoggingTests(unittest.TestCase):
         self.assertIn('task_start run_id=7',text); self.assertIn('task_failed run_id=7',text); self.assertIn('RuntimeError',text)
         self.assertNotIn('env-secret-abc',text); self.assertNotIn('secret question',text); self.assertNotIn('https://',text)
         self.assertNotIn('env-secret-abc',fail.call_args.args[1])
-        from src.repository import update_stage
+        from src.persistence.repository import update_stage
         update_stage(7,'searching')
         self.assertIn('task_stage run_id=7 stage=searching',(Path(self.tmp.name)/'logs/worker.log').read_text(encoding='utf-8'))
     def test_known_http_status_is_safe_but_appended_secret_is_not(self):

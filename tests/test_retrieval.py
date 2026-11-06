@@ -8,7 +8,7 @@ import httpx
 
 from src.integrations.openalex import search_works
 from src.literature.retrieval import retrieve
-from src.storage import initialize_storage
+from src.persistence.storage import initialize_storage
 
 
 class RetrievalTests(unittest.TestCase):

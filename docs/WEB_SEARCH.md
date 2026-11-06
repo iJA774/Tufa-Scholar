@@ -27,7 +27,7 @@ DuckDuckGo 使用 `ddgs`，显式指定 DuckDuckGo 后端；该库可能将无�
 
 ## 数据与执行边界
 
-- `src/integrations/web_search.py` 负责搜索协议、超时、安全错误和统一结果；`src/settings.py` 逐次解析已选引擎配置。
+- `src/integrations/web_search.py` 负责搜索协议、超时、安全错误和统一结果；`src/infrastructure/settings.py` 逐次解析已选引擎配置。工具入口位于 `src/tools/search.py`，网页取证业务位于 `src/literature/evidence.py`，工作流由 `src/agents/literature.py` 编排。
 - `GET /projects/{project_id}/web-search?q=...` 返回最多五条结果，验证项目存在，不写项目文献，也不调用模型。
 - 提问接口 `source=web` 进入网页证据流程。`all` 仍只代表项目文献与 OpenAlex；收藏夹范围仍禁止外部搜索。
 - 一次初始检索，最多两轮补检；每个查询最多五条结果，最多使用六个去重 URL，每条证据最多 1200 字符。无新增证据停止补检。

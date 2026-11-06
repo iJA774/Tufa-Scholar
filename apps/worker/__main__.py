@@ -7,10 +7,10 @@ import re
 import time
 from threading import Event
 
-from src import repository
+from src.persistence import repository
 from src.tools import ToolContext, ToolRegistry
-from src.storage import initialize_storage
-from src.logging_setup import configure_logging, safe_stack
+from src.persistence.storage import initialize_storage
+from src.infrastructure.logging_setup import configure_logging, safe_stack
 def run_once():
     task = repository.claim_task()
     if task is None:
@@ -20,7 +20,7 @@ def run_once():
     log.info('task_start run_id=%s project_id=%s source=%s collection_id=%s', task['id'], task['project_id'], task['source'], task.get('collection_id'))
     try:
         if task.get('kind') == 'chat':
-            from src.literature.workflow import run
+            from src.agents.literature import run
             content, evidence = run(task)
             repository.finish_chat_task(task['id'], content, evidence)
         else:

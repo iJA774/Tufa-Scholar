@@ -14,7 +14,7 @@
 | `literature/synthesize` | question、history、evidence | Draft：claims（text、citations）、limitations |
 | `literature/verify_claim` | claim、evidence | Verdict：supported |
 
-`src/literature/workflow.py` 调用 `src/integrations/model.py` 的 `structured()`。该入口读取 Markdown，逐次替换时间变量，将渲染后的全文放进 system 消息，输入 JSON 单独放进 user 消息，发送至配置的 `/chat/completions`，随后用调用方的 Pydantic 结构校验响应。不是仅供展示的文档模板。
+`src/agents/literature.py` 调用 `src/integrations/model.py` 的 `structured()`。该入口从 `src/prompts/` 按 prompt ID 读取 Markdown（如 `literature/direct` 对应 `src/prompts/literature/direct.md`），逐次替换时间变量，将渲染后的全文放进 system 消息，输入 JSON 单独放进 user 消息，发送至配置的 `/chat/completions`，随后用调用方的 Pydantic 结构校验响应。加载路径基于模块文件位置，不依赖当前工作目录。
 
 所有提示词正文的前三行固定为：
 

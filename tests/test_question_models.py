@@ -8,11 +8,11 @@ import httpx
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
-from src import repository
-from src.literature.workflow import run
+from src.persistence import repository
+from src.agents.literature import run
 from src.integrations.model import discover, structured
-from src.literature.workflow import Answer
-from src.storage import initialize_storage
+from src.agents.literature import Answer
+from src.persistence.storage import initialize_storage
 
 
 class QuestionModelTests(unittest.TestCase):

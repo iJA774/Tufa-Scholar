@@ -68,6 +68,6 @@ registry.register(
 registry.invoke("text_length", {"text": "科研"}, context=context)
 ```
 
-重复名称被拒绝。内置能力在 `research.py` 中集中显式注册；新工具应声明实际适用来源，并在执行中遵守上下文。提示词和报告核验留在对应模块，不塞入注册器。
+重复名称被拒绝。`registry.py` 显式接入 `search.py` 与 `read_paper.py` 的注册函数；两者分别适配检索和取证，实际算法位于 `src/literature/retrieval.py`、`src/literature/evidence.py`。新工具应声明实际适用来源，并在执行中遵守上下文。提示词位于 `src/prompts/`，模型综合和报告核验位于 `src/agents/literature.py`，不塞入注册器。
 
 从仓库根目录运行 `uv run --locked python -m unittest tests.test_tools -v` 验证工具入口。跨层回归及实际 API/worker 验收命令见 [根 README](../../README.md#验证)。

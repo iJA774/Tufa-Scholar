@@ -19,11 +19,14 @@
 | `apps/api/` | FastAPI HTTP 接口、请求校验、文件与报告交付 | [API](apps/api/AGENTS.md) |
 | `apps/worker/` | 单进程任务领取、执行与生命周期 | [Worker](apps/worker/AGENTS.md) |
 | `apps/web/` | Next.js App Router、TypeScript 界面与 API 代理 | [前端](apps/web/AGENTS.md) |
-| `src/` | 共用存储、仓储、设置和日志 | [共享代码](src/AGENTS.md) |
-| `src/literature/` | 检索、科研问答、证据与核验 | [科研流程](src/literature/AGENTS.md) |
+| `src/` | Python 模块职责与依赖方向 | [共享代码](src/AGENTS.md) |
+| `src/agents/` | Agent 工作流、状态、综合与核验 | [工作流](src/agents/AGENTS.md) |
+| `src/literature/` | 文献检索、排名与证据提取业务 | [文献业务](src/literature/AGENTS.md) |
 | `src/tools/` | 可独立发现与调用的科研工具、参数契约与范围约束 | [工具](src/tools/AGENTS.md) |
 | `src/integrations/` | 外部检索与模型调用 | [外部集成](src/integrations/AGENTS.md) |
-| `prompts/` | Markdown 提示词正文 | [提示词](prompts/AGENTS.md) |
+| `src/persistence/` | SQLite、仓储与事务 | [持久化](src/persistence/AGENTS.md) |
+| `src/infrastructure/` | 本机设置、环境变量与日志 | [基础设施](src/infrastructure/AGENTS.md) |
+| `src/prompts/` | Markdown 提示词正文 | [提示词](src/prompts/AGENTS.md) |
 | `tests/` | 回归测试、固定样例与模拟服务 | [测试](tests/AGENTS.md) |
 | `scripts/`、`start.ps1` | 本机启动、进程管理与实际入口验收 | [脚本](scripts/AGENTS.md)，修改根启动器时也读取 |
 | `docs/` | 架构设计、项目状态与专题说明 | [文档](docs/AGENTS.md) |
@@ -36,7 +39,7 @@
 - 根目录 `pyproject.toml`、`uv.lock` 管理 API、worker 与 `src/` 的共用 Python 环境；根目录 pnpm workspace、`pnpm-lock.yaml` 管理前端。依赖变更更新对应入口和锁文件，不另建重复环境。
 - API 与 worker 共用 `TUFA_DATA_DIR` 下的 SQLite，默认运行数据在被 Git 忽略的 `data/`。保留用户数据库、原文、报告和已有改动，验收使用独立数据目录。
 - 外部服务 API 密钥可由用户保存到本机设置或从环境变量读取，环境变量优先。接口与日志不得回显密钥；不把密钥、用户材料或本机配置提交到 Git。
-- 提示词正文集中在 `prompts/` 的 Markdown 文件中；数据结构、数值检查与证据定位由代码负责。
+- 提示词正文集中在 `src/prompts/` 的 Markdown 文件中；数据结构、数值检查与证据定位由代码负责。
 - 内容摘要可用于导入时的相同文件去重。普通测试检查数据、状态和可观察结果，禁止用固定摘要锁死提示词、整份报告或目录内容。
 
 ## 开发与交付

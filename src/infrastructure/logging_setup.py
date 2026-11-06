@@ -5,7 +5,7 @@ import re
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from src.storage import data_directory
+from src.persistence.storage import data_directory
 
 _secrets = ()
 
@@ -13,7 +13,7 @@ _secrets = ()
 def refresh_secrets():
     global _secrets
     # Called at startup and after a settings update, never during formatting.
-    from src.settings import ENV, SECRET_FIELDS, _local
+    from src.infrastructure.settings import ENV, SECRET_FIELDS, _local
     local = _local()
     values = [value for name in SECRET_FIELDS for value in (os.environ.get(ENV[name]), local.get(name))]
     _secrets = tuple(sorted(set(_secrets) | {v for v in values if v}, key=len, reverse=True))

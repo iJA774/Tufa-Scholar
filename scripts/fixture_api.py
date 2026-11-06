@@ -1,6 +1,6 @@
 """Test-only API with a deterministic simulated OpenAlex search result."""
 from apps.api.main import app
-import src.literature.retrieval as retrieval
+import src.agents.literature.retrieval as retrieval
 
 
 def fixture_search(query, limit=20):

@@ -17,11 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from src import repository as repo
-from src import settings
+from src.persistence import repository as repo
+from src.infrastructure import settings
 from src.integrations.model import discover
-from src.storage import data_directory, initialize_storage
-from src.logging_setup import configure_logging, close_logging, safe_stack
+from src.persistence.storage import data_directory, initialize_storage
+from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack
 
 
 @asynccontextmanager
@@ -258,7 +258,7 @@ async def import_paper(project_id: int, file: UploadFile = File(...), title: str
     except Exception as exc:
         raise HTTPException(422, '无法解析 PDF 文件') from exc
     digest = sha256(content).hexdigest()
-    from src.storage import connect_database
+    from src.persistence.storage import connect_database
     with connect_database() as db:
         duplicate = bool(repo.existing_version(db, digest))
     path = data_directory() / 'originals' / f'{digest}.pdf'

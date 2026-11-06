@@ -2,7 +2,7 @@
 import os
 import re
 from urllib.parse import urlsplit
-from src.storage import connect_database, data_directory
+from src.persistence.storage import connect_database, data_directory
 
 ENV = {
     'openalex_api_key': 'OPENALEX_API_KEY',
@@ -138,7 +138,7 @@ def update(values):
             else:
                 db.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (name, value))
         db.commit()
-    from src.logging_setup import refresh_secrets
+    from src.infrastructure.logging_setup import refresh_secrets
     refresh_secrets()
     return public_settings()
 

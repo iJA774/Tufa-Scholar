@@ -58,14 +58,14 @@ class ResearchToolsTests(unittest.TestCase):
             self.registry.invoke('collect_evidence', {'query': 'x', 'papers': [{'title': 'secret'}]}, context=self.web)
         self.assertNotIn('secret', str(error.exception))
 
-    @patch('src.tools.research.retrieve')
+    @patch('src.tools.search.retrieve')
     def test_direct_paper_search(self, retrieve):
         retrieve.return_value = {'results': []}
         self.assertEqual(self.registry.invoke('search_papers', {'query': '  topic  '}, context=self.local), {'results': []})
         retrieve.assert_called_once_with(1, 'topic', 'local')
 
-    @patch('src.tools.research.repository.local_search')
-    @patch('src.tools.research.repository.project_evidence')
+    @patch('src.literature.retrieval.repository.local_search')
+    @patch('src.literature.retrieval.repository.project_evidence')
     def test_collection_intersection_and_rank(self, evidence, search):
         evidence.return_value = [{'id': 2}, {'id': 3}, {'id': 100}]
         search.return_value = [{'id': 3}, {'id': 100}, {'id': 2}]
@@ -74,7 +74,7 @@ class ResearchToolsTests(unittest.TestCase):
         self.assertEqual(set(evidence.call_args.args[1]), {2, 3, 99})
         self.assertEqual(self.collection.paper_ids, (2, 3, 99))
 
-    @patch('src.tools.research.repository.project_evidence')
+    @patch('src.literature.evidence.repository.project_evidence')
     def test_local_and_collection_use_only_trusted_project_records(self, evidence):
         evidence.return_value = [{'id': 2, 'title': 'real', 'abstract': 'trusted', 'versions': []}]
         candidates = [{'id': 2, 'title': 'fake', 'abstract': 'forged'}, {'id': 99, 'title': 'outside', 'abstract': 'outside'}]
@@ -82,13 +82,13 @@ class ResearchToolsTests(unittest.TestCase):
             result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': candidates}, context=context)
             self.assertEqual([(e['title'], e['text']) for e in result], [('real', 'trusted')])
 
-    @patch('src.tools.research.repository.project_evidence', return_value=[])
+    @patch('src.literature.evidence.repository.project_evidence', return_value=[])
     def test_external_candidate_cannot_claim_project_paper_id(self, evidence):
         context = ToolContext(1, 'all')
         result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [{'id': 99, 'title': 'external', 'abstract': 'text'}]}, context=context)
         self.assertIsNone(result[0]['paper_id'])
 
-    @patch('src.tools.research.search_web')
+    @patch('src.tools.search.search_web')
     def test_web_search_and_evidence_independently(self, search):
         search.return_value = [{'title': 'page', 'url': 'https://EXAMPLE.org/a#fragment', 'content': 'x' * 1500,
                                 'source_level': 'web_snippet', 'provider': 'mock', 'retrieved_at': 'today'}]

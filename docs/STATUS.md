@@ -4,6 +4,8 @@
 
 ## 已实现能力
 
+- Python 模块已按 `agents`、`tools`、`integrations`、`literature`、`persistence` 和 `infrastructure` 分责，提示词位于 `src/prompts/`。工作流、工具适配与文献业务分离；提示词 ID 和默认仓库根目录 `data/` 保持既有语义，布局见 [架构说明](ARCHITECTURE.md)。
+
 - `src/tools/` 提供论文检索、网页搜索与证据提取的统一目录、输入结构和按名称调用入口；API 搜索、worker 检索与 LangGraph 科研节点复用该入口。工具可脱离图单独执行，项目、来源与收藏夹快照由上下文约束，详见 [工具说明](../src/tools/README.md)。
 
 - 网页搜索支持 DeerFlow 1.x 的八种引擎，默认免密钥 DuckDuckGo；设置页配置、独立网页搜索与问答 `web` 范围已接入。引用与证据导出保留 URL、引擎和获取时间，网页内容不自动写入论文库，详见 [WEB_SEARCH.md](WEB_SEARCH.md)。

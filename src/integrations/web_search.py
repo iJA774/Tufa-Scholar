@@ -9,7 +9,7 @@ import httpx
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 
-from src.settings import web_search_config
+from src.infrastructure.settings import web_search_config
 
 _TIMEOUT = 20
 _MAX_CONTENT = 4000

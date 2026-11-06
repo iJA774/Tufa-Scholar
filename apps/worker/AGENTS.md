@@ -1,6 +1,6 @@
 # Worker 开发约定
 
-- `__main__.py` 负责领取、分派、结果落库与进程生命周期；单次检索通过 [工具入口](../../src/tools/AGENTS.md)，问答编排放在 [科研流程](../../src/literature/AGENTS.md)，任务存储复用 [共用仓储](../../src/AGENTS.md)。
+- `__main__.py` 负责领取、分派、结果落库与进程生命周期；单次检索通过 [工具入口](../../src/tools/AGENTS.md)，问答编排放在 [Agent 工作流](../../src/agents/AGENTS.md)，任务存储复用 [持久化模块](../../src/persistence/AGENTS.md)，日志复用 [基础设施](../../src/infrastructure/AGENTS.md)。
 - 顺序领取和执行任务，不增加并发 worker 或后台执行池。API 与 worker 指向同一数据目录。
 - 启动时将上次遗留的运行中任务标为中断，不自动重放；重试由显式操作创建新任务，保留原记录和论文范围快照。
 - 成功结果与任务完成状态保持一致；失败要落库，不能让单个任务异常终止后续领取。报告、消息与完成状态由仓储统一提交。

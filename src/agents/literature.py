@@ -4,7 +4,7 @@ from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-from src import repository
+from src.persistence import repository
 from src.integrations.model import structured
 from src.tools import ToolContext, ToolRegistry
 

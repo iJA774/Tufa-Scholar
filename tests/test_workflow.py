@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-from src.literature import workflow as w
+from src.agents import literature as w
 
 
 TASK = {'id': 1, 'project_id': 2, 'query': 'attention', 'source': 'local'}
@@ -30,7 +30,7 @@ class WorkflowTests(unittest.TestCase):
             if name.endswith('synthesize'): return w.Draft(claims=[])
             raise AssertionError(name)
         paper = {'id': 3, 'title': 'paper', 'abstract': 'attention study', 'versions': []}
-        with patch.object(w.repository, 'task_history', return_value=[]), patch.object(w.repository, 'project_evidence', return_value=[paper]), patch.object(w, 'structured', side_effect=model), patch('src.tools.research.retrieve', return_value={'results': [paper]}) as retrieval, patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
+        with patch.object(w.repository, 'task_history', return_value=[]), patch.object(w.repository, 'project_evidence', return_value=[paper]), patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}) as retrieval, patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
             content, _ = w.run(TASK)
         self.assertEqual(retrieval.call_count, 2)
         self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_papers', 'collect_evidence', 'search_papers', 'collect_evidence'])
@@ -66,6 +66,6 @@ class WorkflowTests(unittest.TestCase):
         pages = [SimpleNamespace(extract_text=lambda: 'other'), SimpleNamespace(extract_text=lambda: 'attention 95%')]
         paper = {'id': 3, 'title': 'paper'}
         local = [{'id': 3, 'title': 'paper', 'versions': [{'id': 7, 'path': 'fixture.pdf', 'text_status': 'text_available'}]}]
-        with patch.object(w.repository, 'project_evidence', return_value=local), patch('src.tools.research.PdfReader', return_value=SimpleNamespace(pages=pages)):
+        with patch.object(w.repository, 'project_evidence', return_value=local), patch('src.literature.evidence.PdfReader', return_value=SimpleNamespace(pages=pages)):
             result = w.evidence({'task': TASK, 'papers': [paper]})['evidence']
         self.assertEqual((result[0]['version_id'], result[0]['page'], result[0]['id']), (7, 2, 'p3v7p2'))

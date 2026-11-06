@@ -2,7 +2,7 @@
 import json
 import logging
 import re
-from src.storage import connect_database
+from src.persistence.storage import connect_database
 
 
 def _dict(row, cursor):

@@ -10,6 +10,41 @@
 
 可独立调用的科研工具及扩展方式见 [src/tools/README.md](src/tools/README.md)。架构重构系列默认在 `codex/architecture-refactor` 或从其创建的子分支开发，并随改动更新文档。
 
+当前 Python 代码按以下职责组织（省略规则与说明文件）：
+
+```text
+src/
+├── __init__.py
+├── agents/
+│   ├── __init__.py
+│   └── literature.py
+├── tools/
+│   ├── __init__.py
+│   ├── registry.py
+│   ├── search.py
+│   └── read_paper.py
+├── integrations/
+│   ├── openalex.py
+│   ├── model.py
+│   └── web_search.py
+├── literature/
+│   ├── retrieval.py
+│   └── evidence.py
+├── persistence/
+│   ├── __init__.py
+│   ├── storage.py
+│   └── repository.py
+├── infrastructure/
+│   ├── __init__.py
+│   ├── settings.py
+│   └── logging_setup.py
+└── prompts/
+    ├── literature/
+    └── runtime/
+```
+
+工作流说明见 [agents](src/agents/README.md)，检索与取证业务见 [literature](src/literature/README.md)。提示词从 `src/prompts/` 加载，调用 ID 仍为 `literature/模板名`。默认数据仍在仓库根目录 `data/`，相对 `TUFA_DATA_DIR` 也以仓库根目录解析。
+
 ### 中文提示词接入验收（2026-11-05）
 
 - `uv run --locked python -m unittest discover -s tests -v`：39 项通过。新增模拟 HTTP 边界测试通过实际 `structured()` 加载五个模板，检查 system 消息开头北京时间、跨年逐次更新、用户输入不参与模板替换和输出结构解析。
@@ -127,6 +162,26 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ```
 
 ## 验证
+
+### Python 目录分责与提示词迁移验收（2026-11-06）
+
+在仓库根目录执行，验收使用独立临时数据库与本地模拟服务：
+
+```powershell
+New-Item -ItemType Directory -Force .cache/architecture-layout-tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/architecture-layout-tmp).Path
+$env:TMP = $env:TEMP
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m scripts.verify_chat
+uv run --locked python -m scripts.verify_web_search
+git diff --check
+```
+
+- 后端回归 75 项通过。新增路径回归确认从仓库根目录以外调用 `structured()` 仍能加载模板，默认数据目录仍是仓库根目录 `data/`，路径测试不写入该目录。
+- 实际 API/worker 的 `verify_chat` 模拟闭环通过：PDF 页码与版本引用、证据不足、报告导出、失败重试和收藏夹快照隔离。
+- 实际 API/worker 的 `verify_web_search` 模拟闭环通过：网页检索、空结果与失败、引用与 CSV 导出、论文库隔离和重试。
+- 五份提示词正文与移动前一致，prompt ID 未变；新旧模块引用与 29 份文档本地链接已检查，`git diff --check` 通过。
+- 未修改默认用户数据，未调用真实搜索供应商或云端模型；本轮未重新运行浏览器交互、前端构建或根启动器的完整进程管理验收。
 
 ### 工具目录与调用入口重构验收（2026-11-06）
 

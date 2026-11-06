@@ -11,10 +11,13 @@
 | `apps/web/` | Next.js + TypeScript。展示项目、对话、文献、任务进度、报告和原文定位。 |
 | `apps/api/` | FastAPI。处理本地请求，读写 SQLite，提供文件和报告。 |
 | `apps/worker/` | 单个 Python 进程，顺序领取和执行任务。与 API 共用后端依赖。 |
-| `src/literature/` | 检索排名服务及科研流程编排。使用 LangGraph 表达取证、补检与生成的分支，报告修订为后续目标。 |
+| `src/agents/` | Agent 工作流。`literature.py` 使用 LangGraph 表达科研问答分支、补检、综合与核验。 |
 | `src/tools/` | 显式注册、发现与调用可复用工具，校验参数并执行项目和来源范围约束；能力独立于 LangGraph。 |
-| `src/integrations/` | 封装实际用到的学术检索、PDF 解析和模型调用。 |
-| `prompts/` | 集中存放 Markdown 提示词。 |
+| `src/integrations/` | 外部服务协议适配：OpenAlex、模型与网页搜索。 |
+| `src/literature/` | 文献业务。`retrieval.py` 负责检索排名及收藏夹候选，`evidence.py` 负责 PDF、摘要和网页片段取证。 |
+| `src/persistence/` | `storage.py` 管理 SQLite 和数据路径，`repository.py` 管理持久化与事务。 |
+| `src/infrastructure/` | `settings.py` 管理本机配置及环境变量，`logging_setup.py` 管理日志脱敏与轮转。 |
+| `src/prompts/` | 集中存放 Markdown 提示词，保留 `literature/` 与 `runtime/` 分类。 |
 | `data/` | 保存 research.db、原始文献和导出报告；加入 Git 忽略。 |
 
 后端用 uv、前端用 pnpm，提交各自锁文件。直接在本机启动前端、API 和 worker。前端和 API 默认只监听回环地址。数据库随应用初始化，无需安装数据库服务、Docker 或 Conda。OpenAlex 和 OpenAI 兼容模型设置可保存在 `TUFA_DATA_DIR` 的 SQLite 中，环境变量优先；密钥不在接口响应或日志中回显。LangGraph 问答通过模型集成层生成回答并保存证据。
@@ -41,7 +44,9 @@ API 和 worker 连接同一个本机 SQLite 文件，启用 WAL，每个连接�
 
 `ToolContext` 保存调用方确定的项目、来源与收藏夹论文快照；调用参数只描述本次操作，不能覆盖这些范围。目录发现和执行均检查工具是否适用于上下文。收藏夹检索与取证始终使用快照和项目文献的交集；本地原文路径来自仓储，工具不接受任意文件路径。
 
-工具处理单次能力调用，检索排名复用 `literature/retrieval.py`，外部协议复用 `integrations/`。LangGraph 继续负责规划、补检次数、阶段、综合与核验；worker 与仓储继续负责任务及结果提交。工具目录本身不做任务调度，也不自动让模型选择工具。模型自主调用循环需另行设计与验收。
+`tools/search.py` 和 `tools/read_paper.py` 负责工具契约与适配，单次检索和取证分别委托给 `literature/retrieval.py`、`literature/evidence.py`，外部协议复用 `integrations/`。文献业务不依赖工具注册器或 Agent 状态。`agents/literature.py` 继续负责规划、补检次数、阶段、综合与核验；worker 与 `persistence/repository.py` 负责任务及结果提交。配置与日志统一复用 `infrastructure/`。工具目录不做任务调度，也不自动让模型选择工具；模型自主调用循环需另行设计与验收。
+
+模块路径以 `src` 为包根，应用、脚本和测试直接导入新位置，不保留旧路径转发模块。提示词按集成文件位置定位到 `src/prompts/`，数据路径由 `persistence/storage.py` 定位到仓库根目录；移动 Python 文件不能把默认数据目录变为 `src/data/`。
 
 ### 科研流程目标
 
@@ -58,7 +63,7 @@ API 和 worker 连接同一个本机 SQLite 文件，启用 WAL，每个连接�
 
 提示词写作与加载契约见 [PROMPTS.md](PROMPTS.md)。每个已接入模板以 `CURRENT_TIME` 占位符开头，统一调用入口逐次注入带 UTC+08:00 偏移的北京时间后作为 system 消息发送；业务输入单独作为 user JSON，不参与模板求值。
 
-主控使用 `prompts/runtime/route.md`。科研节点使用 `prompts/literature/` 下的 plan_review、rewrite_query、screen_paper、extract_evidence、assess_gap、synthesize、verify_claim、revise 等同名 Markdown 文件；实现对应节点时创建。统一模型调用函数按 ID 加载文件，代码传入结构化数据并用 Pydantic 校验输出。提示词正文不得散落在代码中。用 Git 跟踪修改；用固定输入检查调词后的输出行为。首版不建设提示词快照仓库，不要求逐调用计算哈希。
+主控目标模板为 `src/prompts/runtime/route.md`。科研节点使用 `src/prompts/literature/` 下的 plan_review、rewrite_query、screen_paper、extract_evidence、assess_gap、synthesize、verify_claim、revise 等同名 Markdown 文件；实现对应节点时创建。统一模型调用函数按 ID（如 `literature/plan_review`）加载文件，代码传入结构化数据并用 Pydantic 校验输出。提示词正文不得散落在代码中。用 Git 跟踪修改；用固定输入检查调词后的输出行为。首版不建设提示词快照仓库，不要求逐调用计算哈希。
 
 ## 5. 本地接口与验收
 

@@ -1,5 +1,7 @@
 import unittest
 import json
+import os
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 import httpx
@@ -13,7 +15,7 @@ class Output(BaseModel):
 
 class ModelTests(unittest.TestCase):
     def test_all_prompts_render_fresh_time_at_actual_model_boundary(self):
-        from src.literature.workflow import Plan, Answer, Gap, Draft, Verdict
+        from src.agents.literature import Plan, Answer, Gap, Draft, Verdict
         cases = [('plan_review', Plan, {'direct': False, 'queries': ['test']}),
                  ('direct', Answer, {'answer': 'hello'}),
                  ('assess_gap', Gap, {'query': ''}),
@@ -38,6 +40,19 @@ class ModelTests(unittest.TestCase):
                         self.assertEqual(json.loads(user['content']), payload)
                         self.assertEqual(sent['response_format'], {'type': 'json_object'})
                         self.assertEqual(clock.now.call_args.args[0].utcoffset(None), timedelta(hours=8))
+
+    def test_template_loads_outside_repository_root(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        response = httpx.Response(200, request=httpx.Request('POST', 'https://example.invalid/v1/chat/completions'),
+                                 json={'choices': [{'message': {'content': json.dumps({'answer': 'ok'})}}]})
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(Path(__file__).resolve().parent)
+            with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response) as post:
+                self.assertEqual(structured('literature/direct', {'question': 'test'}, Output).answer, 'ok')
+            self.assertTrue(post.call_args.kwargs['json']['messages'][0]['content'].startswith('---\nCURRENT_TIME: '))
+        finally:
+            os.chdir(original_cwd)
 
     def test_missing_config_never_calls_http(self):
         with patch('src.integrations.model.settings.model_config', return_value={}), patch('src.integrations.model.httpx.post') as post:

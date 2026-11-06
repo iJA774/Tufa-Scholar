@@ -2,7 +2,7 @@
 import re
 import logging
 import time
-from src import repository
+from src.persistence import repository
 from src.integrations.openalex import search_works
 
 logger = logging.getLogger(__name__)
@@ -59,3 +59,14 @@ def retrieve(project_id, query, source="all"):
         results.append(paper)
     logger.info('retrieval completed project_id=%s source=%s elapsed_ms=%d result_count=%d warning_count=%d', project_id, source, int((time.monotonic() - start) * 1000), len(results), len(warnings))
     return {"query": query, "source": source, "method": "keyword search; rank fusion when both sources are used", "results": results, "warnings": warnings}
+
+
+def retrieve_collection(project_id, query, paper_ids):
+    """Rank only the intersection of the submitted snapshot and project papers."""
+    allowed = set(paper_ids)
+    candidates = repository.project_evidence(project_id, list(allowed)) if allowed else []
+    candidates = [p for p in candidates if p['id'] in allowed]
+    ranked = repository.local_search(project_id, query, list(allowed)) if allowed else []
+    order = {p['id']: i for i, p in enumerate(ranked) if p['id'] in allowed}
+    candidates.sort(key=lambda p: order.get(p['id'], len(order)))
+    return {'query': query, 'source': 'collection', 'method': 'project collection keyword ranking', 'results': candidates[:6], 'warnings': []}

@@ -2,7 +2,7 @@
 
 ## 职责边界
 
-`main.py` 负责 FastAPI 路由、请求校验、HTTP 错误映射及文件与报告输出。数据访问和任务状态变更复用 `src/repository.py`，设置复用 `src/settings.py`；搜索能力通过 [工具入口](../../src/tools/AGENTS.md) 调用。长时间科研任务提交给 worker，不在请求中运行完整工作流。修改共用实现时读取 [共享代码规则](../../src/AGENTS.md)，修改上游调用时读取 [集成规则](../../src/integrations/AGENTS.md)。
+`main.py` 负责 FastAPI 路由、请求校验、HTTP 错误映射及文件与报告输出。数据访问和任务状态变更复用 [持久化模块](../../src/persistence/AGENTS.md)，设置和日志复用 [基础设施](../../src/infrastructure/AGENTS.md)；搜索能力通过 [工具入口](../../src/tools/AGENTS.md) 调用。长时间科研任务提交给 worker，不在请求中运行完整工作流。修改共用实现时读取 [模块规则](../../src/AGENTS.md)，修改上游调用时读取 [集成规则](../../src/integrations/AGENTS.md)。
 
 ## 接口与数据约束
 

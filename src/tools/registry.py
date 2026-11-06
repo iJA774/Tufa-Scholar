@@ -20,8 +20,10 @@ class ToolContext:
 class ToolRegistry:
     def __init__(self):
         self._tools = {}
-        from .research import register_research_tools
-        register_research_tools(self)
+        from .search import register_search_tools
+        from .read_paper import register_read_paper_tools
+        register_search_tools(self)
+        register_read_paper_tools(self)
 
     def register(self, name, description, parameters: type[BaseModel], handler, sources):
         if name in self._tools:

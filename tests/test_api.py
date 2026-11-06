@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from apps.api.main import app
-from src import repository as repo
+from src.persistence import repository as repo
 
 class ApiTest(unittest.TestCase):
     def setUp(self):
@@ -75,7 +75,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.get(f'/runs/{pending}').status_code, 404)
         self.assertEqual(c.get(f'/projects/{b}/papers').json()[0]['id'], paper['id'])
         self.assertEqual(c.get(paper['versions'][0]['file_url']).content, stream.getvalue())
-        from src.storage import connect_database
+        from src.persistence.storage import connect_database
         with connect_database() as db:
             self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
 

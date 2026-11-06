@@ -5,8 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from apps.api.main import app
-from src import repository as repo
-from src.literature import workflow as w
+from src.persistence import repository as repo
+from src.agents import literature as w
 
 
 class CollectionWorkflowTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class CollectionWorkflowTests(unittest.TestCase):
                 if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
                 if name.endswith('verify_claim'): return w.Verdict(supported=True)
                 raise AssertionError(name)
-            with patch.object(w, 'structured', side_effect=model), patch('src.tools.research.retrieve') as external, patch.object(w.repository, 'task_history') as history:
+            with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve') as external, patch.object(w.repository, 'task_history') as history:
                 content, evidence = w.run(task)
                 repo.fail_task(run_id, 'test retry')
                 retried = repo.retry_task(run_id)
@@ -44,7 +44,7 @@ class CollectionWorkflowTests(unittest.TestCase):
             self.assertIn('selected evidence', retry_content)
 
     def test_empty_never_calls_model_or_network(self):
-        with patch.object(w, 'structured') as model, patch('src.tools.research.retrieve') as retrieve:
+        with patch.object(w, 'structured') as model, patch('src.tools.search.retrieve') as retrieve:
             content, evidence = w.run({'source': 'collection', 'paper_ids': []})
         self.assertIn('证据不足', content)
         self.assertEqual(evidence, [])
@@ -63,7 +63,7 @@ class CollectionWorkflowTests(unittest.TestCase):
             if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
             if name.endswith('verify_claim'): return w.Verdict(supported=True)
             raise AssertionError(name)
-        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'task_history', return_value=[{'content': 'OUTSIDE_SECRET forbidden history'}]) as history, patch.object(w.repository, 'project_evidence', return_value=[allowed, decoy]), patch.object(w.repository, 'local_search', return_value=[]) as local, patch('src.tools.research.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
+        with patch.object(w.repository, 'update_stage'), patch.object(w.repository, 'task_history', return_value=[{'content': 'OUTSIDE_SECRET forbidden history'}]) as history, patch.object(w.repository, 'project_evidence', return_value=[allowed, decoy]), patch.object(w.repository, 'local_search', return_value=[]) as local, patch('src.tools.search.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
             content, evidence = w.run(task)
         history.assert_not_called()
         retrieve.assert_not_called()

@@ -2,8 +2,8 @@ import os, tempfile, unittest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from apps.api.main import app
-from src import repository as repo
-from src.storage import connect_database
+from src.persistence import repository as repo
+from src.persistence.storage import connect_database
 
 class CollectionTests(unittest.TestCase):
     def setUp(self):

@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src import repository
-from src.storage import initialize_storage
+from src.persistence import repository
+from src.persistence.storage import initialize_storage
 
 
 class WorkerTests(unittest.TestCase):
