@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
-from src import settings
+from src.infrastructure import settings
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def structured(prompt_id, payload, schema, *, model_options=None):
         config = dict(config, model=model_options['model_name'])
     if not config.get('base_url') or not config.get('model'):
         raise RuntimeError('请先在设置中配置模型地址和模型名称')
-    prompt = (Path(__file__).resolve().parents[2] / 'prompts' / (prompt_id + '.md')).read_text(encoding='utf-8')
+    prompt = (Path(__file__).resolve().parents[1] / 'prompts' / (prompt_id + '.md')).read_text(encoding='utf-8')
     prompt = prompt.replace('{{ CURRENT_TIME }}', datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds'))
     headers = {'Authorization': 'Bearer ' + config['api_key']} if config.get('api_key') else {}
     start = time.monotonic()

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from apps.api.main import app
-from src import repository as repo
+from src.persistence import repository as repo
 
 class ChatApiTests(unittest.TestCase):
     def setUp(self):

@@ -6,9 +6,9 @@
 
 1. 开始任务先读本文件、[架构文档](docs/ARCHITECTURE.md) 的相关章节，再检查目标目录已有实现。
 2. 修改文件前，沿目录路径读取适用的子目录 `AGENTS.md`。父级规则持续生效，子级补充局部约束，不得违反全局规则；跨模块修改分别读取相关规则，不必通读无关目录。
-3. 按 [项目状态](docs/STATUS.md) 区分已实现能力、待实现目标和未验证部分。架构目标不等于已实现功能，也不构成本次任务授权。
+3. 从 [开发进度](docs/DEVELOPMENT.md) 了解当前任务、工作分支和协作上下文；按 [项目状态](docs/STATUS.md) 区分已实现能力、待实现目标和未验证部分。架构目标不等于已实现功能，也不构成本次任务授权。
 4. 仅当开发规范、模块职责或架构发生实质变化时更新就近规则。新增 `AGENTS.md` 须有独立职责，不重复父级内容，不为凑层级创建空规则。
-5. `AGENTS.md` 不记录进度、功能完成清单、测试次数或本轮结果。能力与限制更新 `docs/STATUS.md`；实测命令和结果记录在 README 验收部分；设计与接口边界更新架构文档或模块说明。
+5. `AGENTS.md` 仅记录长期约束、职责导航和验证要求，不记录当前分支、阶段进度、功能完成清单、测试次数或本轮结果。任务进度与分支上下文更新 `docs/DEVELOPMENT.md`；能力与限制更新 `docs/STATUS.md`；实测命令和结果记录在 README 验收部分；设计与接口边界更新架构文档或模块说明。
 
 ## 目录导航
 
@@ -19,10 +19,14 @@
 | `apps/api/` | FastAPI HTTP 接口、请求校验、文件与报告交付 | [API](apps/api/AGENTS.md) |
 | `apps/worker/` | 单进程任务领取、执行与生命周期 | [Worker](apps/worker/AGENTS.md) |
 | `apps/web/` | Next.js App Router、TypeScript 界面与 API 代理 | [前端](apps/web/AGENTS.md) |
-| `src/` | 共用存储、仓储、设置和日志 | [共享代码](src/AGENTS.md) |
-| `src/literature/` | 检索、科研问答、证据与核验 | [科研流程](src/literature/AGENTS.md) |
+| `src/` | Python 模块职责与依赖方向 | [共享代码](src/AGENTS.md) |
+| `src/agents/` | Agent 工作流、状态、综合与核验 | [工作流](src/agents/AGENTS.md) |
+| `src/literature/` | 文献检索、排名与证据提取业务 | [文献业务](src/literature/AGENTS.md) |
+| `src/tools/` | 可独立发现与调用的科研工具、参数契约与范围约束 | [工具](src/tools/AGENTS.md) |
 | `src/integrations/` | 外部检索与模型调用 | [外部集成](src/integrations/AGENTS.md) |
-| `prompts/` | Markdown 提示词正文 | [提示词](prompts/AGENTS.md) |
+| `src/persistence/` | SQLite、仓储与事务 | [持久化](src/persistence/AGENTS.md) |
+| `src/infrastructure/` | 本机设置、环境变量与日志 | [基础设施](src/infrastructure/AGENTS.md) |
+| `src/prompts/` | Markdown 提示词正文 | [提示词](src/prompts/AGENTS.md) |
 | `tests/` | 回归测试、固定样例与模拟服务 | [测试](tests/AGENTS.md) |
 | `scripts/`、`start.ps1` | 本机启动、进程管理与实际入口验收 | [脚本](scripts/AGENTS.md)，修改根启动器时也读取 |
 | `docs/` | 架构设计、项目状态与专题说明 | [文档](docs/AGENTS.md) |
@@ -35,12 +39,13 @@
 - 根目录 `pyproject.toml`、`uv.lock` 管理 API、worker 与 `src/` 的共用 Python 环境；根目录 pnpm workspace、`pnpm-lock.yaml` 管理前端。依赖变更更新对应入口和锁文件，不另建重复环境。
 - API 与 worker 共用 `TUFA_DATA_DIR` 下的 SQLite，默认运行数据在被 Git 忽略的 `data/`。保留用户数据库、原文、报告和已有改动，验收使用独立数据目录。
 - 外部服务 API 密钥可由用户保存到本机设置或从环境变量读取，环境变量优先。接口与日志不得回显密钥；不把密钥、用户材料或本机配置提交到 Git。
-- 提示词正文集中在 `prompts/` 的 Markdown 文件中；数据结构、数值检查与证据定位由代码负责。
+- 提示词正文集中在 `src/prompts/` 的 Markdown 文件中；数据结构、数值检查与证据定位由代码负责。
 - 内容摘要可用于导入时的相同文件去重。普通测试检查数据、状态和可观察结果，禁止用固定摘要锁死提示词、整份报告或目录内容。
 
 ## 开发与交付
 
 - 以任务为单位管理 Git 分支。新任务从 `main` 创建 `codex/*` 分支；同一任务的后续修改、修复和验收反馈沿用原分支，不直接在 `main` 开发。
+- 修改代码时及时同步受影响的职责、能力、接口和验证文档。
 - 完成后仅暂存并本地提交本次任务产生的改动，用户明确要求合并提交的已有改动除外。不得擅自提交、覆盖或清理用户已有修改；若工作区改动妨碍安全切换分支，保留现场并说明冲突。
 - 从实际调用入口验证改动，按模块规则运行相关检查。纯文档修改验证路径、链接与规则一致性，不为此启动应用或全量构建。
 - 交付说明修改内容、实测命令、结果及未验证部分；区分模拟服务与真实外部服务验收，不把构建通过当成交互验证通过。

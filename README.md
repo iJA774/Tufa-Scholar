@@ -8,6 +8,43 @@
 
 中文提示词的节点契约、当前时间注入与维护规范见 [docs/PROMPTS.md](docs/PROMPTS.md)。
 
+可独立调用的科研工具及扩展方式见 [src/tools/README.md](src/tools/README.md)。当前任务、工作分支与协作安排统一见 [开发进度](docs/DEVELOPMENT.md)。
+
+当前 Python 代码按以下职责组织（省略规则与说明文件）：
+
+```text
+src/
+├── __init__.py
+├── agents/
+│   ├── __init__.py
+│   └── literature.py
+├── tools/
+│   ├── __init__.py
+│   ├── registry.py
+│   ├── search.py
+│   └── read_paper.py
+├── integrations/
+│   ├── openalex.py
+│   ├── model.py
+│   └── web_search.py
+├── literature/
+│   ├── retrieval.py
+│   └── evidence.py
+├── persistence/
+│   ├── __init__.py
+│   ├── storage.py
+│   └── repository.py
+├── infrastructure/
+│   ├── __init__.py
+│   ├── settings.py
+│   └── logging_setup.py
+└── prompts/
+    ├── literature/
+    └── runtime/
+```
+
+工作流说明见 [agents](src/agents/README.md)，检索与取证业务见 [literature](src/literature/README.md)。提示词从 `src/prompts/` 加载，调用 ID 仍为 `literature/模板名`。默认数据仍在仓库根目录 `data/`，相对 `TUFA_DATA_DIR` 也以仓库根目录解析。
+
 ### 中文提示词接入验收（2026-11-05）
 
 - `uv run --locked python -m unittest discover -s tests -v`：39 项通过。新增模拟 HTTP 边界测试通过实际 `structured()` 加载五个模板，检查 system 消息开头北京时间、跨年逐次更新、用户输入不参与模板替换和输出结构解析。
@@ -125,6 +162,116 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ```
 
 ## 验证
+
+### 跨轮证据、PDF 分页与轮询重试验收（2026-11-07）
+
+在仓库根目录使用现有依赖和 E 盘隔离目录执行：
+
+```powershell
+$acceptanceTemp = (New-Item -ItemType Directory -Force .cache/evidence-polling-acceptance).FullName
+$env:TEMP = $acceptanceTemp
+$env:TMP = $acceptanceTemp
+$env:TUFA_DATA_DIR = Join-Path $acceptanceTemp 'data'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+& .venv/Scripts/python.exe -B -m unittest discover -s tests -v
+$env:NEXT_TELEMETRY_DISABLED = '1'
+$env:NODE_OPTIONS = '--max-old-space-size=1536'
+pnpm check:web
+pnpm build:web
+pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck
+node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)
+```
+
+- 后端 89 项通过。使用隔离 SQLite 和模拟外部服务，验证旧表重复升级、分页补建、上传实际 PDF、取证读取第 26 页、长页分片和原文下载。旧论文退出精读集合后，其片段与新论文证据仍可一起引用并通过模拟核验。工作证据的条数和文本上限通过回归验证。
+- 前端类型检查、生产构建和 5 项轮询调度测试通过，覆盖瞬时失败后恢复、计数清零、连续三次失败后停止及取消。在前端目录用 `node --max-old-space-size=1024 node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 18301` 检查生产首页，返回 HTTP 200。验收后关闭进程，端口已释放。
+- 沙箱内 TestClient 和回环 HTTP 检查未完成，最终在沙箱外对隔离数据通过，已停止此前卡住的测试进程。真实模型、真实外部搜索及浏览器断网交互未实测。
+
+### 补检子问题取证验收（2026-11-07）
+
+在仓库根目录执行：
+
+```powershell
+$testTemp = (New-Item -ItemType Directory -Force .cache/supplement-evidence-tests).FullName
+$env:TEMP = $testTemp
+$env:TMP = $testTemp
+$env:TUFA_DATA_DIR = Join-Path $testTemp 'data'
+& .venv/Scripts/python.exe -B -m unittest -v tests.test_workflow tests.test_collection_workflow tests.test_web_workflow tests.test_tools
+```
+
+四组共 32 项通过。新增用例从 `run()` 执行 LangGraph，模拟模型、检索结果和 PDF 页文本，使用实际工具入口和取证评分。首轮选择第 1 页优先，两轮补检分别把第 4、5 页选入证据并排在首位。缺口评估和综合都收到原始研究问题。收藏夹隔离用例在沙箱内停滞，停止后在沙箱外使用隔离数据通过。验收使用模拟外部服务，未启动应用服务。
+
+### 前端工作台分责验收（2026-11-06）
+
+- `pnpm check:web`、`pnpm build:web`：最终版本通过。构建前设置 `TUFA_API_URL=http://127.0.0.1:18180`，使用 E 盘 `.cache/frontend-refactor-tmp` 作为 `TEMP`/`TMP`，设置 `NEXT_TELEMETRY_DISABLED=1` 与 `NODE_OPTIONS=--max-old-space-size=1536`。
+- `pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck`，随后 `node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)`：2 项通过，覆盖无重叠、终态停止、取消、中止与旧响应忽略、错误后停止。
+- `.venv/Scripts/python.exe -B -m scripts.fixture_api --data-dir E:\Tufa-Scholar\.cache\frontend-refactor-acceptance-20261106 --port 18180` 配合前端目录下 `node --max-old-space-size=1024 node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 18300`：实际浏览器通过项目创建/切换、删除确认取消、收藏确认/取消/移除、创建空夹及问答禁用、草稿保留、论文搜索空态/失败恢复/收藏、网页检索、历史跳转、PDF 上传与列表刷新。
+- 模拟任务通过 `POST /__fixture/advance` 显式推进；浏览器验证 pending、failed、重试 succeeded 与回答/引用刷新。HTTP 回读确认选择的模型和 medium 强度保存，证据 CSV 返回 200；任务在旧项目完成时未污染新项目。最终构建复查同一会话历史跳转保持四条消息，以及移除后的成功提示；浏览器错误日志为空。
+- 预览位于 `.cache/frontend-refactor-tmp/workspace.jpg`。本轮 API、前端均已停止，18180/18300 端口无监听；未启动 worker、未修改默认用户数据、未调用真实模型或搜索服务。仅使用模拟目录和任务结果，不推定真实供应商质量或完整后端工作流验证通过；未重跑后端全量回归或根启动器验收。
+
+### 候选池与 Agent 解耦验收（2026-11-06）
+
+在仓库根目录使用隔离临时目录执行：
+
+```powershell
+New-Item -ItemType Directory -Force .cache/agent-refinement-unit-tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/agent-refinement-unit-tmp).Path
+$env:TMP = $env:TEMP
+uv run --locked python -m unittest discover -s tests -v
+New-Item -ItemType Directory -Force .cache/agent-refinement-tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/agent-refinement-tmp).Path
+$env:TMP = $env:TEMP
+uv run --locked python -m scripts.verify_chat
+uv run --locked python -m scripts.verify_web_search
+git diff --check
+```
+
+- 最终后端回归 81 项通过。覆盖首轮六篇满额后补检新论文进入精读与回答、七条候选保留与 DOI 去重、重复查询不加票、八篇收藏夹候选保留、相同证据条数下继续补检、真正重复停止及临时摘要编号不影响新增判断。
+- Agent 在无任务 ID、禁止任务历史查询和阶段写库的条件下，使用显式历史与可选回调运行；隔离 SQLite 验证 worker 读取历史、收藏夹不读取历史、阶段回调实际落库与成功提交。
+- `verify_chat` 使用临时 SQLite、本地模拟模型及实际 API/worker，通过原文引用、收藏夹快照隔离、报告导出、服务失败和重试闭环，脚本退出成功。
+- `verify_web_search` 使用临时 SQLite、本地模拟搜索/模型及实际 API/worker，网页引用、CSV 导出、论文库隔离、服务失败和重试的业务断言通过；首次收尾时 Windows `taskkill /T` 超时，进程未退出导致临时日志占用，脚本退出失败。已核实并停止该次残留进程；重跑的业务断言再次通过，但在 C 盘空间告急后由用户要求中断，未确认重跑的进程收尾。该脚本不能记为完整验收通过。
+- 已逐份审查 16 份 `AGENTS.md`，将当前分支及协作进度移入 [开发进度](docs/DEVELOPMENT.md)。30 份文档的本地链接与 `git diff --check` 通过。
+- 未修改默认用户数据，未调用真实云端模型或搜索供应商；本轮未重新运行前端构建、浏览器交互或根启动器完整验收。排名融合是检索启发式，真实语义相关性未实测。
+- 中断后恢复时仅复核已有测试日志、暂存差异和文档链接，没有重新运行测试或启动服务。
+
+### Python 目录分责与提示词迁移验收（2026-11-06）
+
+在仓库根目录执行，验收使用独立临时数据库与本地模拟服务：
+
+```powershell
+New-Item -ItemType Directory -Force .cache/architecture-layout-tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/architecture-layout-tmp).Path
+$env:TMP = $env:TEMP
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m scripts.verify_chat
+uv run --locked python -m scripts.verify_web_search
+git diff --check
+```
+
+- 后端回归 75 项通过。新增路径回归确认从仓库根目录以外调用 `structured()` 仍能加载模板，默认数据目录仍是仓库根目录 `data/`，路径测试不写入该目录。
+- 实际 API/worker 的 `verify_chat` 模拟闭环通过：PDF 页码与版本引用、证据不足、报告导出、失败重试和收藏夹快照隔离。
+- 实际 API/worker 的 `verify_web_search` 模拟闭环通过：网页检索、空结果与失败、引用与 CSV 导出、论文库隔离和重试。
+- 五份提示词正文与移动前一致，prompt ID 未变；新旧模块引用与 29 份文档本地链接已检查，`git diff --check` 通过。
+- 未修改默认用户数据，未调用真实搜索供应商或云端模型；本轮未重新运行浏览器交互、前端构建或根启动器的完整进程管理验收。
+
+### 工具目录与调用入口重构验收（2026-11-06）
+
+在仓库根目录执行，临时目录固定到被忽略的 `.cache/architecture-refactor-tmp`：
+
+```powershell
+New-Item -ItemType Directory -Force .cache/architecture-refactor-tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/architecture-refactor-tmp).Path
+$env:TMP = $env:TEMP
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m scripts.verify_chat
+uv run --locked python -m scripts.verify_web_search
+git diff --check
+```
+
+- 后端回归 73 项通过，含 9 项工具专项测试：按上下文发现、参数校验、独立调用、显式注册扩展、冻结快照、收藏夹交集、本地证据真实性及网页证据去重。
+- `verify_chat` 使用临时 SQLite、本地模拟模型及实际 API/worker，通过原文页码与版本引用、数值拒绝、报告导出、失败重试及收藏夹快照隔离。
+- `verify_web_search` 使用临时 SQLite、本地模拟 Searx/模型及实际 API/worker，通过搜索、空结果、服务失败、网页引用与 CSV 导出、论文库隔离及重试。
+- 文档本地链接与 `git diff --check` 通过。首轮沙箱执行遇到服务启动与临时目录访问限制，以上结果来自允许本机进程和网络访问后的隔离重跑。
+- 未修改默认用户数据，未调用真实搜索供应商或云端模型，未重新运行浏览器交互或前端构建。工具独立调用已实现，科研问答仍使用现有 LangGraph 编排。
 
 ### 网页搜索验收（2026-11-06）
 

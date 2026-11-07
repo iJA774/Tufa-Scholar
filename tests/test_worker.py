@@ -6,11 +6,39 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src import repository
-from src.storage import initialize_storage
+from src.persistence import repository
+from src.persistence.storage import initialize_storage
 
 
 class WorkerTests(unittest.TestCase):
+    def test_chat_history_is_loaded_and_stage_callback_persists(self):
+        from apps.worker.__main__ import run_once
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
+            initialize_storage()
+            project = repository.create_project('worker agent')['id']
+            first = repository.create_question(project, None, 'first question', 'local')
+            observed = []
+            def agent(research, *, history, on_stage):
+                on_stage('planning')
+                observed.append((research, history, repository.get_task(current['run_id'])['stage']))
+                return 'answer', []
+            current = first
+            with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', wraps=repository.task_history) as load:
+                self.assertTrue(run_once())
+                self.assertEqual(load.call_count, 1)
+            self.assertEqual(observed[0][2], 'planning')
+            self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
+            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'})
+            self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
+            collection = repository.create_collection(project, 'snapshot')['id']
+            current = repository.create_question(project, first['conversation_id'], 'collection question', 'collection', collection_id=collection)
+            with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', side_effect=AssertionError('collection loaded history')) as load:
+                self.assertTrue(run_once())
+                load.assert_not_called()
+            self.assertEqual(observed[1][1:], ([], 'planning'))
+            self.assertEqual(observed[1][0]['paper_ids'], [])
+            self.assertEqual(repository.get_task(current['run_id'])['status'], 'succeeded')
+
     def test_local_ranking_via_actual_worker_entry(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
             initialize_storage()

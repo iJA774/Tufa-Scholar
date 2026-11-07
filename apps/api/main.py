@@ -17,11 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from src import repository as repo
-from src import settings
+from src.persistence import repository as repo
+from src.infrastructure import settings
 from src.integrations.model import discover
-from src.storage import data_directory, initialize_storage
-from src.logging_setup import configure_logging, close_logging, safe_stack
+from src.persistence.storage import data_directory, initialize_storage
+from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack
 
 
 @asynccontextmanager
@@ -253,12 +253,13 @@ async def import_paper(project_id: int, file: UploadFile = File(...), title: str
         raise HTTPException(422, '请上传有效的 PDF 文件')
     try:
         reader = PdfReader(BytesIO(content))
-        text = '\n'.join(page.extract_text() or '' for page in reader.pages).strip()
+        pages = [(page.extract_text() or '').strip() for page in reader.pages]
+        text = '\n'.join(pages).strip()
         pdf_title = str(reader.metadata.title or '').strip() if reader.metadata else ''
     except Exception as exc:
         raise HTTPException(422, '无法解析 PDF 文件') from exc
     digest = sha256(content).hexdigest()
-    from src.storage import connect_database
+    from src.persistence.storage import connect_database
     with connect_database() as db:
         duplicate = bool(repo.existing_version(db, digest))
     path = data_directory() / 'originals' / f'{digest}.pdf'
@@ -269,7 +270,7 @@ async def import_paper(project_id: int, file: UploadFile = File(...), title: str
     if not metadata['title']:
         raise HTTPException(422, '文献标题不能为空')
     try:
-        result = repo.save_paper(project_id, metadata, {'filename': Path(file.filename or 'paper.pdf').name, 'digest': digest, 'path': str(path), 'text': text, 'text_status': 'text_available' if text else 'no_extractable_text'})
+        result = repo.save_paper(project_id, metadata, {'filename': Path(file.filename or 'paper.pdf').name, 'digest': digest, 'path': str(path), 'text': text, 'pages': pages, 'text_status': 'text_available' if text else 'no_extractable_text'})
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     result['duplicate'] = duplicate
@@ -361,9 +362,9 @@ def report_csv(report_id: int):
 def paper_search(project_id: int, q: str, source: Literal['all','local','openalex'] = 'all'):
     require_project(project_id)
     if not q.strip(): raise HTTPException(422, '查询不能为空')
-    from src.literature.retrieval import retrieve
+    from src.tools import ToolContext, ToolRegistry
     try:
-        return retrieve(project_id, q.strip(), source)
+        return ToolRegistry().invoke('search_papers', {'query': q.strip()}, context=ToolContext(project_id, source))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -373,9 +374,9 @@ def web_search(project_id: int, q: str = Query(min_length=1, max_length=2000)):
     require_project(project_id)
     if not q.strip():
         raise HTTPException(422, '查询不能为空')
-    from src.integrations.web_search import search_web
+    from src.tools import ToolContext, ToolRegistry
     try:
-        return {'results': search_web(q.strip(), limit=5)}
+        return {'results': ToolRegistry().invoke('search_web', {'query': q.strip(), 'limit': 5}, context=ToolContext(project_id, 'web'))}
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(503, str(exc)) from None
 

@@ -4,7 +4,7 @@ import logging
 import time
 import httpx
 
-from src.settings import openalex_key
+from src.infrastructure.settings import openalex_key
 
 logger = logging.getLogger(__name__)
 

@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src import settings
-from src.logging_setup import SafeFormatter, refresh_secrets
-from src.storage import initialize_storage
+from src.infrastructure import settings
+from src.infrastructure.logging_setup import SafeFormatter, refresh_secrets
+from src.persistence.storage import initialize_storage
 
 
 class WebSettingsTests(unittest.TestCase):
