@@ -14,6 +14,60 @@ class WorkflowTests(unittest.TestCase):
         self.record_failure = diagnostic.start()
         self.addCleanup(diagnostic.stop)
 
+    def test_auto_direct_needs_no_tools(self):
+        def model(name, payload, schema):
+            self.assertEqual(payload['source'], 'auto')
+            self.assertIsNone(payload['effective_source'])
+            self.assertEqual(set(payload['available_actions']), {'direct', 'paper_research', 'web_research'})
+            return w.Route(action='direct', answer='你好')
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke') as invoke:
+            content, evidence = w.run({**TASK, 'source': 'auto'}, history=[])
+        self.assertIn('你好', content)
+        self.assertEqual(evidence, [])
+        invoke.assert_not_called()
+
+    def test_auto_research_locks_source_and_uses_matching_tools(self):
+        for action, effective in [('paper_research', 'all'), ('web_research', 'web')]:
+            with self.subTest(action=action):
+                routes, catalogs, stages = [], [], []
+                paper = {'id': 3, 'title': 'paper', 'abstract': 'evidence', 'versions': []}
+                page = {'title': 'web page', 'url': 'https://example.com/', 'content': 'evidence', 'source_level': 'web_content', 'provider': 'fixture', 'retrieved_at': '2026-11-07'}
+                def model(name, payload, schema):
+                    if name == 'runtime/route':
+                        routes.append(payload)
+                        if len(payload['results']) < 2:
+                            return w.Route(action=action, task='topic')
+                        raise AssertionError('no-progress must force review')
+                    if name == 'literature/research':
+                        catalogs.append((payload['source'], {t['name'] for t in payload['tools']}))
+                        if not payload['recent_result']: return w.Specialist(action='search', query='topic')
+                        if payload['recent_result'].startswith('检索'): return w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                        return w.Specialist(action='finish')
+                    if name == 'literature/review': return w.Review(sufficient=False, gaps=['more'], summary='missing')
+                    if name == 'literature/synthesize': return w.Draft(claims=[w.Claim(text='evidence', citations=[payload['evidence'][0]['id']])])
+                    if name == 'literature/verify_claim': return w.Verdict(supported=True)
+                    raise AssertionError(name)
+                with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', return_value=[page]), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
+                    content, evidence = w.run({**TASK, 'source': 'auto'}, history=[], on_stage=stages.append)
+                self.assertEqual(routes[0]['source'], 'auto')
+                self.assertIsNone(routes[0]['effective_source'])
+                self.assertEqual(routes[1]['source'], 'auto')
+                self.assertEqual(routes[1]['effective_source'], effective)
+                self.assertIn(action, routes[1]['available_actions'])
+                self.assertNotIn('web_research' if effective == 'all' else 'paper_research', routes[1]['available_actions'])
+                self.assertTrue(all(source == effective for source, _ in catalogs))
+                expected_search = 'search_web' if effective == 'web' else 'search_papers'
+                self.assertTrue(all(names == {expected_search, 'collect_evidence'} for _, names in catalogs))
+                self.assertTrue(all(c.kwargs['context'].source == effective for c in invoke.call_args_list))
+                self.assertEqual([c.args[0] for c in invoke.call_args_list], [expected_search, 'collect_evidence'] * 2)
+                if effective == 'web':
+                    self.assertIn('searching_web', stages)
+                    self.assertEqual(evidence[0]['original_url'], page['url'])
+                    self.assertEqual(evidence[0]['provider'], 'fixture')
+                    self.assertIn(page['url'], content)
+                else:
+                    self.assertIn('searching', stages)
+
     def test_direct_graph_uses_history_without_tools(self):
         history = [{'role': 'user', 'content': 'prior question'}]
         def model(name, payload, schema):

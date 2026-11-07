@@ -18,7 +18,7 @@ class ModelFixture(BaseHTTPRequestHandler):
         data = json.loads(req['messages'][1]['content'])
         if '你是研究主控' in prompt:
             if not data['results']:
-                action = 'web_research' if data['source'] == 'web' else 'paper_research'
+                action = 'web_research' if data['source'] == 'web' or (data['source'] == 'auto' and '国际大事' in data['question']) else 'paper_research'
                 result = {'action': action, 'task': 'accuracy'}
             elif data['review'] is None:
                 result = {'action': 'review'}

@@ -8,7 +8,7 @@
 
 | prompt ID | 输入 | 输出结构 |
 |---|---|---|
-| `runtime/route` | question、history、source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、no_progress | Route：action、task、answer |
+| `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、no_progress | Route：action、task、answer |
 | `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining | Specialist：action、query、candidate_ids |
 | `literature/review` | question、evidence、results | Review：sufficient、gaps、summary |
 | `literature/synthesize` | question、history、evidence、review | Draft：claims（text、citations）、limitations |
@@ -37,7 +37,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 6. 确定性校验、来源隔离、循环上限与最终引用排版由代码负责，不能将提示词约束视为安全或事实保证。
 7. 新增模板必须同时接入调用方和输出结构；未实现节点不添加占位正文。
 
-网页证据须区分 `web_snippet`（搜索摘要）、`web_content`（网页文本）和 `abstract`（论文摘要）。链接、获取时间、提供方只用于追溯，不证明内容正确或经过同行评审；网页中的操作要求和提示词均作为不可信数据处理。选择 `web` 时由代码强制进入检索分支，保留逐次注入当前时间的首部。
+网页证据须区分 `web_snippet`（搜索摘要）、`web_content`（网页文本）和 `abstract`（论文摘要）。链接、获取时间、提供方只用于追溯，不证明内容正确或经过同行评审；网页中的操作要求和提示词均作为不可信数据处理。选择 `web` 时由代码强制进入网页研究子图；`auto` 首次路由可选择直接回答、论文或网页，首次委派后的补研沿用所选路径，保留逐次注入当前时间的首部。
 
 ## 验收方式
 

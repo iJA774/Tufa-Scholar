@@ -112,9 +112,9 @@ API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `wor
 
 ## 使用与接口
 
-网页搜索默认使用免密钥 DuckDuckGo；可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia。右上角搜索窗口新增“网页搜索”；提问范围选择“网页搜索”时使用搜索结果生成带来源的回答。原“全部来源”仍为项目文献与 OpenAlex。服务配置、环境变量与证据限制见 [网页搜索说明](docs/WEB_SEARCH.md)。
+网页搜索默认使用免密钥 DuckDuckGo；可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia。右上角搜索窗口新增“网页搜索”；提问默认“自动”可由主控选择网页研究，也可明确选择“网页搜索”。“本地论文和 OpenAlex”仅检索这两类来源。服务配置、环境变量与证据限制见 [网页搜索说明](docs/WEB_SEARCH.md)。
 
-科研问答输入框下方，文献范围旁可选择模型和思考强度。优先使用供应商 `effort.supported_levels` 与 `default_level`；未声明档位或目录暂不可用时，提供低、中、高三个选项，映射为 `reasoning_effort` 的 `low`、`medium`、`high`。“供应商默认”不发送该参数。通用回退不保证每个模型支持显式强度，服务拒绝时可改回默认。能力字段参考 [DeepSeek](https://api-docs.deepseek.com/api/list-models/) 与 [火山方舟](https://console.volcengine.com/ark/region%3Acn-beijing/docs/models-api) 官方文档。
+科研问答输入框下方，检索范围旁可选择模型和思考强度。优先使用供应商 `effort.supported_levels` 与 `default_level`；未声明档位或目录暂不可用时，提供低、中、高三个选项，映射为 `reasoning_effort` 的 `low`、`medium`、`high`。“供应商默认”不发送该参数。通用回退不保证每个模型支持显式强度，服务拒绝时可改回默认。能力字段参考 [DeepSeek](https://api-docs.deepseek.com/api/list-models/) 与 [火山方舟](https://console.volcengine.com/ark/region%3Acn-beijing/docs/models-api) 官方文档。
 
 模型与强度随本次问题存入任务，重试沿用；环境变量 `OPENAI_MODEL` 在提交时优先。任务各科研节点使用保存的选择，服务地址与密钥仍在调用时从有效配置读取。`GET /models` 返回已配置服务的模型 ID、思考档位与默认档位；提问接口可传 `model_name` 和 `reasoning_effort`，省略时使用配置模型和供应商默认行为。
 
@@ -125,7 +125,7 @@ API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `wor
 - `uv run --locked python -m tests.model_discovery_server --serve` 配合 `TUFA_API_URL=http://127.0.0.1:18180` 和 18300 端口的 Next dev，以 `Invoke-WebRequest` / `Invoke-RestMethod` 检查首页、设置页均为 200、代理目录返回两项模型、提问后任务保存指定模型与 medium 强度，保持 pending；未启动 worker。
 - 隔离服务已停止，未修改默认用户数据；未运行真实模型链路，浏览器交互与真实供应商参数兼容性留待用户验证。
 
-在首页创建项目与对话，输入研究问题并选择本地、OpenAlex 或全部来源。任务完成后可查看回答及证据，下载报告与证据表；右上角搜索项目内会话、消息和文献。也可以上传 PDF；重复字节的文件按内容摘要去重，DOI 或 arXiv ID 用于识别文献。项目内文献跨对话共享。
+在首页创建项目与对话，输入研究问题，默认由模型自动路由，也可选择本地、OpenAlex、本地论文和 OpenAlex、网页或收藏夹。任务完成后可查看回答及证据，下载报告与证据表；右上角搜索项目内会话、消息和文献。也可以上传 PDF；重复字节的文件按内容摘要去重，DOI 或 arXiv ID 用于识别文献。项目内文献跨对话共享。
 
 文献搜索可查询本地项目和 OpenAlex，并将结果保存到项目。点击文献收藏按钮后，先选择目标收藏夹并确认；取消不会添加。已收藏的文献可再次点击移出。左侧收藏夹入口支持创建、查看成员、移除文献和删除收藏夹；删除收藏夹保留项目文献及已提交任务。提问时可选择收藏夹：任务提交时固定文献列表，检索和引用仅限该列表与当前项目的交集，不使用其他对话历史或外部检索；空收藏夹直接报告证据不足。之后修改或删除收藏夹不改变已提交任务及其重试的文献范围。
 
@@ -152,7 +152,7 @@ API 具体字段和交互可在 `/docs` 查看。主要接口：
 | `GET /runs/{run_id}` | 查询任务状态、结果或错误 |
 | `POST /runs/{run_id}/retry` | 重新执行失败或中断任务 |
 
-提交任务示例，`source` 可为 `local`、`openalex` 或 `all`，`conversation_id` 可省略：
+提交任务示例，`source` 可为 `auto`、`local`、`openalex`、`all`、`web` 或 `collection`，默认 `auto`，`conversation_id` 可省略：
 
 ```powershell
 $body = @{ query = 'Attention Is All You Need'; source = 'local' } | ConvertTo-Json
@@ -166,6 +166,15 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 模型结构或决策失败时，诊断材料保存在 `TUFA_DATA_DIR/diagnostics/`，普通日志中的诊断 ID 可用于定位。材料可能包含研究输入和模型原始响应，请按用户数据保管；已知密钥和凭据字段会被剔除或脱敏。仓库根目录执行 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 可在当前代码下离线检查，不联网或访问数据库。重放使用当前结构而非历史代码，环境差异和脱敏可能影响结果；网络或 HTTP 故障不能离线复现。
 
 ## 验证
+
+
+### 自动路由验收（2026-11-07）
+
+以 `.cache/auto-route-acceptance` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，在仓库根目录执行：
+
+- `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：107 项通过，耗时 9.409 秒。`scripts.verify_chat` 和 `scripts.verify_web_search --serve` 的本机模拟服务与实际 API/worker 断言通过；网页服务本次用于浏览器验收，之后以 Ctrl+C 停止，`--serve` 因中断退出码为 1。Next 也已停止，18189、18309 端口已释放，临时数据库目录已清理。
+- `pnpm check:web`、`pnpm build:web` 通过；构建前设置 `TUFA_API_URL=http://127.0.0.1:18189`，Next 生产服务使用 18309 端口。
+- 隔离浏览器中默认选择“自动”，提交“汇报一下最近七天国际大事”，任务 #5 成功，页面显示 SearX 摘要引用，代理 API 回读确认 `source=auto`。模拟模型按问题选择网页；此项验证链路和范围，未调用真实模型。
 
 
 ### 模型失败诊断与收束修复验收（2026-11-07）

@@ -125,7 +125,7 @@ class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
-    source: Literal['all', 'local', 'openalex', 'collection', 'web'] = 'local'
+    source: Literal['auto', 'all', 'local', 'openalex', 'collection', 'web'] = 'auto'
     conversation_id: int | None = None
     collection_id: int | None = None
 

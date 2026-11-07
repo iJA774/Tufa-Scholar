@@ -101,6 +101,16 @@ def main():
                     csv_text = client.get(f"/reports/{result['report_id']}/evidence.csv").text.lstrip('\ufeff')
                     assert next(csv.DictReader(io.StringIO(csv_text)))['provider'] == 'searx'
                     assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
+                    ModelFixture.requests.clear()
+                    automatic = call('POST', f'/projects/{project}/questions', json={'question': '汇报一下最近七天国际大事'})
+                    automatic_task = wait(automatic['run_id'])
+                    assert automatic_task['status'] == 'succeeded' and automatic_task['source'] == 'auto', automatic_task
+                    assert automatic_task['result']['evidence'][0]['provider'] == 'searx'
+                    routed = [json.loads(req['messages'][1]['content']) for req in ModelFixture.requests
+                              if '你是研究主控' in req['messages'][0]['content']]
+                    assert routed and routed[0]['source'] == 'auto'
+                    assert {'direct', 'paper_research', 'web_research'} <= set(routed[0]['available_actions'])
+                    assert call('GET', f'/projects/{project}/papers') == []
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])

@@ -7,7 +7,7 @@ import { useRunPolling } from "../hooks/useRunPolling";
 import { api, json, messageOf } from "./api";
 import type { Collection, Conversation, Message, Paper, Run } from "./types";
 const statusText: Record<string, string> = { queued: "等待处理", pending: "等待处理", running: "正在处理", succeeded: "回答完成", success: "回答完成", completed: "回答完成", failed: "任务失败", interrupted: "任务已中断" };
-const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "回答完成", done: "回答完成", retrieving: "检索文献", generating: "生成回答", synthesizing: "整理证据", planning: "规划问题", evidence: "读取原文", assessing: "检查证据缺口", verifying: "核验结论", answering: "生成回答" };
+const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", searching_web: "搜索网页", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "回答完成", done: "回答完成", retrieving: "检索文献", generating: "生成回答", synthesizing: "整理证据", planning: "规划问题", evidence: "提取证据", assessing: "检查证据缺口", verifying: "核验结论", answering: "生成回答" };
 type Props = {
   projectId: number;
   collections: Collection[];
@@ -27,7 +27,7 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
   const [conversationName, setConversationName] = useState("");
   const [query, setQuery] = useState("");
   const [modelChoice, setModelChoice] = useState<ModelChoice>({ model_name: "", reasoning_effort: "" });
-  const [source, setSource] = useState("all");
+  const [source, setSource] = useState("auto");
   const [run, setRun] = useState<Run>();
   const [runs, setRuns] = useState<Run[]>([]);
   const [busy, setBusy] = useState("");
@@ -218,9 +218,10 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
           }} placeholder="输入你的研究问题，Shift + Enter 换行" rows={3} />
           <div className="search-actions">
             <div className="select-group">
-              <label htmlFor="source">文献范围</label>
+              <label htmlFor="source">检索范围</label>
               <select disabled={!!busy} id="source" value={source} onChange={e => setSource(e.target.value)}>
-                <option value="all">全部来源</option>
+                <option value="auto">自动</option>
+                <option value="all">本地论文和 OpenAlex</option>
                 <option value="local">项目文献</option>
                 <option value="openalex">OpenAlex</option>
                 <option value="web">网页搜索</option>

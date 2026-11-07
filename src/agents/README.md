@@ -2,7 +2,7 @@
 
 `literature.py` 保存科研问答的 LangGraph 图及结构化模型输出：主控动态选择直接回答、研究委派、审查或报告；论文和网页研究各有独立子图，报告子图负责综合、核验及至多一次修订。入口为 `run(research, *, history, on_stage=None)`，返回回答正文与证据。
 
-`research` 包含 `query`、`project_id`、`source`，可带 `paper_ids`、`model_name` 与 `reasoning_effort`；`history` 是调用方准备的对话消息列表。Agent 不需要任务 ID，不直接导入仓储或修改任务状态。可选 `on_stage(stage)` 在节点执行前接收阶段名；worker 负责读历史、提供回调、领取任务及原子提交结果。
+`research` 包含 `query`、`project_id`、`source`，`auto` 由主控自主选择直接回答、论文或网页，首次委派后分别锁定 `all` 或 `web`，可带 `paper_ids`、`model_name` 与 `reasoning_effort`；`history` 是调用方准备的对话消息列表。Agent 不需要任务 ID，不直接导入仓储或修改任务状态。可选 `on_stage(stage)` 在节点执行前接收阶段名；worker 负责读历史、提供回调、领取任务及原子提交结果。
 
 ```python
 from src.agents.literature import run
@@ -14,7 +14,7 @@ content, evidence = run(
 )
 ```
 
-调用示例需已有项目与有效模型配置，省略回调同样可以执行。阶段包括 `planning`、`answering`（一般回答）、`searching`、`evidence`、`assessing`、`synthesizing` 与 `verifying`；研究、审查与主控可以循环。阶段持久化错误由外层任务运行器处理，不在图节点中吞掉。
+调用示例需已有项目与有效模型配置，省略回调同样可以执行。阶段包括 `planning`、`answering`（一般回答）、`searching`（论文）、`searching_web`（网页）、`evidence`、`assessing`、`synthesizing` 与 `verifying`；研究、审查与主控可以循环。阶段持久化错误由外层任务运行器处理，不在图节点中吞掉。
 
 检索与取证按名称调用 [工具目录](../tools/README.md)，实际算法与限制见 [文献业务](../literature/README.md)。状态中的 `candidates` 保留本次运行的完整去重候选池，精读只允许模型从当前候选中按稳定 ID 选择最多六篇。按不同查询排名进行 RRF 排序，稳定处理平局；补检新论文可以替换低排名旧论文，同一查询重复执行不会重复加分。该排序不是模型语义重排。
 

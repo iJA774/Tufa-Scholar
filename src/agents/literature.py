@@ -37,6 +37,7 @@ class Verdict(BaseModel):
 
 class State(TypedDict, total=False):
     research: dict
+    effective_source: str
     history: list
     queries: list
     evidence_query: str
@@ -327,7 +328,7 @@ def _research_graph(kind, on_stage):
     def invoke(s):
         choice = s['choice']
         if choice.action == 'search':
-            if on_stage: on_stage('searching')
+            if on_stage: on_stage('searching_web' if kind == 'web' else 'searching')
             update = search({**s, 'queries': [choice.query]})
             result = f"检索到 {len(update['candidates'])} 个累计候选"
         else:
@@ -359,7 +360,13 @@ def run(research: dict, *, history: list, on_stage=None):
         count = s.get('delegations', 0)
         reviewed = s.get('review_result')
         exhausted = count >= 3 or s.get('no_progress', False)
-        actions = (['web_research'] if research['source'] == 'web' else ['paper_research']) if not exhausted else []
+        effective = s.get('effective_source')
+        if exhausted:
+            actions = []
+        elif research['source'] == 'auto' and not effective:
+            actions = ['paper_research', 'web_research']
+        else:
+            actions = ['web_research'] if (effective or research['source']) == 'web' else ['paper_research']
         if count and not s.get('review_pending', False): actions.append('review')
         if count and reviewed: actions.append('report')
         if not count and research['source'] not in ('collection', 'web'): actions.append('direct')
@@ -370,7 +377,7 @@ def run(research: dict, *, history: list, on_stage=None):
             logger.info('prompt_id=runtime/route action=%s forced=true delegations=%d decisions=%d', action, count, s.get('decisions', 0))
             return {'route': Route(action=action), 'forced': True, 'forced_reason': reason}
         payload = {'question': research['query'], 'history': s['history'], 'source': research['source'],
-            'available_actions': actions, 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
+            'available_actions': actions, 'effective_source': effective, 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
             'review': reviewed.model_dump() if reviewed else None, 'delegations_remaining': max(0, 3-count),
             'decisions_remaining': max(0, 12-s.get('decisions', 0)), 'no_progress': s.get('no_progress', False)}
         for attempt in range(2):
@@ -389,10 +396,13 @@ def run(research: dict, *, history: list, on_stage=None):
 
     def delegate(s):
         before = {_evidence_signature(e) for e in s.get('evidence_pool', [])}
-        result = (web_graph if s['route'].action == 'web_research' else paper_graph).invoke({**s, 'task': s['route'].task, 'tool_calls': 0, 'recent_result': ''})
+        effective = s.get('effective_source') or (('web' if s['route'].action == 'web_research' else 'all') if research['source'] == 'auto' else research['source'])
+        scoped_research = {**research, 'source': effective}
+        result = (web_graph if s['route'].action == 'web_research' else paper_graph).invoke({**s, 'research': scoped_research, 'task': s['route'].task, 'tool_calls': 0, 'recent_result': ''})
+        result.pop('research', None)
         after = {_evidence_signature(e) for e in result.get('evidence_pool', [])}
         count = s.get('delegations', 0) + 1
-        return {**result, 'delegations': count, 'no_progress': count > 1 and not (after - before),
+        return {**result, 'effective_source': effective, 'delegations': count, 'no_progress': count > 1 and not (after - before),
                 'review_pending': False, 'review_result': None, 'results': (s.get('results', []) + [f"{s['route'].task}: 新增证据 {len(after-before)} 条；工具调用 {result.get('tool_calls', 0)}/6"])[-3:]}
 
     def review(s):
@@ -427,7 +437,7 @@ def run(research: dict, *, history: list, on_stage=None):
     report_graph = report.compile()
 
     def make_report(s):
-        result = report_graph.invoke(s)
+        result = report_graph.invoke({**s, 'research': {**research, 'source': s.get('effective_source') or research['source']}})
         content = result['verified_content']
         review_result = s.get('review_result')
         if s.get('forced') or (review_result and not review_result.sufficient):

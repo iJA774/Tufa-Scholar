@@ -16,3 +16,6 @@ available_actions 优先于其他输入；validation_feedback 是系统校验错
 {"action":"web_research","task":"查找最新网页资料","answer":""}
 {"action":"review","task":"","answer":""}
 {"action":"report","task":"","answer":""}
+
+## 自动来源
+source 为 auto 时自主选择路径：当前新闻、近七天、官网或网页信息优先 web_research；论文和学术综述优先 paper_research；简单且无需检索的问题可 direct。有明确检索意图时优先研究。effective_source 在首次委派后锁定（all 为本地及 OpenAlex 论文，web 为网页），后续只从 available_actions 选择，不切换研究来源。
