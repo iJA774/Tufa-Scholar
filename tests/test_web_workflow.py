@@ -113,7 +113,7 @@ class WebWorkflowTests(unittest.TestCase):
         search.assert_not_called()
 
     def test_web_direct_is_rejected_before_tool_call(self):
-        with patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:
+        with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:
             with self.assertRaises(ValueError):
                 w.run(TASK, history=[])
         invoke.assert_not_called()

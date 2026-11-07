@@ -161,7 +161,21 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/runs' -Con
 Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ```
 
+## 失败诊断与离线重放
+
+模型结构或决策失败时，诊断材料保存在 `TUFA_DATA_DIR/diagnostics/`，普通日志中的诊断 ID 可用于定位。材料可能包含研究输入和模型原始响应，请按用户数据保管；已知密钥和凭据字段会被剔除或脱敏。仓库根目录执行 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 可在当前代码下离线检查，不联网或访问数据库。重放使用当前结构而非历史代码，环境差异和脱敏可能影响结果；网络或 HTTP 故障不能离线复现。
+
 ## 验证
+
+
+### 模型失败诊断与收束修复验收（2026-11-07）
+
+在仓库根目录，以 `.cache/agent-failure-acceptance` 为 `TEMP`、`TMP`，其 `data` 子目录为 `TUFA_DATA_DIR`，使用隔离数据执行：
+
+- `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：103 项通过，耗时 8.670 秒，日志位于 `.cache/agent-failure-acceptance/unittest.log`。
+- 新增模型调用到诊断材料再到离线重放的集成回归后，`tests.test_model` 共 8 项通过；上述全量 103 项在新增该测试前运行。
+- `.venv/Scripts/python.exe -B -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -B -m scripts.verify_web_search` 使用本机模拟服务及实际 API、worker，均以退出码 0 完成并正常清理。
+- 用户此前的真实失败可定位到主控非法动作和研究节点结构校验，但旧日志未保存原始响应，无法离线重放或确认后者具体字段。本轮未重试真实供应商；`all` 仍仅包括本地文献与 OpenAlex。
 
 
 ### Supervisor 重构验收（2026-11-07）

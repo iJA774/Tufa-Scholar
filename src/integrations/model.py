@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 from src.infrastructure import settings
+from src.infrastructure.diagnostics import record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -100,34 +101,73 @@ def discover(url, key, *, details=False):
         raise RuntimeError('模型服务返回的数据无效，请手动填写模型名称') from None
 
 
+def _safe_validation_errors(exc, json_schema):
+    # Only field names declared by the schema can appear in feedback or logs.
+    fields = set()
+    def collect(value):
+        if isinstance(value, dict):
+            fields.update(value.get('properties', {}).keys())
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+    collect(json_schema)
+    allowed_types = {'json_invalid', 'missing', 'literal_error', 'string_type', 'list_type',
+                     'bool_type', 'model_type', 'extra_forbidden', 'too_long', 'too_short',
+                     'string_too_long', 'string_too_short', 'value_error'}
+    result = []
+    for error in exc.errors(include_input=False, include_context=False, include_url=False):
+        path = [part if isinstance(part, str) and part in fields else '*' for part in error['loc']]
+        result.append({'type': error['type'] if error['type'] in allowed_types else 'validation_error',
+                       'path': path})
+    return result
+
+
 def structured(prompt_id, payload, schema, *, model_options=None):
     config = settings.model_config()
     if model_options and model_options.get('model_name'):
         config = dict(config, model=model_options['model_name'])
     if not config.get('base_url') or not config.get('model'):
         raise RuntimeError('请先在设置中配置模型地址和模型名称')
-    prompt = (Path(__file__).resolve().parents[1] / 'prompts' / (prompt_id + '.md')).read_text(encoding='utf-8')
-    prompt = prompt.replace('{{ CURRENT_TIME }}', datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds'))
+    prompt_dir = Path(__file__).resolve().parents[1] / 'prompts'
+    now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')
+    prompt = (prompt_dir / (prompt_id + '.md')).read_text(encoding='utf-8').replace('{{ CURRENT_TIME }}', now)
+    contract = (prompt_dir / 'runtime' / 'structured_output.md').read_text(encoding='utf-8')
+    contract = contract.split('---', 2)[2].strip()
+    json_schema = schema.model_json_schema()
+    prompt += '\n\n' + contract.replace('{{ OUTPUT_SCHEMA }}', json.dumps(json_schema, ensure_ascii=False))
     headers = {'Authorization': 'Bearer ' + config['api_key']} if config.get('api_key') else {}
     start = time.monotonic()
-    logger.info('model_call started')
-    try:
-        response = httpx.post(base_url(config['base_url']) + '/chat/completions', headers=headers,
-                              json={'model': config['model'], 'messages': [{'role': 'system', 'content': prompt},
-                                    {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}],
-                                    'response_format': {'type': 'json_object'},
-                                    **({'reasoning_effort': model_options['reasoning_effort']} if model_options and model_options.get('reasoning_effort') else {})}, timeout=90)
-        response.raise_for_status()
-        content = response.json()['choices'][0]['message']['content']
-        result = schema.model_validate_json(content)
-        logger.info('model_call completed elapsed_ms=%d status=%d', int((time.monotonic() - start) * 1000), response.status_code)
-        return result
-    except httpx.HTTPStatusError as exc:
-        logger.warning('model_call failed elapsed_ms=%d status=%d error_type=%s', int((time.monotonic() - start) * 1000), exc.response.status_code, type(exc).__name__)
-        raise RuntimeError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
-    except httpx.RequestError as exc:
-        logger.warning('model_call failed elapsed_ms=%d error_type=%s', int((time.monotonic() - start) * 1000), type(exc).__name__)
-        raise RuntimeError('模型服务连接失败或超时，请检查设置') from None
-    except (ValueError, KeyError, IndexError, TypeError, ValidationError) as exc:
-        logger.warning('model_call failed elapsed_ms=%d error_type=%s', int((time.monotonic() - start) * 1000), type(exc).__name__)
-        raise RuntimeError('模型返回的结构化结果无效') from None
+    messages = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}]
+    options = {'reasoning_effort': model_options['reasoning_effort']} if model_options and model_options.get('reasoning_effort') else {}
+    for attempt in (1, 2):
+        logger.info('model_call started prompt_id=%s attempt=%d', prompt_id, attempt)
+        content = None
+        context = {'prompt_id': prompt_id, 'attempt': attempt, 'rendered_prompt': prompt, 'model': config['model'], 'model_options': options, 'messages': messages}
+        secrets = (config['api_key'],) if config.get('api_key') else ()
+        try:
+            response = httpx.post(base_url(config['base_url']) + '/chat/completions', headers=headers,
+                                  json={'model': config['model'], 'messages': list(messages),
+                                        'response_format': {'type': 'json_object'}, **options}, timeout=90)
+            response.raise_for_status()
+            content = response.text
+            content = response.json()['choices'][0]['message']['content']
+            result = schema.model_validate_json(content)
+            logger.info('model_call completed prompt_id=%s attempt=%d elapsed_ms=%d status=%d', prompt_id, attempt, int((time.monotonic() - start) * 1000), response.status_code)
+            return result
+        except httpx.HTTPStatusError as exc:
+            diagnostic_id = record_failure(kind='http_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__, 'status': exc.response.status_code}, context=context, secrets=secrets)
+            logger.warning('model_call failed prompt_id=%s attempt=%d elapsed_ms=%d status=%d error_type=%s diagnostic_id=%s', prompt_id, attempt, int((time.monotonic() - start) * 1000), exc.response.status_code, type(exc).__name__, diagnostic_id)
+            raise RuntimeError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
+        except httpx.RequestError as exc:
+            diagnostic_id = record_failure(kind='network_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__}, context=context, secrets=secrets)
+            logger.warning('model_call failed prompt_id=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s', prompt_id, attempt, int((time.monotonic() - start) * 1000), type(exc).__name__, diagnostic_id)
+            raise RuntimeError('模型服务连接失败或超时，请检查设置') from None
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            errors = _safe_validation_errors(exc, json_schema) if isinstance(exc, ValidationError) else [{'type': 'invalid_response', 'path': []}]
+            diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)
+            logger.warning('model_call invalid prompt_id=%s attempt=%d errors=%s diagnostic_id=%s', prompt_id, attempt, json.dumps(errors, ensure_ascii=False), diagnostic_id)
+            if attempt == 2:
+                raise RuntimeError('模型返回的结构化结果无效') from None
+            messages.append({'role': 'user', 'content': json.dumps({'validation_feedback': errors}, ensure_ascii=False)})

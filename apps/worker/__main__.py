@@ -11,6 +11,7 @@ from src.persistence import repository
 from src.tools import ToolContext, ToolRegistry
 from src.persistence.storage import initialize_storage
 from src.infrastructure.logging_setup import configure_logging, safe_stack
+from src.infrastructure.diagnostics import diagnostic_scope
 def run_once():
     task = repository.claim_task()
     if task is None:
@@ -25,10 +26,11 @@ def run_once():
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'
             )}
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
-            content, evidence = run(
-                research, history=history,
-                on_stage=lambda stage: repository.update_stage(task['id'], stage),
-            )
+            with diagnostic_scope(run_id=task['id'], project_id=task['project_id']):
+                content, evidence = run(
+                    research, history=history,
+                    on_stage=lambda stage: repository.update_stage(task['id'], stage),
+                )
             repository.finish_chat_task(task['id'], content, evidence)
         else:
             result = ToolRegistry().invoke('search_papers', {'query': task['query']}, context=ToolContext(task['project_id'], task['source']))

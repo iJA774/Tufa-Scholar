@@ -9,6 +9,11 @@ TASK = {'project_id': 2, 'query': 'attention', 'source': 'local'}
 
 
 class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        diagnostic = patch.object(w, 'record_failure', return_value='diag-test')
+        self.record_failure = diagnostic.start()
+        self.addCleanup(diagnostic.stop)
+
     def test_direct_graph_uses_history_without_tools(self):
         history = [{'role': 'user', 'content': 'prior question'}]
         def model(name, payload, schema):
@@ -173,7 +178,7 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(repository, 'project_evidence', return_value=papers), patch('src.tools.search.retrieve', side_effect=[{'results': [p]} for p in papers]), patch.object(w, 'structured', side_effect=model):
             content, _ = w.run(TASK, history=[])
         self.assertEqual(len(tasks), 3)
-        self.assertIn(0, remaining)
+        self.assertEqual(remaining[-1], 1)  # Budget exhaustion routes without another model call.
         self.assertIn('证据不足', content)
 
     def test_forbidden_route_never_invokes_tools(self):
@@ -185,6 +190,77 @@ class WorkflowTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, '不允许'):
                         w.run(research, history=[])
                 invoke.assert_not_called()
+
+    def test_no_progress_forces_review_and_report_without_another_route(self):
+        routes, reviews = [], []
+        def model(name, payload, schema):
+            if name == 'runtime/route':
+                routes.append(payload)
+                return w.Route(action='paper_research', task='topic')
+            if name == 'literature/research': return w.Specialist(action='search', query='topic')
+            if name == 'literature/review':
+                reviews.append(payload)
+                return w.Review(sufficient=False, gaps=['缺少证据'], summary='不足')
+            if name == 'literature/synthesize': return w.Draft()
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': []}), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
+            content, _ = w.run(TASK, history=[])
+        self.assertEqual(len(routes), 2)
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual([c.args[0] for c in invoke.call_args_list], ['search_papers'] * 12)
+        self.assertIn('没有新增证据', content)
+        self.assertIn('缺少证据', content)
+
+    def test_invalid_route_retries_with_feedback_before_any_tool(self):
+        payloads = []
+        def model(name, payload, schema):
+            payloads.append(payload)
+            return w.Route(action='web_research', task='bad') if len(payloads) == 1 else w.Route(action='direct', answer='ok')
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke') as invoke:
+            content, _ = w.run(TASK, history=[])
+        self.assertIn('ok', content)
+        self.assertEqual(payloads[1]['validation_feedback']['code'], 'invalid_action')
+        recorded = self.record_failure.call_args.kwargs
+        self.assertEqual(recorded['kind'], 'semantic_route')
+        self.assertEqual(recorded['response']['action'], 'web_research')
+        self.assertEqual(recorded['context']['allowed_actions'], payloads[0]['available_actions'])
+        self.assertEqual(recorded['payload'], payloads[0])
+        self.assertEqual(recorded['schema'], w.Route.model_json_schema())
+        self.assertEqual(payloads[1]['validation_feedback']['allowed_actions'], payloads[0]['available_actions'])
+        invoke.assert_not_called()
+
+    def test_candidate_ids_retry_then_read_or_fail_safely(self):
+        paper = {'id': 3, 'title': 'paper', 'abstract': 'evidence', 'versions': []}
+        for corrected in (True, False):
+            with self.subTest(corrected=corrected):
+                attempts = []
+                def model(name, payload, schema):
+                    if name == 'runtime/route':
+                        action = 'paper_research' if not payload['results'] else ('review' if payload['review'] is None else 'report')
+                        return w.Route(action=action, task='topic' if action == 'paper_research' else '')
+                    if name == 'literature/research':
+                        if not payload['recent_result']: return w.Specialist(action='search', query='topic')
+                        if payload['recent_result'].startswith('检索'):
+                            attempts.append(payload)
+                            ids = [payload['candidates'][0]['id']] if corrected and len(attempts) == 2 else ['fake', 'fake']
+                            return w.Specialist(action='read', candidate_ids=ids)
+                        return w.Specialist(action='finish')
+                    if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
+                    if name == 'literature/synthesize': return w.Draft()
+                    raise AssertionError(name)
+                with patch.object(repository, 'project_evidence', return_value=[paper]), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
+                    if corrected: w.run(TASK, history=[])
+                    else:
+                        with self.assertRaisesRegex(ValueError, '候选'): w.run(TASK, history=[])
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(attempts[1]['validation_feedback']['code'], 'invalid_candidate_ids')
+                records = [c.kwargs for c in self.record_failure.call_args_list if c.kwargs['kind'] == 'semantic_candidates']
+                self.assertEqual(len(records), 1 if corrected else 3)
+                self.assertEqual(records[-1]['response']['candidate_ids'], ['fake', 'fake'])
+                self.assertEqual(records[-1]['context']['candidate_ids'], [attempts[0]['candidates'][0]['id']])
+                self.assertEqual(records[-1]['schema'], w.Specialist.model_json_schema())
+                calls = [c.args[0] for c in invoke.call_args_list]
+                self.assertEqual(calls.count('collect_evidence'), 1 if corrected else 0)
 
     def test_repeated_query_deduplicates_ids_without_extra_votes(self):
         from src.literature.retrieval import rank_candidates

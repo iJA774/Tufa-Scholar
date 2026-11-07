@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,26 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(observed[1][1:], ([], 'planning'))
             self.assertEqual(observed[1][0]['paper_ids'], [])
             self.assertEqual(repository.get_task(current['run_id'])['status'], 'succeeded')
+
+    def test_diagnostic_scope_tracks_task_and_resets_after_exception(self):
+        from apps.worker.__main__ import run_once
+        from src.infrastructure.diagnostics import record_failure
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
+            initialize_storage()
+            project = repository.create_project('scope')['id']
+            task = repository.create_question(project, None, 'question', 'local')
+            ids = []
+            def agent(research, *, history, on_stage):
+                self.assertNotIn('id', research)
+                ids.append(record_failure(kind='test', payload={}, schema={}))
+                raise RuntimeError('failure')
+            with patch('src.agents.literature.run', side_effect=agent):
+                self.assertTrue(run_once())
+            ids.append(record_failure(kind='test', payload={}, schema={}))
+            data = [json.loads((Path(directory) / 'diagnostics' / (i + '.json')).read_text(encoding='utf-8')) for i in ids]
+            self.assertEqual(data[0]['context'], {'run_id': task['run_id'], 'project_id': project})
+            self.assertEqual(data[1]['context'], {})
+            self.assertEqual(repository.get_task(task['run_id'])['status'], 'failed')
 
     def test_local_ranking_via_actual_worker_entry(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):

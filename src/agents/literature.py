@@ -1,5 +1,6 @@
 """Evidence-based chat graph; external text is always passed as data."""
 import re
+import logging
 from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict, Literal
 from pydantic import model_validator
@@ -7,10 +8,12 @@ from src.literature.retrieval import _candidate_ids
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from src.integrations.model import structured
+from src.infrastructure.diagnostics import record_failure
 from src.tools import ToolContext, ToolRegistry
 from src.literature.retrieval import rank_candidates
 from src.literature.keywords import query_terms
 
+logger = logging.getLogger('tufa.agent')
 registry = ToolRegistry()
 
 
@@ -60,6 +63,7 @@ class State(TypedDict, total=False):
     route: object
     decisions: int
     forced: bool
+    forced_reason: str
     verified_content: str
     verified_evidence: list
     rejected: bool
@@ -299,12 +303,25 @@ def _research_graph(kind, on_stage):
         views, identities = _candidate_views(s)
         allowed = {'search_web' if kind == 'web' else 'search_papers', 'collect_evidence'}
         tools = [tool for tool in registry.list_tools(_context(s['research'])) if tool['name'] in allowed]
-        choice = _model(s, 'literature/research', {
+        payload = {
             'task': s['task'], 'role': kind, 'source': s['research']['source'], 'tools': tools,
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500]} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''),
             'evidence': _summary_evidence(s), 'calls_remaining': 6 - s.get('tool_calls', 0),
-        }, Specialist)
+        }
+        valid_ids = {key for key, _ in views}
+        for attempt in range(2):
+            choice = _model(s, 'literature/research', payload, Specialist)
+            logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
+            if choice.action != 'read' or (len(set(choice.candidate_ids)) == len(choice.candidate_ids) and all(i in valid_ids for i in choice.candidate_ids)):
+                break
+            diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
+                response=choice.model_dump(), errors=['invalid_candidate_ids'],
+                context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1})
+            logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
+            if attempt:
+                raise ValueError('精读候选标识无效')
+            payload = {**payload, 'validation_feedback': {'code': 'invalid_candidate_ids', 'allowed_ids': [key for key, _ in views[:20]]}}
         return {'choice': choice, 'candidate_identities': identities}
 
     def invoke(s):
@@ -346,16 +363,28 @@ def run(research: dict, *, history: list, on_stage=None):
         if count and not s.get('review_pending', False): actions.append('review')
         if count and reviewed: actions.append('report')
         if not count and research['source'] not in ('collection', 'web'): actions.append('direct')
-        if s.get('decisions', 0) >= 12:
-            return {'route': Route(action='report' if reviewed else 'review'), 'forced': True}
-        if not actions:
-            return {'route': Route(action='report' if reviewed else 'review'), 'forced': True}
-        route = _model(s, 'runtime/route', {'question': research['query'], 'history': s['history'], 'source': research['source'],
+        if exhausted or s.get('decisions', 0) >= 12 or not actions:
+            reason = ('补研没有新增证据' if s.get('no_progress') else
+                      '研究委派预算已耗尽' if count >= 3 else '主控决策预算已耗尽')
+            action = 'report' if reviewed else 'review'
+            logger.info('prompt_id=runtime/route action=%s forced=true delegations=%d decisions=%d', action, count, s.get('decisions', 0))
+            return {'route': Route(action=action), 'forced': True, 'forced_reason': reason}
+        payload = {'question': research['query'], 'history': s['history'], 'source': research['source'],
             'available_actions': actions, 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
             'review': reviewed.model_dump() if reviewed else None, 'delegations_remaining': max(0, 3-count),
-            'decisions_remaining': max(0, 12-s.get('decisions', 0)), 'no_progress': s.get('no_progress', False)}, Route)
-        if route.action not in actions:
-            raise ValueError('主控选择了当前范围或状态不允许的操作')
+            'decisions_remaining': max(0, 12-s.get('decisions', 0)), 'no_progress': s.get('no_progress', False)}
+        for attempt in range(2):
+            route = _model(s, 'runtime/route', payload, Route)
+            logger.info('prompt_id=runtime/route action=%s allowed=%s delegations=%d decisions=%d attempt=%d', route.action, actions, count, s.get('decisions', 0), attempt + 1)
+            if route.action in actions:
+                break
+            diagnostic_id = record_failure(kind='semantic_route', payload=payload, schema=Route.model_json_schema(),
+                response=route.model_dump(), errors=['invalid_action'],
+                context={'allowed_actions': actions, 'prompt_id': 'runtime/route', 'attempt': attempt + 1})
+            logger.warning('prompt_id=runtime/route diagnostic_id=%s', diagnostic_id)
+            if attempt:
+                raise ValueError('主控选择了当前范围或状态不允许的操作')
+            payload = {**payload, 'validation_feedback': {'code': 'invalid_action', 'allowed_actions': actions}}
         return {'route': route, 'decisions': s.get('decisions', 0) + 1}
 
     def delegate(s):
@@ -403,7 +432,7 @@ def run(research: dict, *, history: list, on_stage=None):
         review_result = s.get('review_result')
         if s.get('forced') or (review_result and not review_result.sufficient):
             gaps = '；'.join(review_result.gaps) if review_result else ''
-            content += '\n\n证据不足：' + (gaps or '研究预算已耗尽，仍需进一步核查。')
+            content += '\n\n证据不足：' + (s.get('forced_reason', '') + '；' if s.get('forced_reason') else '') + (gaps or '仍需进一步核查。')
         return {'content': content, 'evidence': result['verified_evidence']}
 
     graph = StateGraph(State)
