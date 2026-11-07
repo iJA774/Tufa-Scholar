@@ -16,13 +16,26 @@ class ModelFixture(BaseHTTPRequestHandler):
         ModelFixture.requests.append(req)
         prompt = req['messages'][0]['content']
         data = json.loads(req['messages'][1]['content'])
-        if '检索规划' in prompt:
-            result = {'direct':False,'queries':['accuracy']}
-        elif '补检' in prompt:
-            result = {'query':''}
-        elif '只写有对应证据' in prompt:
+        if '你是研究主控' in prompt:
+            if not data['results']:
+                action = 'web_research' if data['source'] == 'web' else 'paper_research'
+                result = {'action': action, 'task': 'accuracy'}
+            elif data['review'] is None:
+                result = {'action': 'review'}
+            else:
+                result = {'action': 'report'}
+        elif '你是研究专家' in prompt:
+            if not data['recent_result']:
+                result = {'action': 'search', 'query': 'accuracy'}
+            elif data['candidates'] and not data['evidence']:
+                result = {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']]}
+            else:
+                result = {'action': 'finish'}
+        elif '你是无工具研究审查者' in prompt:
+            result = {'sufficient': True, 'gaps': [], 'summary': '已审查'}
+        elif '只写有对应证据' in prompt or '你是报告修订者' in prompt:
             evidence = data['evidence']
-            result = {'claims':[{'text':'准确率为 92%','citations':[evidence[0]['id']]}, {'text':'成本降低 30%','citations':[evidence[0]['id']]}], 'limitations':'成本数据不足'}
+            result = {'claims':[{'text':'准确率为 92%','citations':[evidence[0]['id']]}, {'text':'成本降低 30%','citations':[evidence[0]['id']]}] if evidence else [], 'limitations':'成本数据不足'}
         elif '严格核查' in prompt:
             result = {'supported':True}
         else:
@@ -118,9 +131,7 @@ def main():
                     except KeyboardInterrupt: pass
     finally:
         for process in processes:
-            if os.name == 'nt' and process.poll() is None:
-                subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif process.poll() is None:
+            if process.poll() is None:
                 process.terminate()
         for process in processes:
             try: process.wait(timeout=10)

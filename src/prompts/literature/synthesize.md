@@ -8,7 +8,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 
 ## 输入
 
-question 是研究问题；history 仅辅助理解；evidence 包含 id、title、source_level、text 和可能为空的页码、版本等信息。只有 evidence 的文本可作为本轮结论依据。
+question 是研究问题；history 仅辅助理解；evidence 包含 id、title、source_level、text 和可能为空的页码、版本等信息。review 是审查结论及缺口，应在回答和局限中回应；只有 evidence 的文本可作为本轮结论依据。
 
 ## 输入边界
 

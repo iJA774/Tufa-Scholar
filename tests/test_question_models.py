@@ -11,7 +11,7 @@ from apps.api.main import app
 from src.persistence import repository
 from src.agents.literature import run
 from src.integrations.model import discover, structured
-from src.agents.literature import Answer
+from src.agents.literature import Route
 from src.persistence.storage import initialize_storage
 
 
@@ -53,12 +53,12 @@ class QuestionModelTests(unittest.TestCase):
         calls = []
         def post(url, **kwargs):
             calls.append(kwargs['json'])
-            result = {'direct': True, 'queries': []} if len(calls) == 1 else {'answer': 'hello'}
+            result = {'action': 'direct', 'answer': 'hello'}
             return httpx.Response(200, request=httpx.Request('POST', url), json={'choices': [{'message': {'content': json.dumps(result)}}]})
         with patch('src.integrations.model.httpx.post', side_effect=post):
             content, _ = run({k: retry[k] for k in ('project_id', 'query', 'source', 'paper_ids', 'model_name', 'reasoning_effort')}, history=[])
         self.assertIn('hello', content)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertTrue(all(c['model'] == 'selected' and c['reasoning_effort'] == 'max' for c in calls))
         initialize_storage()
         self.assertEqual(repository.get_task(retry['id'])['model_name'], 'selected')
@@ -76,9 +76,9 @@ class QuestionModelTests(unittest.TestCase):
             result = self.ask()
         task = repository.get_task(result.json()['run_id'])
         self.assertEqual(task['model_name'], 'env-model')
-        response = httpx.Response(200, request=httpx.Request('POST', 'https://example.invalid'), json={'choices': [{'message': {'content': '{"answer":"hello"}'}}]})
+        response = httpx.Response(200, request=httpx.Request('POST', 'https://example.invalid'), json={'choices': [{'message': {'content': '{"action":"direct","answer":"hello"}'}}]})
         with patch('src.integrations.model.httpx.post', return_value=response) as post:
-            structured('literature/direct', {}, Answer, model_options=task)
+            structured('runtime/route', {}, Route, model_options=task)
         self.assertNotIn('reasoning_effort', post.call_args.kwargs['json'])
 
     def test_metadata_normalization_and_secret_redaction(self):

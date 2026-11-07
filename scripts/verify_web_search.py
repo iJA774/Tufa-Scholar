@@ -119,12 +119,13 @@ def main():
             finally:
                 for process in processes:
                     if process.poll() is None:
-                        if os.name == 'nt':
-                            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        else:
-                            process.terminate()
+                        process.terminate()
                 for process in processes:
-                    process.wait(timeout=10)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
     finally:
         provider.shutdown()
         provider.server_close()

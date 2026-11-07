@@ -163,6 +163,15 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 
 ## 验证
 
+
+### Supervisor 重构验收（2026-11-07）
+
+在仓库根目录，将 `TEMP`、`TMP` 指向 `.cache/supervisor-acceptance`，`TUFA_DATA_DIR` 指向其 `data` 子目录，使用隔离数据执行：
+
+- `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：最终 93 项通过，耗时 6.763 秒，日志为 `.cache/supervisor-acceptance/unittest.log`。首次运行 87 项时因 `test_question_models` 仍导入旧 `Answer` 而失败，修复后重跑通过。
+- 在沙箱外隔离运行 `.venv/Scripts/python.exe -B -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -B -m scripts.verify_web_search`，均以退出码 0 完成并成功收尾。前者验证收藏快照、模型隔离、引用、重试和导出；后者使用模拟 Searx 与模型及实际 API/worker，验证来源引用、CSV、空结果与错误、论文库隔离和重试。
+- 本轮未调用真实外部服务，未运行前端构建或浏览器验收，未修改默认 `data/`。
+
 ### 跨轮证据、PDF 分页与轮询重试验收（2026-11-07）
 
 在仓库根目录使用现有依赖和 E 盘隔离目录执行：

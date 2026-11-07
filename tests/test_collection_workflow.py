@@ -11,7 +11,7 @@ from src.agents import literature as w
 
 class CollectionWorkflowTests(unittest.TestCase):
     def test_deleted_collection_retains_snapshot_for_graph_and_retry(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}, clear=True), TestClient(app) as client:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}, clear=True), TestClient(app) as client:
             project = client.post('/projects', json={'name': 'project'}).json()['id']
             collection = client.post(f'/projects/{project}/collections', json={'name': 'selected'}).json()['id']
             selected = client.post(f'/projects/{project}/papers', json={'title': 'selected', 'abstract': 'selected evidence'}).json()['id']
@@ -24,8 +24,12 @@ class CollectionWorkflowTests(unittest.TestCase):
             payloads = []
             def model(name, payload, schema):
                 payloads.append(str(payload))
-                if name.endswith('plan_review'): return w.Plan(direct=True, queries=['selected'])
-                if name.endswith('assess_gap'): return w.Gap(query='')
+                if name == 'runtime/route':
+                    self.assertNotIn('direct', payload['available_actions'])
+                    return w.Route(action='paper_research', task='selected') if not payload['results'] else w.Route(action='review' if payload['review'] is None else 'report')
+                if name == 'literature/research':
+                    return w.Specialist(action='search', query='selected') if not payload['recent_result'] else (w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(action='finish'))
+                if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
                 if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
                 if name.endswith('verify_claim'): return w.Verdict(supported=True)
                 raise AssertionError(name)
@@ -58,8 +62,13 @@ class CollectionWorkflowTests(unittest.TestCase):
         payloads = []
         def model(name, payload, schema):
             payloads.append(str(payload))
-            if name.endswith('plan_review'): return w.Plan(direct=True, queries=['anything'])
-            if name.endswith('assess_gap'): return w.Gap(query='more')
+            if name == 'runtime/route':
+                self.assertEqual(payload['history'], [])
+                self.assertNotIn('direct', payload['available_actions'])
+                return w.Route(action='paper_research', task='selected') if not payload['results'] else w.Route(action='review' if payload['review'] is None else 'report')
+            if name == 'literature/research':
+                return w.Specialist(action='search', query='selected') if not payload['recent_result'] else (w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(action='finish'))
+            if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
             if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
             if name.endswith('verify_claim'): return w.Verdict(supported=True)
             raise AssertionError(name)
@@ -67,9 +76,9 @@ class CollectionWorkflowTests(unittest.TestCase):
             content, evidence = w.run({k: task[k] for k in ('project_id', 'query', 'source', 'paper_ids')}, history=[])
         retrieve.assert_not_called()
         external.assert_not_called()
-        self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_papers', 'collect_evidence', 'search_papers', 'collect_evidence'])
+        self.assertEqual([call.args[0] for call in invoke.call_args_list], ['search_papers', 'collect_evidence'])
         self.assertTrue(all(call.kwargs['context'].project_id == 1 and call.kwargs['context'].source == 'collection' and call.kwargs['context'].paper_ids == (3,) for call in invoke.call_args_list))
-        self.assertEqual(local.call_count, 2)
+        self.assertEqual(local.call_count, 1)
         self.assertTrue(all(call.args[2] == [3] for call in local.call_args_list))
         self.assertTrue(all('OUTSIDE_SECRET' not in payload for payload in payloads))
         self.assertTrue(all('forbidden' not in payload for payload in payloads))
