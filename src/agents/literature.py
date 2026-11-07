@@ -7,6 +7,7 @@ from langgraph.graph import StateGraph, START, END
 from src.integrations.model import structured
 from src.tools import ToolContext, ToolRegistry
 from src.literature.retrieval import rank_candidates
+from src.literature.keywords import query_terms
 
 registry = ToolRegistry()
 
@@ -51,9 +52,10 @@ class State(TypedDict, total=False):
     candidates: list
     papers: list
     query_results: dict
-    seen_evidence: set
     new_evidence: bool
     evidence: list
+    evidence_pool: list
+    evidence_facets: list
     round: int
     draft: Draft
     content: str
@@ -74,7 +76,13 @@ def plan(s):
     queries = p.queries
     if s['research']['source'] == 'web':
         queries = [q.strip() for q in queries if q.strip()]
-    return {'history': history, 'direct': p.direct and not collection and s['research']['source'] != 'web', 'queries': queries or [s['research']['query']], 'evidence_query': s['research']['query'], 'candidates': [], 'papers': [], 'query_results': {}, 'seen_evidence': set(), 'new_evidence': False, 'evidence': [], 'round': 0, 'warnings': []}
+    return {
+        'history': history, 'direct': p.direct and not collection and s['research']['source'] != 'web',
+        'queries': queries or [s['research']['query']], 'evidence_query': s['research']['query'],
+        'candidates': [], 'papers': [], 'query_results': {}, 'new_evidence': False,
+        'evidence': [], 'evidence_pool': [], 'evidence_facets': [s['research']['query']],
+        'round': 0, 'warnings': [],
+    }
 
 
 def direct(s):
@@ -124,14 +132,65 @@ def _evidence_signature(entry):
     return tuple(entry.get(field) for field in ('paper_id', 'version_id', 'page', 'title', 'source_level', 'text')) + (url,)
 
 
+# Bound both the number of entries and text sent to a model.
+EVIDENCE_LIMIT = 18
+EVIDENCE_TEXT_LIMIT = 21600
+
+
+def _select_evidence(pool, facets):
+    terms = [query_terms(facet) for facet in facets]
+    texts = [(entry.get('title', '') + ' ' + entry.get('text', '')).casefold() for entry in pool]
+    scores = [[sum(term in text for term in facet) for text in texts] for facet in terms]
+    selected = []
+    size = 0
+
+    def add(index):
+        nonlocal size
+        length = len(pool[index].get('text', ''))
+        if index not in selected and len(selected) < EVIDENCE_LIMIT and size + length <= EVIDENCE_TEXT_LIMIT:
+            selected.append(index)
+            size += length
+
+    for facet_scores in scores:
+        for index in sorted(range(len(pool)), key=lambda i: (-facet_scores[i], i)):
+            if not facet_scores[index]:
+                break
+            add(index)
+            if index in selected:
+                break
+    for index in sorted(range(len(pool)), key=lambda i: (-sum(row[i] for row in scores), i)):
+        add(index)
+    return [pool[index] for index in selected]
+
+
 def evidence(s):
     query = s.get('evidence_query') or s['research']['query']
     found = registry.invoke(
         'collect_evidence', {'query': query, 'papers': s['papers']}, context=_context(s['research'])
     )
-    seen = set(s.get('seen_evidence', set()))
-    current = {_evidence_signature(item) for item in found}
-    return {'evidence': found, 'seen_evidence': seen | current, 'new_evidence': bool(current - seen)}
+    pool = list(s.get('evidence_pool', []))
+    signatures = {_evidence_signature(item) for item in pool}
+    ids = {item['id'] for item in pool}
+    new_evidence = False
+    for item in found:
+        signature = _evidence_signature(item)
+        if signature in signatures:
+            continue
+        entry = dict(item)
+        base = entry['id']
+        suffix = 2
+        while entry['id'] in ids:
+            entry['id'] = f'{base}_{suffix}'
+            suffix += 1
+        ids.add(entry['id'])
+        signatures.add(signature)
+        pool.append(entry)
+        new_evidence = True
+    facets = list(s.get('evidence_facets', [s['research']['query']]))
+    if query.strip() and query.strip().casefold() not in {q.strip().casefold() for q in facets}:
+        facets.append(query)
+    return {'evidence': _select_evidence(pool, facets), 'evidence_pool': pool,
+            'evidence_facets': facets, 'new_evidence': new_evidence}
 
 
 def assess(s):
@@ -182,7 +241,7 @@ def verify(s):
             lines.append('本次网页检索未找到可用文本证据。')
         lines.append('网页结果仅使用每条最多 1200 字符的片段；搜索摘要、网页文本与论文摘要的来源层级不同，不能视为论文全文。')
     else:
-        lines.append('正文仅检查每篇首个可提取版本前 20 页中按问题词挑选的最多 3 页、每页最多 1200 字符；摘要不等同于全文证据。')
+        lines.append('正文从每篇最新可提取版本的已索引页面中按问题词挑选最多 6 个页面片段，每个最多 1200 字符；摘要不等同于全文证据。')
     kept = [e for e in s['evidence'] if e['id'] in used and (allowed is None or e.get('paper_id') in allowed)]
     if kept:
         def reference(e):

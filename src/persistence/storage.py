@@ -42,6 +42,9 @@ def initialize_storage() -> dict:
         CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER REFERENCES conversations(id), query TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL, result TEXT, error TEXT);
         """)
         connection.execute("BEGIN IMMEDIATE")
+        if 'pages_indexed' not in {row[1] for row in connection.execute('PRAGMA table_info(paper_versions)')}:
+            connection.execute('ALTER TABLE paper_versions ADD COLUMN pages_indexed INTEGER NOT NULL DEFAULT 0')
+        connection.execute('CREATE TABLE IF NOT EXISTS paper_pages (version_id INTEGER NOT NULL REFERENCES paper_versions(id), page INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(version_id, page))')
         if 'kind' not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:
             connection.execute("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'search'")
         if 'origin_run_id' not in {row[1] for row in connection.execute('PRAGMA table_info(tasks)')}:

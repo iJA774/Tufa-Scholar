@@ -1,10 +1,10 @@
 """Extract source-grounded evidence from project papers and web results."""
 import hashlib
-import re
 from urllib.parse import urlsplit, urlunsplit
 
 from pypdf import PdfReader
 
+from src.literature.keywords import query_terms
 from src.persistence import repository
 
 
@@ -42,21 +42,31 @@ def collect_evidence(project_id, source, paper_ids, query, papers):
             continue
         p = record if record else {**incoming, 'id': None}
         if record:
+            candidates = []
+            terms = query_terms(query)
             for v in record['versions']:
                 if v['text_status'] != 'text_available':
                     continue
-                reader = PdfReader(v['path'])
-                terms = [t.lower() for t in re.findall(r'\w+', query) if len(t) > 1]
-                pages = []
-                for page_num, page in enumerate(reader.pages[:20], 1):
-                    text = (page.extract_text() or '').strip()
-                    if text:
-                        positions = [text.lower().find(term) for term in terms if term in text.lower()]
-                        start = max(0, min(positions) - 200) if positions else 0
-                        pages.append((len(positions), page_num, text[start:start + 1200]))
-                for _, page_num, text in sorted(pages, key=lambda x: (-x[0], x[1]))[:3]:
-                    found.append({'id': f"p{p['id']}v{v['id']}p{page_num}", 'paper_id': p['id'], 'title': p['title'], 'source_level': 'full_text', 'version_id': v['id'], 'page': page_num, 'text': text})
-                break
-        if not any(e['title'] == p['title'] for e in found) and p.get('abstract'):
+                if not v['pages_indexed']:
+                    try:
+                        reader = PdfReader(v['path'])
+                        pages = [(page.extract_text() or '').strip() for page in reader.pages]
+                    except Exception:
+                        continue
+                    repository.index_version_pages(v['id'], pages)
+                for page in repository.version_pages(v['id']):
+                    text = page['text']
+                    for offset in range(0, len(text), 1000):
+                        fragment = text[offset:offset + 1200]
+                        normalized = fragment.casefold()
+                        score = sum(term in normalized for term in terms)
+                        if fragment.strip():
+                            candidates.append((score, v['id'], page['page'], offset, fragment))
+                if candidates:
+                    break
+            for _, version_id, page_num, offset, text in sorted(candidates, key=lambda x: (-x[0], x[2], x[3]))[:6]:
+                suffix = f"s{offset}" if offset else ''
+                found.append({'id': f"p{p['id']}v{version_id}p{page_num}{suffix}", 'paper_id': p['id'], 'title': p['title'], 'source_level': 'full_text', 'version_id': version_id, 'page': page_num, 'text': text})
+        if not any(e.get('paper_id') == p.get('id') and (p.get('id') is not None or e['title'] == p['title']) for e in found) and p.get('abstract'):
             found.append({'id': f"a{len(found)+1}", 'paper_id': p.get('id'), 'title': p['title'], 'source_level': 'abstract', 'version_id': None, 'page': None, 'text': p['abstract'][:1200], 'original_url': p.get('original_url')})
     return found

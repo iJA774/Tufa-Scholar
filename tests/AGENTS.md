@@ -15,7 +15,7 @@
 | 改动范围 | 主要测试文件或入口 |
 |---|---|
 | HTTP、项目与文献 | `test_api.py`、`test_chat_api.py`、`test_collections_api.py` |
-| 检索、科研与证据范围 | `test_retrieval.py`、`test_workflow.py`、`test_collection_workflow.py` |
+| 检索、科研与证据范围 | `test_retrieval.py`、`test_workflow.py`、`test_collection_workflow.py`、`test_pdf_evidence.py` |
 | 工具发现、参数与独立调用 | `test_tools.py`，以及 API、worker、workflow 的调用入口回归 |
 | 模块移动后的路径语义 | `test_layout.py`、`test_model.py`，以及实际 worker 与模拟 HTTP 闭环 |
 | 设置、模型与日志 | `test_settings.py`、`test_model.py`、`test_model_discovery.py`、`test_logging.py` |

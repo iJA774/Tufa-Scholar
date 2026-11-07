@@ -163,6 +163,29 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 
 ## 验证
 
+### 跨轮证据、PDF 分页与轮询重试验收（2026-11-07）
+
+在仓库根目录使用现有依赖和 E 盘隔离目录执行：
+
+```powershell
+$acceptanceTemp = (New-Item -ItemType Directory -Force .cache/evidence-polling-acceptance).FullName
+$env:TEMP = $acceptanceTemp
+$env:TMP = $acceptanceTemp
+$env:TUFA_DATA_DIR = Join-Path $acceptanceTemp 'data'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+& .venv/Scripts/python.exe -B -m unittest discover -s tests -v
+$env:NEXT_TELEMETRY_DISABLED = '1'
+$env:NODE_OPTIONS = '--max-old-space-size=1536'
+pnpm check:web
+pnpm build:web
+pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck
+node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)
+```
+
+- 后端 89 项通过。使用隔离 SQLite 和模拟外部服务，验证旧表重复升级、分页补建、上传实际 PDF、取证读取第 26 页、长页分片和原文下载。旧论文退出精读集合后，其片段与新论文证据仍可一起引用并通过模拟核验。工作证据的条数和文本上限通过回归验证。
+- 前端类型检查、生产构建和 5 项轮询调度测试通过，覆盖瞬时失败后恢复、计数清零、连续三次失败后停止及取消。在前端目录用 `node --max-old-space-size=1024 node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 18301` 检查生产首页，返回 HTTP 200。验收后关闭进程，端口已释放。
+- 沙箱内 TestClient 和回环 HTTP 检查未完成，最终在沙箱外对隔离数据通过，已停止此前卡住的测试进程。真实模型、真实外部搜索及浏览器断网交互未实测。
+
 ### 补检子问题取证验收（2026-11-07）
 
 在仓库根目录执行：

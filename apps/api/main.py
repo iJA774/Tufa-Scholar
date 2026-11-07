@@ -253,7 +253,8 @@ async def import_paper(project_id: int, file: UploadFile = File(...), title: str
         raise HTTPException(422, '请上传有效的 PDF 文件')
     try:
         reader = PdfReader(BytesIO(content))
-        text = '\n'.join(page.extract_text() or '' for page in reader.pages).strip()
+        pages = [(page.extract_text() or '').strip() for page in reader.pages]
+        text = '\n'.join(pages).strip()
         pdf_title = str(reader.metadata.title or '').strip() if reader.metadata else ''
     except Exception as exc:
         raise HTTPException(422, '无法解析 PDF 文件') from exc
@@ -269,7 +270,7 @@ async def import_paper(project_id: int, file: UploadFile = File(...), title: str
     if not metadata['title']:
         raise HTTPException(422, '文献标题不能为空')
     try:
-        result = repo.save_paper(project_id, metadata, {'filename': Path(file.filename or 'paper.pdf').name, 'digest': digest, 'path': str(path), 'text': text, 'text_status': 'text_available' if text else 'no_extractable_text'})
+        result = repo.save_paper(project_id, metadata, {'filename': Path(file.filename or 'paper.pdf').name, 'digest': digest, 'path': str(path), 'text': text, 'pages': pages, 'text_status': 'text_available' if text else 'no_extractable_text'})
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     result['duplicate'] = duplicate

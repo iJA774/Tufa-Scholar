@@ -125,7 +125,9 @@ def save_paper(project_id, metadata, version=None, collection_id=None):
         if collection_id is not None:
             db.execute('INSERT OR IGNORE INTO collection_papers VALUES (?,?)', (collection_id,paper_id))
         if version and not existing_version(db, version['digest']):
-            db.execute('INSERT INTO paper_versions(paper_id,filename,digest,path,text,text_status) VALUES (?,?,?,?,?,?)', (paper_id,version['filename'],version['digest'],version['path'],version['text'],version['text_status']))
+            cur = db.execute('INSERT INTO paper_versions(paper_id,filename,digest,path,text,text_status,pages_indexed) VALUES (?,?,?,?,?,?,?)', (paper_id,version['filename'],version['digest'],version['path'],version['text'],version['text_status'],int('pages' in version)))
+            if 'pages' in version:
+                db.executemany('INSERT INTO paper_pages(version_id,page,text) VALUES (?,?,?)', ((cur.lastrowid, n, text) for n, text in enumerate(version['pages'], 1)))
         row = _one(db, 'SELECT * FROM papers WHERE id=?', (paper_id,))
         full_text = ' '.join(v['text'] for v in _all(db, 'SELECT text FROM paper_versions WHERE paper_id=?', (paper_id,)))
         db.execute('DELETE FROM paper_fts WHERE rowid=?', (paper_id,))
@@ -304,7 +306,7 @@ def project_evidence(project_id, paper_ids=None):
             papers = [p for p in papers if p['id'] in set(paper_ids)]
         for p in papers:
             p['authors'] = json.loads(p['authors'])
-            p['versions'] = _all(db, 'SELECT id, paper_id, path, filename, text_status FROM paper_versions WHERE paper_id=? ORDER BY id DESC', (p['id'],))
+            p['versions'] = _all(db, 'SELECT id, paper_id, path, filename, text_status, pages_indexed FROM paper_versions WHERE paper_id=? ORDER BY id DESC', (p['id'],))
         return papers
 
 
@@ -355,3 +357,18 @@ def collection_add_existing(project_id, collection_id, paper_id):
 def collection_remove(project_id, collection_id, paper_id):
     with connect_database() as db:
         cur=db.execute('DELETE FROM collection_papers WHERE collection_id IN (SELECT id FROM collections WHERE id=? AND project_id=?) AND paper_id=?',(collection_id,project_id,paper_id)); db.commit(); return bool(cur.rowcount)
+
+
+def version_pages(version_id):
+    with connect_database() as db:
+        return _all(db, 'SELECT page,text FROM paper_pages WHERE version_id=? ORDER BY page', (version_id,))
+
+
+def index_version_pages(version_id, pages):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = _one(db, 'SELECT pages_indexed FROM paper_versions WHERE id=?', (version_id,))
+        if row and not row['pages_indexed']:
+            db.executemany('INSERT INTO paper_pages(version_id,page,text) VALUES (?,?,?)', ((version_id, n, text) for n, text in enumerate(pages, 1)))
+            db.execute('UPDATE paper_versions SET pages_indexed=1 WHERE id=?', (version_id,))
+        db.commit()
