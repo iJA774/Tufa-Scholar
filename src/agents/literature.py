@@ -47,6 +47,7 @@ class State(TypedDict, total=False):
     history: list
     direct: bool
     queries: list
+    evidence_query: str
     candidates: list
     papers: list
     query_results: dict
@@ -73,7 +74,7 @@ def plan(s):
     queries = p.queries
     if s['research']['source'] == 'web':
         queries = [q.strip() for q in queries if q.strip()]
-    return {'history': history, 'direct': p.direct and not collection and s['research']['source'] != 'web', 'queries': queries or [s['research']['query']], 'candidates': [], 'papers': [], 'query_results': {}, 'seen_evidence': set(), 'new_evidence': False, 'evidence': [], 'round': 0, 'warnings': []}
+    return {'history': history, 'direct': p.direct and not collection and s['research']['source'] != 'web', 'queries': queries or [s['research']['query']], 'evidence_query': s['research']['query'], 'candidates': [], 'papers': [], 'query_results': {}, 'seen_evidence': set(), 'new_evidence': False, 'evidence': [], 'round': 0, 'warnings': []}
 
 
 def direct(s):
@@ -124,7 +125,10 @@ def _evidence_signature(entry):
 
 
 def evidence(s):
-    found = registry.invoke('collect_evidence', {'query': s['research']['query'], 'papers': s['papers']}, context=_context(s['research']))
+    query = s.get('evidence_query') or s['research']['query']
+    found = registry.invoke(
+        'collect_evidence', {'query': query, 'papers': s['papers']}, context=_context(s['research'])
+    )
     seen = set(s.get('seen_evidence', set()))
     current = {_evidence_signature(item) for item in found}
     return {'evidence': found, 'seen_evidence': seen | current, 'new_evidence': bool(current - seen)}
@@ -135,7 +139,7 @@ def assess(s):
         return {'queries': []}
     g = _model(s, 'literature/assess_gap', {'question': s['research']['query'], 'evidence': s['evidence']}, Gap)
     query = g.query.strip() if s['research']['source'] == 'web' else g.query
-    return {'queries': [query] if query else [], 'round': s['round'] + 1}
+    return {'queries': [query] if query else [], 'evidence_query': query, 'round': s['round'] + 1}
 
 
 def synthesize(s):

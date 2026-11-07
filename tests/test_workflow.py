@@ -133,3 +133,34 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(repository, 'project_evidence', return_value=local), patch('src.literature.evidence.PdfReader', return_value=SimpleNamespace(pages=pages)):
             result = w.evidence({'research': TASK, 'papers': [paper]})['evidence']
         self.assertEqual((result[0]['version_id'], result[0]['page'], result[0]['id']), (7, 2, 'p3v7p2'))
+
+    def test_supplement_queries_select_pdf_pages_across_rounds(self):
+        texts = ['attention initial', 'ordinary page', 'ordinary page',
+                 'latency supplement details', 'energy supplement details']
+        pages = [SimpleNamespace(extract_text=lambda text=text: text) for text in texts]
+        paper = {'id': 3, 'title': 'paper'}
+        local = [{**paper, 'versions': [{'id': 7, 'path': 'fixture.pdf', 'text_status': 'text_available'}]}]
+        snapshots, questions = [], []
+        def model(name, payload, schema):
+            if name.endswith('plan_review'):
+                return w.Plan(queries=['planned search', 'another search'])
+            if name.endswith('assess_gap'):
+                questions.append(payload['question'])
+                snapshots.append([e['page'] for e in payload['evidence']])
+                return w.Gap(query=['latency', 'energy'][len(snapshots) - 1])
+            if name.endswith('synthesize'):
+                questions.append(payload['question'])
+                snapshots.append([e['page'] for e in payload['evidence']])
+                return w.Draft()
+            raise AssertionError(name)
+        with (
+            patch.object(repository, 'project_evidence', return_value=local),
+            patch('src.literature.evidence.PdfReader', return_value=SimpleNamespace(pages=pages)),
+            patch('src.tools.search.retrieve', return_value={'results': [paper]}) as retrieve,
+            patch.object(w, 'structured', side_effect=model),
+        ):
+            w.run(TASK, history=[])
+        self.assertEqual([call.args[1] for call in retrieve.call_args_list],
+                         ['planned search', 'another search', 'latency', 'energy'])
+        self.assertEqual(snapshots, [[1, 2, 3], [4, 1, 2], [5, 1, 2]])
+        self.assertEqual(questions, ['attention'] * 3)

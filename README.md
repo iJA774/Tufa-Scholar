@@ -163,6 +163,20 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 
 ## 验证
 
+### 补检子问题取证验收（2026-11-07）
+
+在仓库根目录执行：
+
+```powershell
+$testTemp = (New-Item -ItemType Directory -Force .cache/supplement-evidence-tests).FullName
+$env:TEMP = $testTemp
+$env:TMP = $testTemp
+$env:TUFA_DATA_DIR = Join-Path $testTemp 'data'
+& .venv/Scripts/python.exe -B -m unittest -v tests.test_workflow tests.test_collection_workflow tests.test_web_workflow tests.test_tools
+```
+
+四组共 32 项通过。新增用例从 `run()` 执行 LangGraph，模拟模型、检索结果和 PDF 页文本，使用实际工具入口和取证评分。首轮选择第 1 页优先，两轮补检分别把第 4、5 页选入证据并排在首位。缺口评估和综合都收到原始研究问题。收藏夹隔离用例在沙箱内停滞，停止后在沙箱外使用隔离数据通过。验收使用模拟外部服务，未启动应用服务。
+
 ### 前端工作台分责验收（2026-11-06）
 
 - `pnpm check:web`、`pnpm build:web`：最终版本通过。构建前设置 `TUFA_API_URL=http://127.0.0.1:18180`，使用 E 盘 `.cache/frontend-refactor-tmp` 作为 `TEMP`/`TMP`，设置 `NEXT_TELEMETRY_DISABLED=1` 与 `NODE_OPTIONS=--max-old-space-size=1536`。
