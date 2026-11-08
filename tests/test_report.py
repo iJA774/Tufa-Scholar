@@ -48,6 +48,14 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result['evidence'], evidence)
         self.assertEqual(result['research_gaps'], state['research_gaps'])
 
+    def test_partial_shows_one_safe_provider_block_notice(self):
+        state = {'research': {'source': 'web'}, 'evidence': [], 'warnings': ['web_search_failed', 'web_search_blocked:challenge']}
+        result = r.render_partial(state, '网页搜索服务暂不可用，已暂停重复请求')
+        self.assertIn('要求验证', result['content'])
+        self.assertEqual(result['content'].count('暂停'), 1)
+        self.assertNotIn('全部搜索服务', result['content'])
+        self.assertNotIn('部分或全部请求失败', result['content'])
+
     def test_formal_report_ignores_optional_next_steps(self):
         from types import SimpleNamespace
         evidence = [{'id': 'a', 'title': 'paper', 'text': 'supported'}]

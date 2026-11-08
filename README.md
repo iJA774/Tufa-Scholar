@@ -168,6 +168,18 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 搜索服务受阻处理验收（2026-11-08）
+
+以 `.cache/web-provider-recovery-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，运行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：160 项通过，耗时 11.933 秒，日志为该目录的 `unittest.log`。
+
+在隔离目录 `.cache/web-provider-recovery-acceptance` 使用模拟模型、搜索和网页读取运行实际 API/worker：`-m scripts.verify_chat` 和 `-m scripts.verify_web_search` 均以退出码 0 完成，日志分别为 `chat/verify.log` 和 `web/verify.log`。验收包含限流后停止重复搜索、阶段性结果，以及显式网页搜索故障重试。未在此模拟验收中调用真实模型或搜索供应商。
+
+
+### 网页搜索受阻公开组件观察（2026-11-08）
+
+独立公开查询中，DuckDuckGo 仍返回 HTTP 202 验证挑战；同次通过项目 `fetch_page` 直接读取 EAC 的公开页面，得到 2699 个 Markdown 字符。这只验证搜索与网页读取组件，未重新运行真实模型任务，也不代表自动切换了搜索供应商。
+
+
 ### 研究充分性与阶段结果验收（2026-11-08）
 
 以 `.cache/research-completion-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，运行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：153 项通过，耗时 13.276 秒，日志为该目录的 `unittest.log`。

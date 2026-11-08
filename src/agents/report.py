@@ -182,12 +182,36 @@ def _safe_direction(value):
     return ' '.join(value.split())[:150]
 
 
+
+def _search_block_notice(warnings):
+    reasons = {
+        'challenge': '当前网页搜索服务要求验证，已暂停本次任务的重复搜索。',
+        'rate_limit': '当前网页搜索服务触发限流，已暂停本次任务的重复搜索。',
+        'auth': '当前网页搜索服务认证失败，已暂停本次任务的重复搜索。',
+        'configuration': '当前网页搜索服务配置不可用，已暂停本次任务的重复搜索。',
+        'missing_key': '当前网页搜索服务缺少密钥，已暂停本次任务的重复搜索。',
+        'timeout': '当前网页搜索服务多次超时，已暂停本次任务的重复搜索。',
+        'network': '当前网页搜索服务多次连接失败，已暂停本次任务的重复搜索。',
+        'provider_error': '当前网页搜索服务多次出错，已暂停本次任务的重复搜索。',
+        'http_status': '当前网页搜索服务多次返回错误，已暂停本次任务的重复搜索。',
+        'invalid_response': '当前网页搜索服务多次返回无效响应，已暂停本次任务的重复搜索。',
+    }
+    for warning in reversed(warnings):
+        if warning.startswith('web_search_blocked:'):
+            return reasons.get(warning.partition(':')[2], '当前网页搜索服务暂不可用，已暂停本次任务的重复搜索。')
+    return ''
+
 def render_partial(state, reason):
     """Render collected sources and coverage without presenting unverified conclusions."""
     research = state['research']
     allowed = set(research.get('paper_ids') or []) if research['source'] == 'collection' else None
     kept = [e for e in state.get('evidence', []) if allowed is None or e.get('paper_id') in allowed]
-    lines = ['# 阶段性研究结果', _safe_direction(reason), '审查未完成或证据不足，尚未生成核验结论。']
+    notice = _search_block_notice(state.get('warnings', []))
+    reason = _safe_direction(reason)
+    if notice and reason == '网页搜索服务暂不可用，已暂停重复请求':
+        reason = notice
+    lines = ['# 阶段性研究结果', reason, '审查未完成或证据不足，尚未生成核验结论。']
+    if notice and reason != notice: lines.append(notice)
     review = state.get('review_result')
     pending = list(getattr(review, 'gaps', [])) if review else list(state.get('directions', []))
     pending += [gap.get('query', '') for gap in state.get('research_gaps', []) if gap.get('query')]
@@ -198,10 +222,10 @@ def render_partial(state, reason):
         for value in values[:5]:
             clean = _safe_direction(value)
             if clean: lines.append(label + '：' + clean + '。')
-    for warning, text in [('web_search_failed', '网页检索部分或全部失败，结果不完整，请稍后重试。'),
+    for warning, text in [('web_search_failed', '当前网页搜索服务部分或全部请求失败，结果不完整，请稍后重试。'),
                           ('web_page_read_failed', '网页正文读取部分失败，结果可能不完整。'),
                           ('paper_search_failed', '论文外部检索部分失败，结果可能不完整。')]:
-        if warning in state.get('warnings', []): lines.append(text)
+        if warning in state.get('warnings', []) and not (warning == 'web_search_failed' and notice): lines.append(text)
     if research['source'] == 'web' and not kept and not state.get('warnings'):
         lines.append('本次网页检索未找到可用文本证据。')
     if kept:
@@ -259,11 +283,14 @@ def render(s):
     if s.get('forced_reason') and (not review or not review.sufficient):
         lines.append('研究在预算或流程边界处结束，结论仍需进一步核查。')
     warnings = s.get('warnings', [])
-    if 'web_search_failed' in warnings:
-        lines.append('网页检索部分或全部失败，结果不完整，请稍后重试。')
+    notice = _search_block_notice(warnings)
+    if notice:
+        lines.append(notice)
+    elif 'web_search_failed' in warnings:
+        lines.append('当前网页搜索服务部分请求失败，结果不完整，请稍后重试。')
     if 'web_page_read_failed' in warnings:
         lines.append('网页正文读取部分失败，结果可能不完整。')
-    if any(w not in ('web_search_failed', 'web_page_read_failed') for w in warnings):
+    if any(w not in ('web_search_failed', 'web_page_read_failed') and not w.startswith('web_search_blocked:') for w in warnings):
         lines.append('论文外部检索部分失败，结果可能不完整。')
     if s['research']['source'] == 'web' and not s['evidence'] and not warnings:
         lines.append('本次网页检索未找到可用文本证据。')

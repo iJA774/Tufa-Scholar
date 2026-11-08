@@ -9,8 +9,8 @@
 | prompt ID | 输入 | 输出结构 |
 |---|---|---|
 | `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、directions、verification_gaps | Route：action、task、answer、directions |
-| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan、review、results、web_blocks、verification_gaps | Specialist：action、query、candidate_ids、plan、offset、limit |
-| `literature/review` | question、directions、evidence、results、allowed_routes、attempted_plans | Review：sufficient、gaps、summary、coverage、next_steps、irrelevant_evidence_ids |
+| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan、review、results、web_blocks、verification_gaps、search_status、search_blocked、direct_url_attempts_remaining | Specialist：action、query、candidate_ids、url、plan、offset、limit |
+| `literature/review` | question、directions、evidence、results、allowed_routes、attempted_plans、search_blocked | Review：sufficient、gaps、summary、coverage、next_steps、irrelevant_evidence_ids |
 | `literature/synthesize` | question、history、directions、evidence、review、verification_gaps | Draft：sections（heading、paragraphs：text、citations）、limitations |
 | `literature/verify_claim` | heading、claim、evidence | Verdict：status、reason、suggestion、research_query、research_route |
 | `literature/revise` | question、draft、feedback、evidence、verification_gaps | PatchSet：patches（section_index、paragraph_index、text、citations） |

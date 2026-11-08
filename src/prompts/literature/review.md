@@ -18,3 +18,5 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 审查 evidence 与原问题的实质相关性，irrelevant_evidence_ids 只填写当前证据 ID；候选未取证、需换词或渠道失败时，在允许的 allowed_routes 内给出具体不同的 next_steps，避免 attempted_plans 已尝试目标。
 
 将 next_steps 按重要度排列，提出能推进回答的具体目标；常见局限若不妨碍回答，不应列为必需 gaps。已尝试目标若产生新未读候选或可续读正文，可建议同计划恢复一次。
+
+search_blocked 非空表示网页搜索已暂停，不应建议反复改词；可在 next_steps 中给出可信公开官网或建议查阅现有候选，没有可执行的替代方案时说明缺口。

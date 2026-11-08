@@ -3,9 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+import primp
 from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
-from src.integrations.web_search import search_web
+from src.integrations.web_search import WebSearchError, search_web
 
 
 class WebSearchTests(unittest.TestCase):
@@ -64,7 +65,8 @@ class WebSearchTests(unittest.TestCase):
     def test_duckduckgo_challenge_and_http_errors_are_not_empty(self):
         for status, body, category in [(202, 'secret anomaly-modal private-query', 'challenge'), (200, '<div class="anomaly-modal">secret</div>', 'challenge'), (429, 'secret', 'rate_limit'), (503, 'secret', 'http_status')]:
             with self.subTest(status=status), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client.HttpClient.request', return_value=SimpleNamespace(status_code=status, text=body)):
-                with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')
+                with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(WebSearchError) as raised: search_web('private-query')
+                self.assertEqual((raised.exception.category, raised.exception.status), (category, status))
                 text = str(logs.output)
                 self.assertIn('category=' + category, text); self.assertIn('status=' + str(status), text)
                 self.assertNotIn('secret', text); self.assertNotIn('private-query', text); self.assertNotIn('anomaly-modal', text)
@@ -151,6 +153,26 @@ class WebSearchTests(unittest.TestCase):
                 with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')
                 self.assertIn('category=' + category, str(logs.output))
                 self.assertNotIn('private-secret-engine', str(logs.output))
+
+    def test_typed_failure_contract_and_wrapped_causes(self):
+        for status, category in [(401, 'auth'), (403, 'auth'), (429, 'rate_limit'), (503, 'http_status')]:
+            with self.subTest(status=status), patch('src.integrations.web_search.web_search_config', return_value=self.config('tavily')), patch('src.integrations.web_search.httpx.request', return_value=self.response({}, status)):
+                with self.assertRaises(WebSearchError) as raised:
+                    search_web('private-query')
+                self.assertEqual((raised.exception.category, raised.exception.status), (category, status))
+                self.assertNotIn('private-query', str(raised.exception))
+        for cause, category in [(primp.TimeoutError('secret'), 'timeout'), (primp.ConnectError('secret'), 'network')]:
+            wrapped = DDGSException('secret')
+            wrapped.__cause__ = cause
+            with self.subTest(category=category), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('src.integrations.web_search._Duckduckgo', side_effect=wrapped):
+                with self.assertRaises(WebSearchError) as raised:
+                    search_web('private-query')
+                self.assertEqual((raised.exception.category, raised.exception.status), (category, None))
+                self.assertNotIn('secret', str(raised.exception))
+        with patch('src.integrations.web_search.web_search_config', return_value=self.config('serper', api_key='')):
+            with self.assertRaises(WebSearchError) as raised:
+                search_web('q')
+            self.assertEqual((raised.exception.category, raised.exception.status), ('missing_key', None))
 
     def test_no_key_invalid_config_and_redirect(self):
         with patch("src.integrations.web_search.web_search_config", return_value=self.config("serper", api_key="")), patch("src.integrations.web_search.httpx.request") as request:

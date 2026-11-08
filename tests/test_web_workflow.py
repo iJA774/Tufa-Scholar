@@ -228,6 +228,73 @@ class WebWorkflowTests(unittest.TestCase):
                 self.assertNotIn('private', content)
                 self.assertEqual(evidence, [])
 
+    def test_typed_failures_pause_and_empty_success_resets(self):
+        from src.integrations.web_search import WebSearchError
+        error = WebSearchError('private', 'provider_error')
+        with patch.object(w.registry, 'invoke', side_effect=[error, [], error, error]):
+            state = {'research': TASK, 'queries': ['topic']}
+            state.update(w.search(state)); self.assertFalse(state['web_search_blocked'])
+            state.update(w.search(state)); self.assertEqual(state['web_failures'], 0)
+            state.update(w.search(state)); self.assertFalse(state['web_search_blocked'])
+            state.update(w.search(state)); self.assertEqual(state['web_search_blocked'], 'provider_error')
+        with patch.object(w.registry, 'invoke', side_effect=WebSearchError('private', 'challenge', 202)):
+            self.assertEqual(w.search({'research': TASK, 'queries': ['topic']})['web_search_blocked'], 'challenge')
+
+    def test_blocked_search_direct_public_page_read_and_collect(self):
+        from src.integrations.web_search import WebSearchError
+        steps = iter(['search', 'direct', 'read', 'finish'])
+        def model(name, payload, schema):
+            if name == 'runtime/route': return w.Route(action='web_research', task='选举', directions=['选举'])
+            if name == 'literature/research':
+                step = next(steps)
+                if step == 'search': return w.Specialist(action='search', query='election', plan=['search'])
+                self.assertEqual(payload['search_blocked'], 'challenge')
+                if step == 'direct': return w.Specialist(action='read_web_page', url='https://example.org/official', query='election', plan=['read'])
+                if step == 'read': return w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']], plan=['collect'])
+                return w.Specialist(action='finish', plan=['finish'])
+            if name == 'literature/review':
+                self.assertEqual(payload['search_blocked'], 'challenge')
+                return w.Review(sufficient=True, summary='ok')
+            if name == 'literature/synthesize': return w.Draft(sections=[w.Section(heading='结果', paragraphs=[w.Claim(text='election results', citations=[payload['evidence'][0]['id']])])])
+            if name == 'literature/verify_claim': return w.Verdict(status='supported')
+            raise AssertionError(name)
+        original = w.registry.invoke
+        def invoke(name, arguments, *, context):
+            if name == 'search_web': raise WebSearchError('private', 'challenge', 202)
+            if name == 'read_web_page': return {'url': arguments['url'], 'title': 'Official', 'markdown': 'election results', 'offset': 0, 'next_offset': None, 'retrieved_at': '2026-11-07'}
+            return original(name, arguments, context=context)
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', side_effect=invoke):
+            content, evidence = w.run({**TASK, 'query': '最近的选举结果'}, history=[])
+        self.assertIn('election results', content)
+        self.assertEqual(evidence[0]['original_url'], 'https://example.org/official')
+
+    def test_blocked_invalid_or_previously_attempted_url_finishes_safely(self):
+        for url, prior in [('https://[broken', []), ('HTTPS://EXAMPLE.ORG', ['https://example.org/']), ('https://example.org/?', [])]:
+            with self.subTest(url=url):
+                payloads = []
+                def model(name, payload, schema):
+                    payloads.append(payload)
+                    return w.Specialist(action='read_web_page', url=url, query='topic', plan=['read'])
+                state = {'research': TASK, 'task': 'topic', 'history': [], 'web_search_blocked': 'challenge', 'direct_url_attempts': prior, 'candidates': [], 'evidence': [], 'plan': []}
+                with patch.object(w, 'structured', side_effect=model), patch.object(w, 'record_failure', return_value='test'), patch.object(w.registry, 'invoke') as invoke:
+                    result = w._research_graph('web', None).invoke(state)
+                self.assertEqual(result['choice'].action, 'finish')
+                self.assertEqual(len(payloads), 2)
+                self.assertNotIn('search_web', {t['name'] for t in payloads[0]['tools']})
+                invoke.assert_not_called()
+
+    def test_explicit_web_single_transient_no_plan_keeps_retryable_failure(self):
+        from src.integrations.web_search import WebSearchError
+        def model(name, payload, schema):
+            if name == 'runtime/route': return w.Route(action='web_research', task='topic', directions=['topic'])
+            if name == 'literature/research': return w.Specialist(action='search', query='topic', plan=['search'])
+            if name == 'literature/review': return w.Review(sufficient=False, gaps=['missing'], summary='missing')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', side_effect=WebSearchError('private', 'http_status', 503)):
+            with self.assertRaisesRegex(RuntimeError, '网页检索失败') as error:
+                w.run(TASK, history=[])
+        self.assertNotIn('private', str(error.exception))
+
     def test_web_direct_is_rejected_before_tool_call(self):
         with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:
             with self.assertRaises(ValueError):

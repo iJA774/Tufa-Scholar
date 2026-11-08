@@ -8,6 +8,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import httpx
+import primp
 from ddgs.engines.duckduckgo import Duckduckgo
 from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
@@ -122,6 +123,19 @@ def _arxiv(response):
     return items
 
 
+class WebSearchError(RuntimeError):
+    """A safe provider failure with machine-readable details."""
+
+    def __init__(self, message: str, category: str, status: int | None = None):
+        super().__init__(message)
+        self.category = category
+        self.status = status
+
+
+def _status_category(status):
+    return "rate_limit" if status == 429 else "auth" if status in (401, 403) else "http_status"
+
+
 class _ConfigError(Exception):
     pass
 
@@ -137,7 +151,7 @@ class _Duckduckgo(Duckduckgo):
         response = self.http_client.request(*args, **kwargs)
         status = response.status_code
         if status != 200:
-            raise _DuckduckgoStatus('challenge' if status == 202 else 'rate_limit' if status == 429 else 'http_status', status)
+            raise _DuckduckgoStatus('challenge' if status == 202 else _status_category(status), status)
         body = response.text
         if 'anomaly-modal' in body.lower():
             raise _DuckduckgoStatus('challenge', status)
@@ -161,15 +175,15 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
         config = web_search_config()
     except Exception:
         failure('unknown', 'configuration')
-        raise RuntimeError("网络搜索配置无效") from None
+        raise WebSearchError("网络搜索配置无效", "configuration") from None
     engine = config.get("engine") or "duckduckgo"
     key = config.get("api_key") or ""
     if not isinstance(engine, str) or engine not in _ENGINES:
         failure('unknown', 'configuration')
-        raise RuntimeError("不支持的网络搜索服务")
+        raise WebSearchError("不支持的网络搜索服务", "configuration")
     if engine in {"tavily", "infoquest", "brave_search", "serper"} and not key:
         failure(engine, 'missing_key')
-        raise RuntimeError("网络搜索服务缺少 API 密钥")
+        raise WebSearchError("网络搜索服务缺少 API 密钥", "missing_key")
     try:
         if engine == "duckduckgo":
             found = _Duckduckgo(timeout=_TIMEOUT).search(query) or []
@@ -225,20 +239,32 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
         return results
     except _ConfigError as exc:
         failure(engine, 'configuration')
-        raise RuntimeError(str(exc)) from None
+        raise WebSearchError(str(exc), 'configuration') from None
     except Exception as exc:
+        status = None
         if isinstance(exc, _DuckduckgoStatus):
-            failure(engine, exc.category, exc.status)
+            category, status = exc.category, exc.status
         elif isinstance(exc, httpx.HTTPStatusError):
-            failure(engine, 'http_status', exc.response.status_code)
-        elif isinstance(exc, (httpx.TimeoutException, TimeoutException, TimeoutError)):
-            failure(engine, 'timeout')
-        elif isinstance(exc, httpx.RequestError):
-            failure(engine, 'network')
+            status = exc.response.status_code
+            category = _status_category(status)
         elif isinstance(exc, RatelimitException):
-            failure(engine, 'rate_limit')
-        elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError, ElementTree.ParseError)):
-            failure(engine, 'invalid_response')
+            category = 'rate_limit'
         else:
-            failure(engine, 'provider_error')
-        raise RuntimeError("网络搜索失败；请检查服务配置、网络或稍后重试") from None
+            # DDGS preserves primp errors as causes; inspect types only, never text.
+            cause = exc
+            seen = set()
+            chain = []
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                chain.append(cause)
+                cause = cause.__cause__
+            if any(isinstance(e, (httpx.TimeoutException, TimeoutException, TimeoutError, primp.TimeoutError, primp.DNSTimeoutError)) for e in chain):
+                category = 'timeout'
+            elif any(isinstance(e, (httpx.RequestError, primp.ConnectError, primp.DNSError)) for e in chain):
+                category = 'network'
+            elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError, ElementTree.ParseError)):
+                category = 'invalid_response'
+            else:
+                category = 'provider_error'
+        failure(engine, category, status)
+        raise WebSearchError("网络搜索失败；请检查服务配置、网络或稍后重试", category, status) from None

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class SearchFixture(ModelFixture):
     fail_search = False
     empty_failure_searches = 0
+    rate_limit_searches = 0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-Length']))
@@ -28,7 +29,13 @@ class SearchFixture(ModelFixture):
         prompt = req['messages'][0]['content']
         data = json.loads(req['messages'][1]['content'])
         result = None
-        if '你是研究主控' in prompt and 'empty-then-fail' in data.get('question', ''):
+        if '你是研究主控' in prompt and 'typed-rate-limit' in data.get('question', ''):
+            result = {'action': 'web_research', 'task': 'typed-rate-limit', 'directions': ['政策']} if not data['results'] else {'action': 'report'}
+        elif '你是研究专家' in prompt and 'typed-rate-limit' in data.get('task', ''):
+            result = {'action': 'finish', 'plan': ['暂停搜索']} if data.get('search_blocked') else {'action': 'search', 'query': 'typed-429', 'plan': ['检索']}
+        elif '你是无工具研究审查者' in prompt and 'typed-rate-limit' in data.get('question', ''):
+            result = {'sufficient': False, 'gaps': ['政策内容'], 'summary': '尚缺资料', 'coverage': [], 'next_steps': []}
+        elif '你是研究主控' in prompt and 'empty-then-fail' in data.get('question', ''):
             result = {'action': 'web_research', 'task': 'empty-then-fail', 'directions': ['研究']} if not data['results'] else {'action': 'report'}
         elif '你是研究专家' in prompt and 'empty-then-fail' in data.get('task', ''):
             SearchFixture.empty_failure_searches += 1
@@ -47,6 +54,10 @@ class SearchFixture(ModelFixture):
         url = urlsplit(self.path)
         if url.path == '/search':
             query = parse_qs(url.query).get('q', [''])[0]
+            if query == 'typed-429':
+                SearchFixture.rate_limit_searches += 1
+                self.send_error(429)
+                return
             if query == 'failure' or self.fail_search:
                 self.send_error(503)
                 return
@@ -181,6 +192,15 @@ def main():
                     assert mixed_task['result']['content'].startswith('# 阶段性研究结果')
                     assert not any('你是研究报告撰写者' in req['messages'][0]['content'] for req in ModelFixture.requests)
                     assert '失败' in mixed_task['result']['content'] and '不完整' in mixed_task['result']['content']
+                    SearchFixture.rate_limit_searches = 0
+                    ModelFixture.requests.clear()
+                    limited = call('POST', f'/projects/{project}/questions', json={'question': 'typed-rate-limit', 'source': 'auto'})
+                    limited_task = wait(limited['run_id'])
+                    assert limited_task['status'] == 'succeeded', limited_task
+                    assert SearchFixture.rate_limit_searches == 1
+                    assert limited_task['result']['content'].startswith('# 阶段性研究结果')
+                    assert '限流' in limited_task['result']['content'] and '暂停' in limited_task['result']['content']
+                    assert not any('你是研究报告撰写者' in req['messages'][0]['content'] for req in ModelFixture.requests)
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])
