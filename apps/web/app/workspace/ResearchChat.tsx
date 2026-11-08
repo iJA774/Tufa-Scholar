@@ -221,10 +221,10 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
               <label htmlFor="source">检索范围</label>
               <select disabled={!!busy} id="source" value={source} onChange={e => setSource(e.target.value)}>
                 <option value="auto">自动</option>
-                <option value="all">本地论文和 OpenAlex</option>
-                <option value="local">项目文献</option>
-                <option value="openalex">OpenAlex</option>
-                <option value="web">网页搜索</option>
+                <option value="all">优先论文（本地和 OpenAlex）</option>
+                <option value="local">仅项目文献</option>
+                <option value="openalex">优先 OpenAlex</option>
+                <option value="web">优先网页搜索</option>
                 <option value="collection">收藏夹</option>
               </select>
             </div>
@@ -238,7 +238,7 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
             <button className="button primary" disabled={(source === "collection" && (folderLoading || !collectionId || !collectionPapers.length)) || !query.trim() || !!busy || !!(run && ["queued", "pending", "running"].includes(run.status))}>发送 <span>↑</span>
             </button>
           </div>
-          {source === "web" && <p className="collection-hint">使用设置页中的搜索引擎，网页证据不等同于论文全文。</p>}{source === "collection" && (!collectionId || !collectionPapers.length) && <p className="collection-hint">
+          {source === "web" && <p className="collection-hint">使用设置页中的搜索引擎，必要时可补充论文。网页证据不等同于论文全文。</p>}{["all", "openalex"].includes(source) && <p className="collection-hint">必要时可补充网页资料。</p>}{source === "collection" && (!collectionId || !collectionPapers.length) && <p className="collection-hint">
             {!collectionId ? "请选择收藏夹。" : "此收藏夹为空，请先加入文献。"}
           </p>}
         </form>

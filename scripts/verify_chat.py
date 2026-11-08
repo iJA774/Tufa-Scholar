@@ -19,24 +19,32 @@ class ModelFixture(BaseHTTPRequestHandler):
         if '你是研究主控' in prompt:
             if not data['results']:
                 action = 'web_research' if data['source'] == 'web' or (data['source'] == 'auto' and '国际大事' in data['question']) else 'paper_research'
-                result = {'action': action, 'task': 'accuracy'}
+                result = {'action': action, 'task': 'attention' if 'cross-source' in data['question'] else 'accuracy', 'directions': ['accuracy']}
+            elif 'cross-source' in data['question'] and len(data['results']) == 1:
+                result = {'action': 'web_research', 'task': 'Attention fixture paper method details', 'directions': ['method details']}
             elif data['review'] is None:
                 result = {'action': 'review'}
             else:
                 result = {'action': 'report'}
         elif '你是研究专家' in prompt:
             if not data['recent_result']:
-                result = {'action': 'search', 'query': 'accuracy'}
-            elif data['candidates'] and not data['evidence']:
-                result = {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']]}
+                result = {'action': 'search', 'query': data['task'], 'plan': ['search and read']}
+            elif data['candidates'] and '检索到' in data['recent_result']:
+                result = {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['search and read']}
             else:
-                result = {'action': 'finish'}
+                result = {'action': 'finish', 'plan': ['search and read']}
         elif '你是无工具研究审查者' in prompt:
-            result = {'sufficient': True, 'gaps': [], 'summary': '已审查'}
-        elif '只写有对应证据' in prompt or '你是报告修订者' in prompt:
+            result = {'sufficient': True, 'gaps': [], 'summary': '已审查', 'coverage': ['accuracy'], 'next_steps': []}
+            if 'cross-source' in data['question'] and len(data['results']) == 1:
+                result = {'sufficient': False, 'gaps': ['method details'], 'summary': '需补充方法', 'coverage': ['paper'], 'next_steps': [{'direction': 'method', 'goal': 'Attention fixture paper method details', 'route': 'web_research'}]}
+        elif '你是研究报告撰写者' in prompt or '你是报告修订者' in prompt:
             evidence = data['evidence']
-            result = {'claims':[{'text':'准确率为 92%','citations':[evidence[0]['id']]}, {'text':'成本降低 30%','citations':[evidence[0]['id']]}] if evidence else [], 'limitations':'成本数据不足'}
-        elif '严格核查' in prompt:
+            result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '准确率为 92%', 'citations': [evidence[0]['id']]}, {'text': '成本降低 30%', 'citations': [evidence[0]['id']]}]}] if evidence else []}
+            if 'cross-source' in data['question'] and len(evidence) >= 2:
+                paper = next(e for e in evidence if e['source_level'] == 'abstract')
+                web = next(e for e in evidence if e['source_level'] == 'web_snippet')
+                result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '论文摘要介绍了模拟研究。', 'citations': [paper['id']]}]}, {'heading': '主题分析', 'paragraphs': [{'text': '网页补充了注意力方法细节。', 'citations': [web['id']]}]}, {'heading': '综合判断', 'paragraphs': [{'text': '论文与网页共同提供研究背景和方法线索。', 'citations': [paper['id'], web['id']]}]}]}
+        elif '你是严谨的报告核验者' in prompt:
             result = {'supported':True}
         else:
             self.send_error(500); return

@@ -112,7 +112,7 @@ API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `wor
 
 ## 使用与接口
 
-网页搜索默认使用免密钥 DuckDuckGo；可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia。右上角搜索窗口新增“网页搜索”；提问默认“自动”可由主控选择网页研究，也可明确选择“网页搜索”。“本地论文和 OpenAlex”仅检索这两类来源。服务配置、环境变量与证据限制见 [网页搜索说明](docs/WEB_SEARCH.md)。
+网页搜索默认使用免密钥 DuckDuckGo；可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia。右上角搜索窗口新增“网页搜索”；提问默认“自动”可由主控选择网页研究，也可明确选择“网页搜索”。论文和网页范围优先对应来源，发现缺口时可互相补充；“仅项目文献”和收藏夹保持隔离。服务配置、环境变量与证据限制见 [网页搜索说明](docs/WEB_SEARCH.md)。
 
 科研问答输入框下方，检索范围旁可选择模型和思考强度。优先使用供应商 `effort.supported_levels` 与 `default_level`；未声明档位或目录暂不可用时，提供低、中、高三个选项，映射为 `reasoning_effort` 的 `low`、`medium`、`high`。“供应商默认”不发送该参数。通用回退不保证每个模型支持显式强度，服务拒绝时可改回默认。能力字段参考 [DeepSeek](https://api-docs.deepseek.com/api/list-models/) 与 [火山方舟](https://console.volcengine.com/ark/region%3Acn-beijing/docs/models-api) 官方文档。
 
@@ -166,6 +166,15 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 模型结构或决策失败时，诊断材料保存在 `TUFA_DATA_DIR/diagnostics/`，普通日志中的诊断 ID 可用于定位。材料可能包含研究输入和模型原始响应，请按用户数据保管；已知密钥和凭据字段会被剔除或脱敏。仓库根目录执行 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 可在当前代码下离线检查，不联网或访问数据库。重放使用当前结构而非历史代码，环境差异和脱敏可能影响结果；网络或 HTTP 故障不能离线复现。
 
 ## 验证
+
+
+### 研究报告与跨来源补研验收（2026-11-08）
+
+以 `.cache/report-research-acceptance` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，在仓库根目录执行：
+
+- `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：115 项通过，耗时 8.754 秒。`-m scripts.verify_chat` 成功；`-m scripts.verify_web_search --serve` 的实际 API/worker 业务断言通过，使用模拟 OpenAlex 摘要、审查缺口和 SearX 方法细节，同一报告的三章节、Markdown 和 CSV 均保留两类证据。验收后通过 Ctrl+C 停止 `--serve` 和 Next，二者因中断退出码均为 1；18188、18308 端口已释放，临时数据库目录已清理。
+- `pnpm check:web` 通过。`pnpm build:web` 首次在沙箱内因生成目录的 EPERM 失败，沙箱外重跑通过；构建时 `TUFA_API_URL=http://127.0.0.1:18188`，Next 生产服务使用 18308 端口。
+- 隔离浏览器选择“优先 OpenAlex”，提交 `cross-source attention method`，显示概述、主题分析、综合判断及两类引用链接和下载入口。模型与搜索服务均为模拟，未调用真实供应商。
 
 
 ### 自动路由验收（2026-11-07）

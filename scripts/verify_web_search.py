@@ -28,7 +28,7 @@ class SearchFixture(ModelFixture):
                 self.send_error(503)
                 return
             data = {'results': [] if query == 'empty' else [
-                {'title': 'Simulated research page', 'url': 'https://example.org/research', 'content': 'accuracy was 92%'}]}
+                {'title': 'Simulated research page', 'url': 'https://example.org/research', 'content': 'Attention fixture paper uses attention to combine representations.' if 'Attention fixture' in query else 'accuracy was 92%'}]}
         elif url.path == '/v1/models':
             data = {'data': [{'id': 'fixture'}]}
         else:
@@ -54,7 +54,7 @@ def main():
             env['TUFA_DATA_DIR'] = directory
             port = int(os.environ.get('TUFA_VERIFY_API_PORT', '0')) or free_port()
             base = f'http://127.0.0.1:{port}'
-            for command in ([sys.executable, '-m', 'uvicorn', 'apps.api.main:app', '--host', '127.0.0.1', '--port', str(port)], [sys.executable, '-m', 'apps.worker']):
+            for command in ([sys.executable, '-m', 'uvicorn', 'apps.api.main:app', '--host', '127.0.0.1', '--port', str(port)], [sys.executable, '-c', "import scripts.fixture_api; import runpy; runpy.run_module('apps.worker', run_name='__main__')"]):
                 processes.append(subprocess.Popen(command, cwd=ROOT, env=env, stdout=sink, stderr=sink))
             try:
                 with httpx.Client(base_url=base, trust_env=False, timeout=10) as client:
@@ -111,6 +111,19 @@ def main():
                     assert routed and routed[0]['source'] == 'auto'
                     assert {'direct', 'paper_research', 'web_research'} <= set(routed[0]['available_actions'])
                     assert call('GET', f'/projects/{project}/papers') == []
+                    cross = call('POST', f'/projects/{project}/questions', json={'question': 'cross-source attention method', 'source': 'openalex'})
+                    cross_task = wait(cross['run_id'])
+                    assert cross_task['status'] == 'succeeded', cross_task
+                    cross_result = cross_task['result']
+                    assert all(('## ' + title) in cross_result['content'] for title in ('概述', '主题分析', '综合判断'))
+                    assert {e['source_level'] for e in cross_result['evidence']} >= {'abstract', 'web_snippet'}
+                    assert any(e.get('provider') == 'searx' and e.get('original_url') for e in cross_result['evidence'])
+                    cross_csv = client.get(f"/reports/{cross_result['report_id']}/evidence.csv").text.lstrip('\ufeff')
+                    rows = list(csv.DictReader(io.StringIO(cross_csv)))
+                    assert {row['source_level'] for row in rows} >= {'abstract', 'web_snippet'}
+                    markdown = client.get(f"/reports/{cross_result['report_id']}/markdown").text
+                    assert all(('## ' + title) in markdown for title in ('概述', '主题分析', '综合判断'))
+                    assert all('[' + e['id'] + ']' in markdown for e in cross_result['evidence'])
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])

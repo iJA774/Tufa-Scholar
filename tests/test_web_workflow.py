@@ -20,26 +20,27 @@ def scripted_model(*, rounds=1, queries=None, assert_excerpt=False):
 
     def model(name, payload, schema, **kwargs):
         if name == 'runtime/route':
-            if len(payload['results']) < rounds and ('web_research' in payload['available_actions'] or 'paper_research' in payload['available_actions']):
+            if len(payload['results']) < rounds and ('web_research' if payload['source'] == 'web' else 'paper_research') in payload['available_actions']:
                 calls['delegation'] += 1
                 calls['step'] = 0
-                action = 'web_research' if payload['source'] == 'web' else 'paper_research'
-                return w.Route(action=action, task='research')
-            return w.Route(action='review' if payload['review'] is None else 'report')
+                action = 'web_research' if payload['source'] == 'web' and 'web_research' in payload['available_actions'] else 'paper_research'
+                return w.Route(action=action, task='research', directions=['research'])
+            return w.Route(action='report')
         if name == 'literature/research':
             step = calls['step']
             calls['step'] += 1
             if step == 0:
-                return w.Specialist(action='search', query=queries[min(calls['delegation']-1, len(queries)-1)])
+                return w.Specialist(plan=['检索取证'], action='search', query=queries[min(calls['delegation']-1, len(queries)-1)])
             if step == 1 and payload['candidates']:
-                return w.Specialist(action='read', candidate_ids=[c['id'] for c in payload['candidates'][:6]])
-            return w.Specialist(action='finish')
+                return w.Specialist(plan=['检索取证'], action='read', candidate_ids=[c['id'] for c in payload['candidates'][:6]])
+            return w.Specialist(plan=['检索取证'], action='finish')
         if name == 'literature/review':
             return w.Review(sufficient=bool(payload['evidence']), gaps=[] if payload['evidence'] else ['缺少证据'], summary='审查')
         if name == 'literature/synthesize':
             if assert_excerpt:
-                assert len(payload['evidence'][0]['text']) == 1200
-            return w.Draft(claims=[w.Claim(text='Research found 95%.', citations=[e['id']]) for e in payload['evidence'] if '95%' in e['text']])
+                assert len(payload['evidence'][0]['text']) <= 1200
+            return w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='Research found 95%.', citations=[e['id']])]) for e in payload['evidence'] if '95%' in e['text']])
+        if name == 'literature/revise': return w.Draft(sections=[])
         if name == 'literature/verify_claim': return w.Verdict(supported=True)
         raise AssertionError(name)
     return model

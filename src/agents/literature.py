@@ -21,23 +21,15 @@ def _context(research):
     return ToolContext(research["project_id"], research["source"], tuple(research.get("paper_ids") or ()))
 
 
-class Claim(BaseModel):
-    text: str
-    citations: list[str]
-
-
-class Draft(BaseModel):
-    claims: list[Claim] = Field(default_factory=list)
-    limitations: str = ''
-
-
-class Verdict(BaseModel):
-    supported: bool
-
+from src.agents.report import Claim, Draft, Section, Verdict, build_report_graph, verify as _report_verify, render as _report_render
 
 class State(TypedDict, total=False):
     research: dict
     effective_source: str
+    directions: list
+    pools: dict
+    stalled: list
+    plan: list
     history: list
     queries: list
     evidence_query: str
@@ -57,9 +49,7 @@ class State(TypedDict, total=False):
     tool_calls: int
     recent_result: str
     delegations: int
-    no_progress: bool
     review_result: object
-    review_pending: bool
     results: list
     route: object
     decisions: int
@@ -182,70 +172,21 @@ def evidence(s):
             'evidence_facets': facets, 'new_evidence': new_evidence}
 
 
-def synthesize(s):
-    d = _model(s, 'literature/synthesize', {'question': s['research']['query'], 'history': s['history'], 'evidence': s['evidence'], 'review': s['review_result'].model_dump() if s.get('review_result') else None}, Draft)
-    return {'draft': d}
-
-
 def verify(s):
-    allowed = set(s['research'].get('paper_ids') or []) if s['research']['source'] == 'collection' else None
-    by_id = {e['id']: e for e in s['evidence'] if allowed is None or e.get('paper_id') in allowed}
-    lines = []
-    used = set()
-    rejected = False
-    rejection_feedback = []
-    for c in s['draft'].claims:
-        cited = [by_id[i] for i in c.citations if i in by_id]
-        numbers = re.findall(r'\d+(?:\.\d+)?%?', c.text)
-        source_numbers = {n for e in cited for n in re.findall(r'\d+(?:\.\d+)?%?', e['text'])}
-        if not cited or len(cited) != len(c.citations) or any(n not in source_numbers for n in numbers):
-            rejected = True
-            rejection_feedback.append({'claim': c.text, 'reason': '引用、数值或成本依据不匹配'})
-            continue
-        # Accuracy evidence alone cannot establish a cost claim, even if the numbers match.
-        if re.search(r'成本|费用|cost|expense', c.text, re.I) and not any(re.search(r'成本|费用|cost|expense|\$|美元', e['text'], re.I) for e in cited):
-            rejected = True
-            rejection_feedback.append({'claim': c.text, 'reason': '引用、数值或成本依据不匹配'})
-            continue
-        v = _model(s, 'literature/verify_claim', {'claim': c.text, 'evidence': cited}, Verdict)
-        if v.supported:
-            used.update(c.citations)
-            lines.append(c.text + ' ' + ' '.join(f'[{i}]' for i in c.citations))
-        else:
-            rejected = True
-            rejection_feedback.append({'claim': c.text, 'reason': '语义核验未通过'})
-    if s['draft'].limitations:
-        lines.append('局限：模型指出现有证据存在不足，需进一步核查来源。')
-    if rejected or not used:
-        lines.append('证据不足：部分结论无法由所引材料支持。')
-    web = s['research']['source'] == 'web'
-    if s.get('warnings'):
-        lines.append('网页检索部分或全部失败，结果不完整，请稍后重试。' if web else '外部检索不可用，本次仅使用可获得的本地结果。')
-    if web:
-        if not s['evidence'] and not s.get('warnings'):
-            lines.append('本次网页检索未找到可用文本证据。')
-        lines.append('网页结果仅使用每条最多 1200 字符的片段；搜索摘要、网页文本与论文摘要的来源层级不同，不能视为论文全文。')
-    else:
-        lines.append('正文从每篇最新可提取版本的已索引页面中按问题词挑选最多 6 个页面片段，每个最多 1200 字符；摘要不等同于全文证据。')
-    kept = [e for e in s['evidence'] if e['id'] in used and (allowed is None or e.get('paper_id') in allowed)]
-    if kept:
-        def reference(e):
-            if web:
-                level = {'web_snippet': '搜索摘要', 'web_content': '网页文本', 'abstract': '论文摘要'}.get(e['source_level'], e['source_level'])
-                return f"[{e['id']}] {e['title']} · {level} · {e['original_url']} · {e['provider']} · 获取于 {e['retrieved_at']}"
-            return f"[{e['id']}] {e['title']} · " + (f"原文版本 {e['version_id']}，第 {e['page']} 页" if e.get('version_id') else '仅摘要')
-        lines.append('参考证据：\n' + '\n'.join(reference(e) for e in kept))
-    return {'content': '\n\n'.join(lines), 'evidence': kept, 'rejection_feedback': rejection_feedback}
-
+    checked = _report_verify(s, model=_model)
+    return {**checked, **_report_render({**s, **checked})}
 
 
 class Route(BaseModel):
     action: Literal['direct', 'paper_research', 'web_research', 'review', 'report']
     task: str = Field(default='', max_length=1000)
     answer: str = Field(default='', max_length=12000)
+    directions: list[str] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode='after')
     def validate_action(self):
+        if self.action in ('paper_research', 'web_research') and (not self.directions or any(not d.strip() or len(d) > 500 for d in self.directions)):
+            raise ValueError('研究方向不能为空')
         if self.action in ('paper_research', 'web_research') and not self.task.strip():
             raise ValueError('委派任务不能为空')
         if self.action == 'direct' and not self.answer.strip():
@@ -257,9 +198,12 @@ class Specialist(BaseModel):
     action: Literal['search', 'read', 'finish']
     query: str = Field(default='', max_length=1000)
     candidate_ids: list[str] = Field(default_factory=list, max_length=6)
+    plan: list[str] = Field(min_length=1, max_length=6)
 
     @model_validator(mode='after')
     def validate_action(self):
+        if any(not p.strip() or len(p) > 500 for p in self.plan):
+            raise ValueError('研究计划不能为空')
         if self.action == 'search' and not self.query.strip():
             raise ValueError('搜索查询不能为空')
         if self.action == 'read' and not self.candidate_ids:
@@ -267,14 +211,22 @@ class Specialist(BaseModel):
         return self
 
 
+class NextStep(BaseModel):
+    direction: str = Field(min_length=1, max_length=500)
+    goal: str = Field(min_length=1, max_length=1000)
+    route: Literal['paper_research', 'web_research']
+
+
 class Review(BaseModel):
     sufficient: bool
     gaps: list[str] = Field(default_factory=list, max_length=10)
     summary: str = Field(max_length=2000)
+    coverage: list[str] = Field(default_factory=list, max_length=10)
+    next_steps: list[NextStep] = Field(default_factory=list, max_length=6)
 
     @model_validator(mode='after')
     def validate_gaps(self):
-        if any(len(gap) > 1000 for gap in self.gaps):
+        if any(len(gap) > 1000 for gap in self.gaps) or any(not item.strip() or len(item) > 500 for item in self.coverage):
             raise ValueError('审查缺口过长')
         return self
 
@@ -299,14 +251,18 @@ def _candidate_views(s):
     return views, identities
 
 
+class ResearchToolFailure(RuntimeError):
+    pass
+
+
 def _research_graph(kind, on_stage):
     def decide(s):
         views, identities = _candidate_views(s)
         allowed = {'search_web' if kind == 'web' else 'search_papers', 'collect_evidence'}
         tools = [tool for tool in registry.list_tools(_context(s['research'])) if tool['name'] in allowed]
         payload = {
-            'task': s['task'], 'role': kind, 'source': s['research']['source'], 'tools': tools,
-            'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500]} for key, p in views[:20]],
+            'task': s['task'], 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
+            'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''),
             'evidence': _summary_evidence(s), 'calls_remaining': 6 - s.get('tool_calls', 0),
         }
@@ -323,13 +279,16 @@ def _research_graph(kind, on_stage):
             if attempt:
                 raise ValueError('精读候选标识无效')
             payload = {**payload, 'validation_feedback': {'code': 'invalid_candidate_ids', 'allowed_ids': [key for key, _ in views[:20]]}}
-        return {'choice': choice, 'candidate_identities': identities}
+        return {'choice': choice, 'candidate_identities': identities, 'plan': choice.plan}
 
     def invoke(s):
         choice = s['choice']
         if choice.action == 'search':
             if on_stage: on_stage('searching_web' if kind == 'web' else 'searching')
-            update = search({**s, 'queries': [choice.query]})
+            try:
+                update = search({**s, 'queries': [choice.query]})
+            except RuntimeError as exc:
+                raise ResearchToolFailure() from exc
             result = f"检索到 {len(update['candidates'])} 个累计候选"
         else:
             if on_stage: on_stage('evidence')
@@ -359,27 +318,30 @@ def run(research: dict, *, history: list, on_stage=None):
         if on_stage: on_stage('planning')
         count = s.get('delegations', 0)
         reviewed = s.get('review_result')
-        exhausted = count >= 3 or s.get('no_progress', False)
+        exhausted = count >= 3 or s.get('decisions', 0) >= 12
         effective = s.get('effective_source')
+        source = research['source']
+        if count and not reviewed:
+            return {'route': Route(action='review')}
         if exhausted:
-            actions = []
-        elif research['source'] == 'auto' and not effective:
-            actions = ['paper_research', 'web_research']
+            return {'route': Route(action='report'), 'forced': True, 'forced_reason': '研究预算已耗尽'}
+        if not count:
+            actions = (['paper_research', 'web_research'] if source == 'auto' else
+                       ['web_research'] if source == 'web' else ['paper_research'])
+            if source in ('auto', 'local'): actions.append('direct')
         else:
-            actions = ['web_research'] if (effective or research['source']) == 'web' else ['paper_research']
-        if count and not s.get('review_pending', False): actions.append('review')
-        if count and reviewed: actions.append('report')
-        if not count and research['source'] not in ('collection', 'web'): actions.append('direct')
-        if exhausted or s.get('decisions', 0) >= 12 or not actions:
-            reason = ('补研没有新增证据' if s.get('no_progress') else
-                      '研究委派预算已耗尽' if count >= 3 else '主控决策预算已耗尽')
-            action = 'report' if reviewed else 'review'
-            logger.info('prompt_id=runtime/route action=%s forced=true delegations=%d decisions=%d', action, count, s.get('decisions', 0))
-            return {'route': Route(action=action), 'forced': True, 'forced_reason': reason}
+            actions = (['paper_research'] if source in ('local', 'collection') else ['paper_research', 'web_research'])
+            actions = [action for action in actions if action not in s.get('stalled', [])]
+            tried = {'web_research' if item['source'] == 'web' else 'paper_research' for item in s.get('results', [])}
+            suggested = {step.route for step in reviewed.next_steps} if not reviewed.sufficient else set()
+            cross_source = [action for action in actions if action in suggested and action not in tried]
+            actions = cross_source if cross_source else actions + ['report']
+            if actions == ['report']:
+                return {'route': Route(action='report'), 'forced': True, 'forced_reason': '可用研究渠道没有新增证据'}
         payload = {'question': research['query'], 'history': s['history'], 'source': research['source'],
-            'available_actions': actions, 'effective_source': effective, 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
+            'available_actions': actions, 'effective_source': effective, 'directions': s.get('directions', []), 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
             'review': reviewed.model_dump() if reviewed else None, 'delegations_remaining': max(0, 3-count),
-            'decisions_remaining': max(0, 12-s.get('decisions', 0)), 'no_progress': s.get('no_progress', False)}
+            'decisions_remaining': max(0, 12-s.get('decisions', 0))}
         for attempt in range(2):
             route = _model(s, 'runtime/route', payload, Route)
             logger.info('prompt_id=runtime/route action=%s allowed=%s delegations=%d decisions=%d attempt=%d', route.action, actions, count, s.get('decisions', 0), attempt + 1)
@@ -396,54 +358,48 @@ def run(research: dict, *, history: list, on_stage=None):
 
     def delegate(s):
         before = {_evidence_signature(e) for e in s.get('evidence_pool', [])}
-        effective = s.get('effective_source') or (('web' if s['route'].action == 'web_research' else 'all') if research['source'] == 'auto' else research['source'])
+        action = s['route'].action
+        effective = 'web' if action == 'web_research' else (research['source'] if research['source'] in ('local', 'collection', 'openalex') else 'all')
+        pools = dict(s.get('pools', {}))
+        prior = pools.get(action, {})
         scoped_research = {**research, 'source': effective}
-        result = (web_graph if s['route'].action == 'web_research' else paper_graph).invoke({**s, 'research': scoped_research, 'task': s['route'].task, 'tool_calls': 0, 'recent_result': ''})
-        result.pop('research', None)
+        directions = list(dict.fromkeys(s.get('directions', []) + s['route'].directions))
+        input_state = {**s, **prior, 'research': scoped_research, 'directions': directions,
+                       'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'plan': []}
+        try:
+            result = (web_graph if action == 'web_research' else paper_graph).invoke(input_state)
+        except ResearchToolFailure as exc:
+            if not before or not s.get('results') or s['results'][-1]['source'] == effective:
+                raise exc.__cause__ from None
+            result = {**input_state, 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
+        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', [])]}
         after = {_evidence_signature(e) for e in result.get('evidence_pool', [])}
-        count = s.get('delegations', 0) + 1
-        return {**result, 'effective_source': effective, 'delegations': count, 'no_progress': count > 1 and not (after - before),
-                'review_pending': False, 'review_result': None, 'results': (s.get('results', []) + [f"{s['route'].task}: 新增证据 {len(after-before)} 条；工具调用 {result.get('tool_calls', 0)}/6"])[-3:]}
+        stalled = list(s.get('stalled', []))
+        if not (after - before):
+            if action not in stalled: stalled.append(action)
+        else:
+            stalled = []
+        summaries = [{key: p.get(key) for key in ('title', 'doi', 'url', 'original_url', 'source_level')} for p in result.get('candidates', [])[:20]]
+        return {'effective_source': effective, 'directions': directions, 'pools': pools, 'stalled': stalled,
+                'delegations': s.get('delegations', 0) + 1, 'review_result': None,
+                'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
+                'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []),
+                'results': (s.get('results', []) + [{'source': effective, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(after-before), 'candidates': summaries, 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
 
     def review(s):
         if on_stage: on_stage('assessing')
-        result = _model(s, 'literature/review', {'question': research['query'], 'evidence': _summary_evidence(s), 'results': s.get('results', [])}, Review)
-        return {'review_result': result, 'review_pending': True}
+        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', [])}, Review)
+        return {'review_result': result}
 
     def answer(s):
         if on_stage: on_stage('answering')
         return {'content': '模型回答（未使用文献证据）：\n\n' + s['route'].answer}
 
-    def draft(s):
-        if on_stage: on_stage('synthesizing')
-        return synthesize(s)
-
-    def check(s):
-        if on_stage: on_stage('verifying')
-        result = verify(s)
-        return {'verified_content': result['content'], 'verified_evidence': result['evidence'], 'rejected': bool(result['rejection_feedback']), 'rejection_feedback': result['rejection_feedback']}
-
-    def revise(s):
-        if on_stage: on_stage('synthesizing')
-        d = _model(s, 'literature/revise', {'question': research['query'], 'draft': s['draft'].model_dump(), 'feedback': s['rejection_feedback'], 'evidence': s['evidence'], 'review': s['review_result'].model_dump() if s.get('review_result') else None}, Draft)
-        return {'draft': d, 'revised': True}
-
-    report = StateGraph(State)
-    for name, fn in [('synthesize', draft), ('verify', check), ('revise', revise)]: report.add_node(name, fn)
-    report.add_edge(START, 'synthesize')
-    report.add_edge('synthesize', 'verify')
-    report.add_conditional_edges('verify', lambda s: 'revise' if s['rejected'] and not s.get('revised') else END)
-    report.add_edge('revise', 'verify')
-    report_graph = report.compile()
+    report_graph = build_report_graph(model=_model, on_stage=on_stage)
 
     def make_report(s):
-        result = report_graph.invoke({**s, 'research': {**research, 'source': s.get('effective_source') or research['source']}})
-        content = result['verified_content']
-        review_result = s.get('review_result')
-        if s.get('forced') or (review_result and not review_result.sufficient):
-            gaps = '；'.join(review_result.gaps) if review_result else ''
-            content += '\n\n证据不足：' + (s.get('forced_reason', '') + '；' if s.get('forced_reason') else '') + (gaps or '仍需进一步核查。')
-        return {'content': content, 'evidence': result['verified_evidence']}
+        result = report_graph.invoke(s)
+        return {'content': result['content'], 'evidence': result['evidence']}
 
     graph = StateGraph(State)
     for name, fn in [('supervisor', supervisor), ('delegate', delegate), ('review', review), ('answer', answer), ('report', make_report)]: graph.add_node(name, fn)

@@ -26,11 +26,11 @@ class CollectionWorkflowTests(unittest.TestCase):
                 payloads.append(str(payload))
                 if name == 'runtime/route':
                     self.assertNotIn('direct', payload['available_actions'])
-                    return w.Route(action='paper_research', task='selected') if not payload['results'] else w.Route(action='review' if payload['review'] is None else 'report')
+                    return w.Route(action='paper_research', task='selected', directions=['selected']) if not payload['results'] else w.Route(action='review' if payload['review'] is None else 'report')
                 if name == 'literature/research':
-                    return w.Specialist(action='search', query='selected') if not payload['recent_result'] else (w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(action='finish'))
+                    return w.Specialist(plan=['检索取证'], action='search', query='selected') if not payload['recent_result'] else (w.Specialist(plan=['检索取证'], action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(plan=['检索取证'], action='finish'))
                 if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
-                if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
+                if name.endswith('synthesize'): return w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='selected evidence', citations=['a1'])])])
                 if name.endswith('verify_claim'): return w.Verdict(supported=True)
                 raise AssertionError(name)
             with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve') as external, patch.object(repo, 'task_history') as history:
@@ -65,11 +65,11 @@ class CollectionWorkflowTests(unittest.TestCase):
             if name == 'runtime/route':
                 self.assertEqual(payload['history'], [])
                 self.assertNotIn('direct', payload['available_actions'])
-                return w.Route(action='paper_research', task='selected') if not payload['results'] else w.Route(action='review' if payload['review'] is None else 'report')
+                return w.Route(action='paper_research', task='selected', directions=['selected']) if not payload['results'] else w.Route(action='review' if payload['review'] is None else 'report')
             if name == 'literature/research':
-                return w.Specialist(action='search', query='selected') if not payload['recent_result'] else (w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(action='finish'))
+                return w.Specialist(plan=['检索取证'], action='search', query='selected') if not payload['recent_result'] else (w.Specialist(plan=['检索取证'], action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(plan=['检索取证'], action='finish'))
             if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
-            if name.endswith('synthesize'): return w.Draft(claims=[w.Claim(text='selected evidence', citations=['a1'])])
+            if name.endswith('synthesize'): return w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='selected evidence', citations=['a1'])])])
             if name.endswith('verify_claim'): return w.Verdict(supported=True)
             raise AssertionError(name)
         with patch.object(repo, 'project_evidence', return_value=[allowed, decoy]), patch.object(repo, 'local_search', return_value=[]) as local, patch('src.tools.search.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
@@ -103,8 +103,8 @@ class CollectionWorkflowTests(unittest.TestCase):
         self.assertEqual([(e['title'], e['text']) for e in evidence], [('Stored title', 'Stored evidence')])
 
     def test_verify_rejects_unselected_paper(self):
-        state = {'research': { 'source': 'collection', 'paper_ids': [3]}, 'draft': w.Draft(claims=[w.Claim(text='result', citations=['x'])]), 'evidence': [{'id': 'x', 'paper_id': 4, 'text': 'result', 'title': 'other'}]}
+        state = {'research': { 'source': 'collection', 'paper_ids': [3]}, 'draft': w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='result', citations=['x'])])]), 'evidence': [{'id': 'x', 'paper_id': 4, 'text': 'result', 'title': 'other'}]}
         with patch.object(w, 'structured') as model:
-            result = w.verify(state)
+            result = w._report_verify(state, lambda *args: model(*args))
         model.assert_not_called()
-        self.assertEqual(result['evidence'], [])
+        self.assertEqual(result['accepted'], [])

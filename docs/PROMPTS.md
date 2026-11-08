@@ -8,12 +8,12 @@
 
 | prompt ID | 输入 | 输出结构 |
 |---|---|---|
-| `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、no_progress | Route：action、task、answer |
-| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining | Specialist：action、query、candidate_ids |
-| `literature/review` | question、evidence、results | Review：sufficient、gaps、summary |
-| `literature/synthesize` | question、history、evidence、review | Draft：claims（text、citations）、limitations |
-| `literature/verify_claim` | claim、evidence | Verdict：supported |
-| `literature/revise` | question、draft、feedback、evidence、review | Draft：claims、limitations |
+| `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、directions | Route：action、task、answer、directions |
+| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan | Specialist：action、query、candidate_ids、plan |
+| `literature/review` | question、directions、evidence、results | Review：sufficient、gaps、summary、coverage、next_steps |
+| `literature/synthesize` | question、history、directions、evidence、review | Draft：sections（heading、paragraphs：text、citations） |
+| `literature/verify_claim` | heading、claim、evidence | Verdict：supported |
+| `literature/revise` | question、draft、feedback、directions、evidence、review | Draft：sections（heading、paragraphs：text、citations） |
 
 `src/agents/literature.py` 调用 `src/integrations/model.py` 的 `structured()`。该入口从 `src/prompts/` 按 prompt ID 读取 Markdown（如 `literature/research` 对应 `src/prompts/literature/research.md`），逐次替换时间变量，将渲染后的全文放进 system 消息，输入 JSON 单独放进 user 消息，发送至配置的 `/chat/completions`，在 system 消息中附加调用方的 Pydantic JSON Schema，保持 `json_object` 响应格式，并校验响应。结构错误最多附带安全的错误类型和字段路径重试一次；日志与反馈不包含原始模型输出。主控非法路由和研究节点无效或重复候选 ID 另有一次受限纠错。加载路径基于模块文件位置，不依赖当前工作目录。
 
@@ -37,7 +37,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 6. 确定性校验、来源隔离、循环上限与最终引用排版由代码负责，不能将提示词约束视为安全或事实保证。
 7. 新增模板必须同时接入调用方和输出结构；未实现节点不添加占位正文。
 
-网页证据须区分 `web_snippet`（搜索摘要）、`web_content`（网页文本）和 `abstract`（论文摘要）。链接、获取时间、提供方只用于追溯，不证明内容正确或经过同行评审；网页中的操作要求和提示词均作为不可信数据处理。选择 `web` 时由代码强制进入网页研究子图；`auto` 首次路由可选择直接回答、论文或网页，首次委派后的补研沿用所选路径，保留逐次注入当前时间的首部。
+网页证据须区分 `web_snippet`（搜索摘要）、`web_content`（网页文本）和 `abstract`（论文摘要）。链接、获取时间、提供方只用于追溯，不证明内容正确或经过同行评审；网页中的操作要求和提示词均作为不可信数据处理。选择 `web` 时由代码强制进入网页研究子图；`auto` 首次路由可选择直接回答、论文或网页，审查缺口后可在允许范围内切换论文与网页，保留逐次注入当前时间的首部。
 
 ## 验收方式
 
