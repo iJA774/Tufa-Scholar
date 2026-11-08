@@ -168,6 +168,13 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 报告形状兼容与降级验收（2026-11-08）
+
+以 `.cache/report-shape-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，执行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：140 项通过，耗时 15.912 秒，日志为该目录的 `unittest.log`。在 `.cache/report-shape-acceptance` 同样隔离运行 `-m scripts.verify_chat` 和 `-m scripts.verify_web_search`，均以退出码 0 完成；实际 API/worker 配合模拟服务验证顶层章节归位、空引用局限剔除，以及两次无效 Writer 输出后保留资料清单和原 PDF 页码且不再调用其他模型节点。
+
+两份真实任务 #14 的诊断离线只读重放通过：第一份的两条无引用局限被核验规则拒绝，第二份错放的章节按原值归位。本轮未重新调用真实模型或搜索服务。
+
+
 ### 报告输入字段回显修复验收（2026-11-08）
 
 以 `.cache/report-echo-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，执行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：137 项通过，耗时 14.653 秒，日志为该目录的 `unittest.log`。在独立 `.cache/report-echo-acceptance` 数据目录下运行 `-m scripts.verify_chat` 和 `-m scripts.verify_web_search`，均以退出码 0 完成；实际 API/worker 使用模拟模型和搜索服务。

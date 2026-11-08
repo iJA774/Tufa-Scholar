@@ -101,6 +101,10 @@ def discover(url, key, *, details=False):
         raise RuntimeError('模型服务返回的数据无效，请手动填写模型名称') from None
 
 
+class StructuredOutputError(RuntimeError):
+    """Model response remained invalid after format correction."""
+
+
 def _safe_validation_errors(exc, json_schema):
     # Only field names declared by the schema can appear in feedback or logs.
     fields = set()
@@ -118,7 +122,7 @@ def _safe_validation_errors(exc, json_schema):
                      'string_too_long', 'string_too_short', 'value_error'}
     result = []
     for error in exc.errors(include_input=False, include_context=False, include_url=False):
-        path = [part if isinstance(part, str) and part in fields else '*' for part in error['loc']]
+        path = [part if type(part) is int or (isinstance(part, str) and part in fields) else '*' for part in error['loc']]
         result.append({'type': error['type'] if error['type'] in allowed_types else 'validation_error',
                        'path': path})
     return result
@@ -169,5 +173,5 @@ def structured(prompt_id, payload, schema, *, model_options=None):
             diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)
             logger.warning('model_call invalid prompt_id=%s attempt=%d errors=%s diagnostic_id=%s', prompt_id, attempt, json.dumps(errors, ensure_ascii=False), diagnostic_id)
             if attempt == 2:
-                raise RuntimeError('模型返回的结构化结果无效') from None
+                raise StructuredOutputError('模型返回的结构化结果无效') from None
             messages.append({'role': 'user', 'content': json.dumps({'validation_feedback': errors}, ensure_ascii=False)})

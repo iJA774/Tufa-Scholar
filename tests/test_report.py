@@ -140,6 +140,55 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('input only', result['content'])
         self.assertEqual([e['id'] for e in result['evidence']], ['a1'])
 
+    def test_recover_misplaced_section_and_empty_citations_without_mutation(self):
+        from copy import deepcopy
+        first = {'heading': '第一节', 'paragraphs': [{'text': 'valid', 'citations': ['a']}]}
+        second = {'heading': '第二节', 'paragraphs': [{'text': 'missing citation', 'citations': []}]}
+        raw = {'sections': [first], **second, 'limitations': [{'text': 'unsupported limitation', 'citations': []}]}
+        original = deepcopy(raw)
+        draft = r.Draft.model_validate(raw)
+        self.assertEqual(raw, original)
+        self.assertEqual([section.heading for section in draft.sections], ['第一节', '第二节'])
+        self.assertEqual(len(r.Draft.model_validate({'sections': [first], **first}).sections), 1)
+        for bad in ({'heading': 'extra'}, {'paragraphs': []}, {'heading': 'x', 'paragraphs': 'bad'}, {'unknown': 1}):
+            with self.assertRaises(ValidationError): r.Draft.model_validate({'sections': [first], **bad})
+        calls = []
+        def model(s, name, payload, schema):
+            if name.endswith('synthesize'): return draft
+            calls.append(payload['claim'])
+            return r.Verdict(status='supported')
+        result = r.build_report_graph(model).invoke({'research': {'source':'local', 'query':'q'}, 'history': [], 'evidence': [{'id':'a','text':'valid','title':'paper'}]})
+        self.assertEqual(calls, ['valid'])
+        self.assertIn('valid', result['content'])
+        self.assertNotIn('missing citation', result['content'])
+        self.assertNotIn('unsupported limitation', result['content'])
+        rejected = self.diagnostic_mock.call_args.kwargs['payload']['rejected']
+        self.assertEqual(len(rejected), 2)
+        self.assertTrue(all(item['reason'] == '段落缺少证据引用' for item in rejected))
+
+    def test_format_failure_delivers_only_collected_in_scope_evidence(self):
+        from src.integrations.model import StructuredOutputError
+        evidence = [{'id':'a','paper_id':3,'title':'selected','source_level':'abstract','text':'material'}, {'id':'b','paper_id':4,'title':'outside','source_level':'abstract','text':'outside'}]
+        calls = []
+        def model(s, name, payload, schema):
+            calls.append(name)
+            raise StructuredOutputError('not safe to display')
+        state = {'research': {'source':'collection', 'paper_ids':[3], 'query':'q'}, 'history':[], 'evidence':evidence}
+        result = r.build_report_graph(model).invoke(state)
+        self.assertEqual(calls, ['literature/synthesize'])
+        self.assertIn('报告格式校验失败', result['content'])
+        self.assertIn('尚未生成核验结论', result['content'])
+        self.assertIn('[a]', result['content'])
+        self.assertNotIn('outside', result['content'])
+        self.assertNotIn('not safe to display', result['content'])
+        self.assertEqual(result['evidence'], evidence[:1])
+        self.assertEqual(result['research_gaps'], [])
+        empty = r.build_report_graph(model).invoke({**state, 'evidence': []})
+        self.assertIn('本次没有可列出的资料', empty['content'])
+        self.assertEqual(empty['evidence'], [])
+        with self.assertRaisesRegex(RuntimeError, 'network failure'):
+            r.build_report_graph(lambda *args: (_ for _ in ()).throw(RuntimeError('network failure'))).invoke(state)
+
     def test_empty_report_and_schema(self):
         with self.assertRaises(ValidationError): r.Draft.model_validate({'claims': []})
         result = r.build_report_graph(lambda s,n,p,t: r.Draft(sections=[])).invoke({'research': {'source': 'web', 'query': 'q'}, 'history': [], 'evidence': []})

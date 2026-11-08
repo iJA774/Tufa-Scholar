@@ -3,9 +3,10 @@ import re
 import logging
 from decimal import Decimal
 from typing import TypedDict, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from langgraph.graph import StateGraph, START, END
 from src.infrastructure.diagnostics import record_failure
+from src.integrations.model import StructuredOutputError
 
 logger = logging.getLogger('tufa.agent')
 
@@ -13,7 +14,7 @@ logger = logging.getLogger('tufa.agent')
 class Claim(BaseModel):
     model_config = ConfigDict(extra='forbid')
     text: str = Field(min_length=1, max_length=1500)
-    citations: list[str] = Field(min_length=1, max_length=12)
+    citations: list[str] = Field(max_length=12)
 
 
 class Section(BaseModel):
@@ -29,10 +30,27 @@ class Draft(BaseModel):
 
     @model_validator(mode='before')
     @classmethod
-    def discard_input_echo(cls, value):
-        if isinstance(value, dict) and 'verification_gaps' in value:
-            value = dict(value)
-            value.pop('verification_gaps')
+    def recover_known_shape(cls, value):
+        if not isinstance(value, dict): return value
+        value = dict(value)
+        value.pop('verification_gaps', None)
+        if 'heading' in value and 'paragraphs' in value and isinstance(value.get('sections'), list):
+            try:
+                candidate = Section.model_validate({'heading': value['heading'], 'paragraphs': value['paragraphs']})
+            except ValidationError:
+                return value
+            sections = list(value['sections'])
+            duplicate = False
+            for item in sections:
+                try:
+                    if Section.model_validate(item) == candidate:
+                        duplicate = True
+                        break
+                except ValidationError:
+                    pass
+            if not duplicate: sections.append(candidate.model_dump())
+            value['sections'] = sections
+            value.pop('heading'); value.pop('paragraphs')
         return value
 
     @model_validator(mode='after')
@@ -89,6 +107,7 @@ class ReportState(TypedDict, total=False):
     outcomes: list
     patched_positions: list
     empty_retried: bool
+    draft_format_failed: bool
 
 
 _UNSAFE = re.compile(r'```|<[^>]+>|https?://|\[[^\]\n]+\]\s*\([^)]*\)|\[(?:[a-zA-Z]+[\w-]*\d+[\w-]*|\d+)\]', re.I)
@@ -130,7 +149,8 @@ def verify(s, model):
         source_measurements = set().union(*(_measurements(e.get('text', '')) for e in cited)) if cited else set()
         reason = ''
         if _UNSAFE.search(text): reason = '格式或引用不安全'
-        elif not cited or len(cited) != len(paragraph.citations) or not measurements.issubset(source_measurements): reason = '引用或测量值依据不匹配'
+        elif not paragraph.citations: reason = '段落缺少证据引用'
+        elif len(cited) != len(paragraph.citations) or not measurements.issubset(source_measurements): reason = '引用或测量值依据不匹配'
         elif si != -1 and _COST.search(text) and not any(_COST_EVIDENCE.search(e.get('text', '')) for e in cited): reason = '缺少成本依据'
         if reason:
             verdict = Verdict(status='unsupported', reason=reason)
@@ -155,6 +175,15 @@ def _reference(e):
 
 
 def render(s):
+    if s.get('draft_format_failed'):
+        allowed = set(s['research'].get('paper_ids') or []) if s['research']['source'] == 'collection' else None
+        kept = [e for e in s['evidence'] if allowed is None or e.get('paper_id') in allowed]
+        lines = ['# 研究报告', '报告格式校验失败，本次仅提供已收集资料，尚未生成核验结论。']
+        if kept:
+            lines.append('## 已收集资料\n' + '\n'.join(_reference(e) for e in kept))
+        else:
+            lines.append('本次没有可列出的资料。')
+        return {'content': '\n\n'.join(lines), 'evidence': kept, 'research_gaps': []}
     accepted = set(map(tuple, s.get('accepted', [])))
     lines = ['# 研究报告']
     used = set()
@@ -222,7 +251,10 @@ def build_report_graph(model, on_stage=None):
         if on_stage: on_stage('synthesizing')
         review = s.get('review_result')
         payload = {'question': s['research']['query'], 'history': s.get('history', []), 'directions': s.get('directions', []), 'verification_gaps': s.get('verification_gaps', []), 'evidence': s['evidence'], 'review': review.model_dump() if review else None}
-        return {'draft': model(s, 'literature/synthesize', payload, Draft), 'empty_retried': s.get('empty_retried', False)}
+        try:
+            return {'draft': model(s, 'literature/synthesize', payload, Draft), 'empty_retried': s.get('empty_retried', False)}
+        except StructuredOutputError:
+            return {'draft_format_failed': True, 'research_gaps': []}
     def retry_empty(s):
         return {**draft(s), 'empty_retried': True}
     def check(s):
@@ -250,9 +282,26 @@ def build_report_graph(model, on_stage=None):
             diagnostic_id = record_failure(kind='report_verification', payload={'rejected': rejected}, schema=Verdict.model_json_schema())
             logger.info('report_verification diagnostic_id=%s count=%d', diagnostic_id, len(rejected))
         return render(s)
+    def after_draft(s):
+        if s.get('draft_format_failed'):
+            return 'render'
+        if s['evidence'] and not s['draft'].sections and not s['draft'].limitations and not s.get('empty_retried'):
+            return 'retry_empty'
+        return 'verify'
+
+    def after_retry(s):
+        return 'render' if s.get('draft_format_failed') else 'verify'
+
     graph = StateGraph(ReportState)
-    graph.add_node('draft', draft); graph.add_node('retry_empty', retry_empty); graph.add_node('verify', check); graph.add_node('revise', revise); graph.add_node('render', finalize)
-    graph.add_edge(START, 'draft'); graph.add_conditional_edges('draft', lambda s: 'retry_empty' if s['evidence'] and not s['draft'].sections and not s['draft'].limitations and not s.get('empty_retried') else 'verify'); graph.add_edge('retry_empty', 'verify')
+    graph.add_node('draft', draft)
+    graph.add_node('retry_empty', retry_empty)
+    graph.add_node('verify', check)
+    graph.add_node('revise', revise)
+    graph.add_node('render', finalize)
+    graph.add_edge(START, 'draft')
+    graph.add_conditional_edges('draft', after_draft)
+    graph.add_conditional_edges('retry_empty', after_retry)
     graph.add_conditional_edges('verify', lambda s: 'revise' if any(o['status'] == 'qualified' for o in s['outcomes']) and not s.get('revised') else 'render')
-    graph.add_edge('revise', 'verify'); graph.add_edge('render', END)
+    graph.add_edge('revise', 'verify')
+    graph.add_edge('render', END)
     return graph.compile()

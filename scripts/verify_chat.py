@@ -42,8 +42,13 @@ class ModelFixture(BaseHTTPRequestHandler):
         elif '你是研究报告撰写者' in prompt:
             evidence = data['evidence']
             result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '准确率为 92%', 'citations': [evidence[0]['id']]}, {'text': '成本降低 30%', 'citations': [evidence[0]['id']]}]}] if evidence else []}
+            if data['question'] == 'accuracy invalid draft':
+                result = {'unexpected': 'invalid'}
             if data['question'] == 'accuracy and cost?':
                 result['verification_gaps'] = [{'query': 'ECHO_ONLY_PROBE', 'route': 'web_research'}]
+                result['heading'] = '补充分析'
+                result['paragraphs'] = [{'text': '补充分析的准确率为 92%', 'citations': [evidence[0]['id']]}]
+                result['limitations'] = [{'text': 'UNSUPPORTED_LIMITATION_PROBE', 'citations': []}]
             if 'cross-source' in data['question'] and len(evidence) >= 2:
                 paper = next(e for e in evidence if e['source_level'] == 'abstract')
                 web = next(e for e in evidence if e['source_level'] == 'web_content')
@@ -113,6 +118,9 @@ def main():
                 completed=wait(retry['id']); assert completed['status']=='succeeded',completed
                 result=completed['result']; assert '证据不足' in result['content'] and '成本降低 30%' not in result['content']
                 assert 'ECHO_ONLY_PROBE' not in result['content'] and 'verification_gaps' not in result['content']
+                assert '## 概述' in result['content'] and '## 补充分析' in result['content']
+                assert '补充分析的准确率为 92%' in result['content']
+                assert 'UNSUPPORTED_LIMITATION_PROBE' not in result['content']
                 synth_requests = [req for req in ModelFixture.requests if '你是研究报告撰写者' in req['messages'][0]['content'] and json.loads(req['messages'][1]['content'])['question'] == 'accuracy and cost?']
                 assert len(synth_requests) == 1, synth_requests
                 synth_index = ModelFixture.requests.index(synth_requests[0])
@@ -123,6 +131,17 @@ def main():
                 assert 'accuracy was 92%' in c.get(f'/reports/{report}/evidence.csv').text
                 assert len(call('GET',f"/conversations/{q['conversation_id']}/messages"))==2
                 assert call('GET',f'/projects/{p}/search',params={'q':'accuracy'})['papers']
+                ModelFixture.requests.clear()
+                malformed=call('POST',f'/projects/{p}/questions',json={'question':'accuracy invalid draft', 'source':'local'})
+                malformed_task=wait(malformed['run_id'])
+                assert malformed_task['status']=='succeeded', malformed_task
+                malformed_result=malformed_task['result']
+                assert '尚未生成核验结论' in malformed_result['content']
+                assert malformed_result['evidence'] and malformed_result['evidence'][0]['page']==1
+                malformed_synth=[req for req in ModelFixture.requests if '你是研究报告撰写者' in req['messages'][0]['content']]
+                assert len(malformed_synth)==2, malformed_synth
+                first_index=ModelFixture.requests.index(malformed_synth[0])
+                assert not any('你是研究专家' in req['messages'][0]['content'] or '你是严谨的报告核验者' in req['messages'][0]['content'] for req in ModelFixture.requests[first_index+1:])
                 outside=call('POST',f'/projects/{p}/papers',json={'title':'OUTSIDE_SECRET','abstract':'OUTSIDE_SECRET content'})
                 prior=call('POST',f'/projects/{p}/questions',json={'question':'OUTSIDE_SECRET','conversation_id':q['conversation_id'],'source':'local'})
                 assert wait(prior['run_id'])['status']=='succeeded'
