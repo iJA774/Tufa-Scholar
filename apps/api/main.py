@@ -351,7 +351,7 @@ def report_csv(report_id: int):
     if report is None:
         raise HTTPException(404, '报告不存在')
     output = io.StringIO(newline='')
-    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url','provider','retrieved_at','published_at']
+    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url','provider','retrieved_at','published_at','char_start','char_end']
     writer = csv.DictWriter(output, fieldnames=fields, extrasaction='ignore')
     writer.writeheader()
     writer.writerows(report['evidence'])

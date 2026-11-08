@@ -1,6 +1,6 @@
 # 科研 Agent
 
-`literature.py` 保存科研问答的 LangGraph 图及结构化模型输出：主控动态选择直接回答、研究委派、审查或报告；论文和网页研究各有独立子图，报告子图负责综合、核验及至多一次修订。入口为 `run(research, *, history, on_stage=None)`，返回回答正文与证据。
+`literature.py` 保存科研问答的 LangGraph 图及结构化模型输出：主控动态选择直接回答、研究委派、审查或报告；论文和网页研究各有独立子图，报告子图负责综合、核验及至多一次局部修订，缺证据可反馈主控补研。入口为 `run(research, *, history, on_stage=None)`，返回回答正文与证据。
 
 `research` 包含 `query`、`project_id`、`source`，`auto` 由主控自主选择直接回答、论文或网页，审查缺口后可在论文与网页之间切换，可带 `paper_ids`、`model_name` 与 `reasoning_effort`；`history` 是调用方准备的对话消息列表。Agent 不需要任务 ID，不直接导入仓储或修改任务状态。可选 `on_stage(stage)` 在节点执行前接收阶段名；worker 负责读历史、提供回调、领取任务及原子提交结果。
 
@@ -25,3 +25,5 @@ content, evidence = run(
 收藏夹任务传递提交时保存的项目、来源和论文快照，不读取其他对话历史；网页范围强制进入研究子图，不走无证据的一般回答；子图可直接结束并返回证据不足。模型节点的输入输出与 `src/prompts/` 模板契约见 [提示词规范](../../docs/PROMPTS.md)。
 
 主控不调用检索工具，研究结果返回主控；报告前必须完成审查。无进展或预算耗尽时收束并说明未解决的不足。模拟 HTTP 与实际 API/worker 验收入口见 [根 README](../../README.md#验证)。
+
+网页专家可分页读取公网网页正文，取证保留 Markdown 字符范围。报告核验的 unsupported 坐标和原因写入私有诊断，普通日志仅记录诊断 ID 和数量。

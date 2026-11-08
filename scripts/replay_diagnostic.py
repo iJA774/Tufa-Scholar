@@ -16,10 +16,11 @@ def replay(artifact):
     response = artifact.get('response')
     context = artifact.get('context') or {}
     if kind == 'model_validation':
-        from src.agents.literature import Route, Specialist, Review, Draft, Verdict
+        from src.agents.literature import Route, Specialist, Review
+        from src.agents.report import Draft, Verdict, PatchSet
         classes = {'runtime/route': Route, 'literature/research': Specialist,
                    'literature/review': Review, 'literature/synthesize': Draft,
-                   'literature/revise': Draft, 'literature/verify_claim': Verdict}
+                   'literature/revise': PatchSet, 'literature/verify_claim': Verdict}
         cls = classes.get(context.get('prompt_id'))
         if cls is None:
             return '无法离线复现：未知提示词'

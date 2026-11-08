@@ -29,6 +29,7 @@ evidence = registry.invoke(
 |---|---|---|---|
 | `search_papers` | `query` | 含 `query`、`source`、`method`、`results`、`warnings` 的字典 | `local`、`openalex`、`all`、`collection` |
 | `search_web` | `query`、可选 `limit`（1–5，默认 5） | 网页结果列表，含 URL、文本、来源层级、引擎和获取时间 | `web` |
+| `read_web_page` | `url`、`offset`（默认 0）、`limit`（默认 1000，最大 4000） | 清理后的 Markdown 字符片段及下一偏移、最终 URL、标题和获取时间 | `web` |
 | `collect_evidence` | `query`、`papers`（最多六条检索结果） | 带原文定位或网页出处的证据列表 | 全部来源 |
 
 `source="all"` 指项目文献与 OpenAlex，不包含网页搜索。网页调用先创建 `ToolContext(project_id=1, source="web")`，再执行 `search_web`；结果列表可直接作为 `collect_evidence` 的 `papers`。
@@ -73,3 +74,5 @@ registry.invoke("text_length", {"text": "科研"}, context=context)
 重复名称被拒绝。`registry.py` 显式接入 `search.py` 与 `read_paper.py` 的注册函数；两者分别适配检索和取证，实际算法位于 `src/literature/retrieval.py`、`src/literature/evidence.py`。新工具应声明实际适用来源，并在执行中遵守上下文。提示词位于 `src/prompts/`，模型综合和报告核验位于 `src/agents/literature.py`，不塞入注册器。
 
 从仓库根目录运行 `uv run --locked python -m unittest tests.test_tools -v` 验证工具入口。跨层回归及实际 API/worker 验收命令见 [根 README](../../README.md#验证)。
+
+`read_web_page` 读取公网 HTTP(S) 网页，按清理后的 Markdown 字符分页；只返回片段，不选择证据。地址和每次跳转均检查公网 DNS，连接固定已验证 IP，HTTPS 校验原域名。仅支持 HTML 和纯文本，不运行脚本或加载资源；受响应大小、时间和跳转数限制。网页正文片段以 `content_offset` 交给取证时，结果保留绝对字符范围。

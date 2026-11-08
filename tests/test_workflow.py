@@ -28,6 +28,9 @@ class WorkflowTests(unittest.TestCase):
         diagnostic = patch.object(w, 'record_failure', return_value='diag-test')
         self.record_failure = diagnostic.start()
         self.addCleanup(diagnostic.stop)
+        report_diagnostic = patch('src.agents.report.record_failure', return_value='diag-test', create=True)
+        report_diagnostic.start()
+        self.addCleanup(report_diagnostic.stop)
 
     def test_auto_direct_needs_no_tools(self):
         def model(name, payload, schema):
@@ -60,7 +63,7 @@ class WorkflowTests(unittest.TestCase):
                         return specialist(action='finish')
                     if name == 'literature/review': return w.Review(sufficient=False, gaps=['more'], summary='missing')
                     if name == 'literature/synthesize': return draft(claims=[w.Claim(text='evidence', citations=[payload['evidence'][0]['id']])])
-                    if name == 'literature/verify_claim': return w.Verdict(supported=True)
+                    if name == 'literature/verify_claim': return w.Verdict(status='supported')
                     raise AssertionError(name)
                 with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', return_value=[page]), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
                     content, evidence = w.run({**TASK, 'source': 'auto'}, history=[], on_stage=stages.append)
@@ -72,7 +75,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn('web_research' if effective == 'all' else 'paper_research', routes[1]['available_actions'])
                 self.assertTrue(all(source == effective for source, _ in catalogs))
                 expected_search = 'search_web' if effective == 'web' else 'search_papers'
-                self.assertTrue(all(names == {expected_search, 'collect_evidence'} for _, names in catalogs))
+                self.assertTrue(all(names == ({expected_search, 'collect_evidence', 'read_web_page'} if effective == 'web' else {expected_search, 'collect_evidence'}) for _, names in catalogs))
                 self.assertTrue(all(c.kwargs['context'].source == effective for c in invoke.call_args_list))
                 self.assertEqual([c.args[0] for c in invoke.call_args_list], [expected_search, 'collect_evidence'] * 2)
                 if effective == 'web':
@@ -107,7 +110,7 @@ class WorkflowTests(unittest.TestCase):
                         return w.Review(sufficient=False, gaps=['对照'], summary='不足', coverage=['方法'], next_steps=[w.NextStep(direction='对照', goal='补查', route=second)])
                     if name in ('literature/synthesize', 'literature/revise'):
                         return draft(claims=[w.Claim(text=e['text'], citations=[e['id']]) for e in payload['evidence']])
-                    if name == 'literature/verify_claim': return w.Verdict(supported=True)
+                    if name == 'literature/verify_claim': return w.Verdict(status='supported')
                     raise AssertionError(name)
                 # After the second review choose report.
                 wrapped = model
@@ -167,6 +170,54 @@ class WorkflowTests(unittest.TestCase):
                 self.assertTrue(all('web_research' not in call['available_actions'] for call in calls))
                 web.assert_not_called()
 
+    def test_report_missing_evidence_triggers_one_research_then_report(self):
+        paper = {'id': 3, 'title': 'paper', 'abstract': 'evidence', 'versions': []}
+        routes, drafts = [], []
+        def model(name, payload, schema):
+            if name == 'runtime/route':
+                routes.append(payload)
+                if payload.get('verification_gaps'):
+                    self.assertEqual(payload['available_actions'], ['paper_research'])
+                return route(action='paper_research', task='查证') if not payload['results'] or payload.get('verification_gaps') and len(payload['results']) == 1 else route(action='report')
+            if name == 'literature/research':
+                if not payload['recent_result']: return specialist(action='search', query='查证')
+                if payload['recent_result'].startswith('检索'): return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                return specialist(action='finish')
+            if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
+            if name == 'literature/synthesize':
+                drafts.append(payload)
+                return draft(claims=[w.Claim(text='evidence', citations=[payload['evidence'][0]['id']])])
+            if name == 'literature/verify_claim':
+                return w.Verdict(status='missing_evidence', reason='缺对照', research_query='对照', research_route='paper_research') if len(drafts) == 1 else w.Verdict(status='supported')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]):
+            content, evidence = w.run(TASK, history=[])
+        self.assertEqual(len(drafts), 2)
+        self.assertTrue(drafts[1]['verification_gaps'])
+        self.assertEqual(len(evidence), 1)
+        self.assertIn('evidence', content)
+
+    def test_report_gap_cannot_expand_local_scope(self):
+        paper = {'id': 3, 'title': 'paper', 'abstract': 'evidence', 'versions': []}
+        routes = []
+        def model(name, payload, schema):
+            if name == 'runtime/route':
+                routes.append(payload)
+                return route(action='paper_research', task='查证') if not payload['results'] else route(action='report')
+            if name == 'literature/research':
+                if not payload['recent_result']: return specialist(action='search', query='topic')
+                if payload['recent_result'].startswith('检索'): return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                return specialist(action='finish')
+            if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
+            if name == 'literature/synthesize': return draft(claims=[w.Claim(text='evidence', citations=[payload['evidence'][0]['id']])])
+            if name == 'literature/verify_claim': return w.Verdict(status='missing_evidence', reason='缺数据', research_query='检索', research_route='web_research')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]), patch('src.tools.search.search_web') as web:
+            content, _ = w.run(TASK, history=[])
+        self.assertEqual(len(routes), 2)
+        self.assertIn('证据不足', content)
+        web.assert_not_called()
+
     def test_direct_graph_uses_history_without_tools(self):
         history = [{'role': 'user', 'content': 'prior question'}]
         def model(name, payload, schema):
@@ -220,11 +271,11 @@ class WorkflowTests(unittest.TestCase):
                 if not payload['evidence']: return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
                 return specialist(action='finish')
             if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
-            if name == 'literature/synthesize': return draft(claims=[w.Claim(text='Accuracy 99%', citations=[payload['evidence'][0]['id']])])
+            if name == 'literature/synthesize': return draft(claims=[w.Claim(text='Accuracy 92%', citations=[payload['evidence'][0]['id']])])
             if name == 'literature/revise':
                 revisions.append(payload['evidence'])
-                return draft(claims=[w.Claim(text='Accuracy 92%', citations=[payload['evidence'][0]['id']])])
-            if name == 'literature/verify_claim': return w.Verdict(supported=True)
+                return schema(patches=[{'section_index': 0, 'paragraph_index': 0, 'text': 'Accuracy 92%', 'citations': [payload['evidence'][0]['id']]}])
+            if name == 'literature/verify_claim': return w.Verdict(status='qualified', reason='需限定', suggestion='限定') if not revisions else w.Verdict(status='supported')
             raise AssertionError(name)
         with patch.object(repository, 'project_evidence', return_value=[paper]), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(w, 'structured', side_effect=model):
             content, evidence = w.run(TASK, history=[])
@@ -457,7 +508,7 @@ class WorkflowTests(unittest.TestCase):
         evidence = [{'id': 'e1', 'text': 'Accuracy was 95%.', 'title': 'paper', 'version_id': None}]
         claims = [w.Claim(text='成本降低', citations=['e1']), w.Claim(text='准确率 99%', citations=['e1']), w.Claim(text='结果', citations=['fake'])]
         state = {'research': TASK, 'evidence': evidence, 'draft': draft(claims=claims, limitations='成本下降 70%')}
-        with patch.object(w, 'structured', return_value=w.Verdict(supported=False)) as model:
+        with patch.object(w, 'structured', return_value=w.Verdict(status='unsupported', reason='不支持')) as model:
             result = w.verify(state)
         self.assertEqual(model.call_count, 0)
         self.assertNotIn('成本降低', result['content'])
@@ -466,7 +517,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_accuracy_number_cannot_be_reused_as_cost_evidence(self):
         state = {'research': TASK, 'evidence':[{'id':'e1','text':'Accuracy 92%'}], 'draft':draft(claims=[w.Claim(text='成本降低 92%',citations=['e1'])])}
-        with patch.object(w, 'structured', return_value=w.Verdict(supported=True)) as model:
+        with patch.object(w, 'structured', return_value=w.Verdict(status='supported')) as model:
             result = w.verify(state)
         model.assert_not_called()
         self.assertEqual(result['evidence'], [])

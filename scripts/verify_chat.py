@@ -29,7 +29,9 @@ class ModelFixture(BaseHTTPRequestHandler):
         elif '你是研究专家' in prompt:
             if not data['recent_result']:
                 result = {'action': 'search', 'query': data['task'], 'plan': ['search and read']}
-            elif data['candidates'] and '检索到' in data['recent_result']:
+            elif data['candidates'] and '检索到' in data['recent_result'] and data['role'] == 'web':
+                result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['search and read']}
+            elif data['candidates'] and ('检索到' in data['recent_result'] or '网页正文' in data['recent_result']):
                 result = {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['search and read']}
             else:
                 result = {'action': 'finish', 'plan': ['search and read']}
@@ -37,15 +39,17 @@ class ModelFixture(BaseHTTPRequestHandler):
             result = {'sufficient': True, 'gaps': [], 'summary': '已审查', 'coverage': ['accuracy'], 'next_steps': []}
             if 'cross-source' in data['question'] and len(data['results']) == 1:
                 result = {'sufficient': False, 'gaps': ['method details'], 'summary': '需补充方法', 'coverage': ['paper'], 'next_steps': [{'direction': 'method', 'goal': 'Attention fixture paper method details', 'route': 'web_research'}]}
-        elif '你是研究报告撰写者' in prompt or '你是报告修订者' in prompt:
+        elif '你是研究报告撰写者' in prompt:
             evidence = data['evidence']
             result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '准确率为 92%', 'citations': [evidence[0]['id']]}, {'text': '成本降低 30%', 'citations': [evidence[0]['id']]}]}] if evidence else []}
             if 'cross-source' in data['question'] and len(evidence) >= 2:
                 paper = next(e for e in evidence if e['source_level'] == 'abstract')
-                web = next(e for e in evidence if e['source_level'] == 'web_snippet')
-                result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '论文摘要介绍了模拟研究。', 'citations': [paper['id']]}]}, {'heading': '主题分析', 'paragraphs': [{'text': '网页补充了注意力方法细节。', 'citations': [web['id']]}]}, {'heading': '综合判断', 'paragraphs': [{'text': '论文与网页共同提供研究背景和方法线索。', 'citations': [paper['id'], web['id']]}]}]}
+                web = next(e for e in evidence if e['source_level'] == 'web_content')
+                result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '论文摘要介绍了模拟研究。', 'citations': [paper['id']]}]}, {'heading': '主题分析', 'paragraphs': [{'text': '网页补充了注意力方法细节。', 'citations': [web['id']]}]}, {'heading': '综合判断', 'paragraphs': [{'text': '论文与网页共同提供研究背景和方法线索。', 'citations': [paper['id'], web['id']]}]}], 'limitations': [{'text': '论文仅提供摘要，仍需核查原文。', 'citations': [paper['id']]}]}
+        elif '你是报告修订者' in prompt:
+            result = {'patches': []}
         elif '你是严谨的报告核验者' in prompt:
-            result = {'supported':True}
+            result = {'status': 'supported'}
         else:
             self.send_error(500); return
         raw = json.dumps({'choices':[{'message':{'content':json.dumps(result,ensure_ascii=False)}}]}).encode()

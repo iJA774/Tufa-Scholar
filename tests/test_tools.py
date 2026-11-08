@@ -42,7 +42,7 @@ class ResearchToolsTests(unittest.TestCase):
         local_names = {item['name'] for item in self.registry.list_tools(self.local)}
         web_tools = self.registry.list_tools(self.web)
         self.assertEqual(local_names, {'search_papers', 'collect_evidence'})
-        self.assertEqual({item['name'] for item in web_tools}, {'search_web', 'collect_evidence'})
+        self.assertEqual({item['name'] for item in web_tools}, {'search_web', 'collect_evidence', 'read_web_page'})
         self.assertTrue(all(item['description'] and item['input_schema']['properties'] for item in web_tools))
         with self.assertRaises(ValueError):
             self.registry.invoke('search_web', {'query': 'x'}, context=self.local)

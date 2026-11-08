@@ -31,7 +31,7 @@ class CollectionWorkflowTests(unittest.TestCase):
                     return w.Specialist(plan=['检索取证'], action='search', query='selected') if not payload['recent_result'] else (w.Specialist(plan=['检索取证'], action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(plan=['检索取证'], action='finish'))
                 if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
                 if name.endswith('synthesize'): return w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='selected evidence', citations=['a1'])])])
-                if name.endswith('verify_claim'): return w.Verdict(supported=True)
+                if name.endswith('verify_claim'): return w.Verdict(status='supported')
                 raise AssertionError(name)
             with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve') as external, patch.object(repo, 'task_history') as history:
                 content, evidence = w.run({k: task[k] for k in ('project_id', 'query', 'source', 'paper_ids')}, history=[])
@@ -70,7 +70,7 @@ class CollectionWorkflowTests(unittest.TestCase):
                 return w.Specialist(plan=['检索取证'], action='search', query='selected') if not payload['recent_result'] else (w.Specialist(plan=['检索取证'], action='read', candidate_ids=[payload['candidates'][0]['id']]) if not payload['evidence'] else w.Specialist(plan=['检索取证'], action='finish'))
             if name == 'literature/review': return w.Review(sufficient=True, summary='ok')
             if name.endswith('synthesize'): return w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='selected evidence', citations=['a1'])])])
-            if name.endswith('verify_claim'): return w.Verdict(supported=True)
+            if name.endswith('verify_claim'): return w.Verdict(status='supported')
             raise AssertionError(name)
         with patch.object(repo, 'project_evidence', return_value=[allowed, decoy]), patch.object(repo, 'local_search', return_value=[]) as local, patch('src.tools.search.retrieve') as retrieve, patch('src.literature.retrieval.search_works') as external, patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
             content, evidence = w.run({k: task[k] for k in ('project_id', 'query', 'source', 'paper_ids')}, history=[])

@@ -10,3 +10,5 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 仅输出 JSON，例如：{"sufficient":false,"gaps":["缺少对照数据"],"summary":"证据不足","coverage":[],"next_steps":[{"direction":"对照","goal":"查找对照数据","route":"paper_research"}]}。
 
 读取 directions，输出 coverage 字符串数组和 next_steps 数组，每项含 direction、goal、route（paper_research 或 web_research）。明确可执行的补研目标；只有摘要而需要全文细节时可建议依据标题或 DOI 网页搜索，搜索片段不等于全文。
+
+网页正文读取可提供分块文本，需按来源和范围判断，勿将片段说成完整网页。

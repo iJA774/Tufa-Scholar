@@ -21,6 +21,7 @@ class Candidate(BaseModel):
 
 
 class WebCandidate(Candidate):
+    content_offset: int | None = Field(default=None, ge=0)
     url: str = Field(min_length=1)
     content: str
     source_level: Literal['web_snippet', 'web_content', 'abstract']

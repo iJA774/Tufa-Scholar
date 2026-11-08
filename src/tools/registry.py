@@ -22,8 +22,10 @@ class ToolRegistry:
         self._tools = {}
         from .search import register_search_tools
         from .read_paper import register_read_paper_tools
+        from .read_web_page import register_read_web_page_tools
         register_search_tools(self)
         register_read_paper_tools(self)
+        register_read_web_page_tools(self)
 
     def register(self, name, description, parameters: type[BaseModel], handler, sources):
         if name in self._tools:

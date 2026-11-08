@@ -163,9 +163,16 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 
 ## 失败诊断与离线重放
 
-模型结构或决策失败时，诊断材料保存在 `TUFA_DATA_DIR/diagnostics/`，普通日志中的诊断 ID 可用于定位。材料可能包含研究输入和模型原始响应，请按用户数据保管；已知密钥和凭据字段会被剔除或脱敏。仓库根目录执行 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 可在当前代码下离线检查，不联网或访问数据库。重放使用当前结构而非历史代码，环境差异和脱敏可能影响结果；网络或 HTTP 故障不能离线复现。
+模型结构或决策失败时，诊断材料保存在 `TUFA_DATA_DIR/diagnostics/`，普通日志中的诊断 ID 可用于定位。材料可能包含研究输入和模型原始响应，请按用户数据保管；报告核验的 unsupported 诊断只保存段落坐标和原因，已知密钥和凭据字段会被剔除或脱敏。仓库根目录执行 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 可在当前代码下离线检查，不联网或访问数据库。重放使用当前结构而非历史代码，环境差异和脱敏可能影响结果；网络或 HTTP 故障不能离线复现。
 
 ## 验证
+
+
+### 网页正文读取与报告核验验收（2026-11-08）
+
+以 `.cache/web-reader-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`：最终 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v` 共 131 项通过，耗时 9.151 秒，日志为该目录下 `unittest.log`。在独立 `.cache/web-reader-acceptance` 中，`-m scripts.verify_chat` 和 `-m scripts.verify_web_search` 均以退出码 0 完成；使用模拟搜索、HTML transport 和模型，实际 API/worker 验证解析、取证、保存、CSV 字符位置与带引用的局限。该模拟验收发生在最终 TLS 信任配置调整前，fixture 不依赖 TLS。
+
+独立真实 HTTPS 验收 `https://example.com/`：`limit=64` 返回 64 字符和 `next_offset=64`；从 64 起用默认长度返回 92 字符且无下一页。首次使用标准库系统信任根时出现证书验证 code 20，改为已有 HTTPX 的 certifi 信任根并保留证书验证和域名 SNI 后复测成功。未验收其他真实供应商或前端。
 
 
 ### 研究报告与跨来源补研验收（2026-11-08）

@@ -30,6 +30,11 @@ class State(TypedDict, total=False):
     pools: dict
     stalled: list
     plan: list
+    web_blocks: dict
+    verification_gaps: list
+    verification_attempted: bool
+    feedback_pending: bool
+    feedback_actions: list
     history: list
     queries: list
     evidence_query: str
@@ -80,7 +85,7 @@ def search(s):
         try:
             if research['source'] == 'web':
                 results = registry.invoke('search_web', {'query': query, 'limit': 5}, context=_context(research))
-                results = [item for item in results if item.get('content', '').strip()]
+                results = [item for item in results if item.get('url')]
             else:
                 result = registry.invoke('search_papers', {'query': query}, context=_context(research))
                 warnings.extend(result.get('warnings', []))
@@ -195,10 +200,12 @@ class Route(BaseModel):
 
 
 class Specialist(BaseModel):
-    action: Literal['search', 'read', 'finish']
+    action: Literal['search', 'read', 'read_web_page', 'finish']
     query: str = Field(default='', max_length=1000)
     candidate_ids: list[str] = Field(default_factory=list, max_length=6)
     plan: list[str] = Field(min_length=1, max_length=6)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=1000, ge=1, le=4000)
 
     @model_validator(mode='after')
     def validate_action(self):
@@ -206,6 +213,8 @@ class Specialist(BaseModel):
             raise ValueError('研究计划不能为空')
         if self.action == 'search' and not self.query.strip():
             raise ValueError('搜索查询不能为空')
+        if self.action == 'read_web_page' and len(self.candidate_ids) != 1:
+            raise ValueError('读取网页须指定一个候选')
         if self.action == 'read' and not self.candidate_ids:
             raise ValueError('精读候选不能为空')
         return self
@@ -232,7 +241,7 @@ class Review(BaseModel):
 
 
 def _summary_evidence(s):
-    return [{**{key: e.get(key) for key in ('id', 'title', 'source_level', 'paper_id', 'version_id', 'page', 'original_url', 'provider', 'retrieved_at')}, 'text': e.get('text', '')[:600]} for e in s.get('evidence', [])]
+    return [{**{key: e.get(key) for key in ('id', 'title', 'source_level', 'paper_id', 'version_id', 'page', 'original_url', 'provider', 'retrieved_at', 'char_start', 'char_end')}, 'text': e.get('text', '')[:600]} for e in s.get('evidence', [])]
 
 
 def _candidate_views(s):
@@ -259,18 +268,22 @@ def _research_graph(kind, on_stage):
     def decide(s):
         views, identities = _candidate_views(s)
         allowed = {'search_web' if kind == 'web' else 'search_papers', 'collect_evidence'}
+        if kind == 'web': allowed.add('read_web_page')
         tools = [tool for tool in registry.list_tools(_context(s['research'])) if tool['name'] in allowed]
         payload = {
-            'task': s['task'], 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
+            'task': s['task'], 'verification_gaps': s.get('verification_gaps', []), 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''),
+            'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
             'evidence': _summary_evidence(s), 'calls_remaining': 6 - s.get('tool_calls', 0),
         }
         valid_ids = {key for key, _ in views}
         for attempt in range(2):
             choice = _model(s, 'literature/research', payload, Specialist)
             logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
-            if choice.action != 'read' or (len(set(choice.candidate_ids)) == len(choice.candidate_ids) and all(i in valid_ids for i in choice.candidate_ids)):
+            valid_action = choice.action != 'read_web_page' or kind == 'web'
+            valid_candidates = choice.action not in ('read', 'read_web_page') or (len(set(choice.candidate_ids)) == len(choice.candidate_ids) and all(i in valid_ids for i in choice.candidate_ids))
+            if valid_action and valid_candidates:
                 break
             diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
                 response=choice.model_dump(), errors=['invalid_candidate_ids'],
@@ -290,12 +303,42 @@ def _research_graph(kind, on_stage):
             except RuntimeError as exc:
                 raise ResearchToolFailure() from exc
             result = f"检索到 {len(update['candidates'])} 个累计候选"
+        elif choice.action == 'read_web_page':
+            if on_stage: on_stage('searching_web')
+            mapping = dict(_candidate_views(s)[0])
+            candidate = mapping[choice.candidate_ids[0]]
+            blocks = {key: list(value) for key, value in s.get('web_blocks', {}).items()}
+            try:
+                block = registry.invoke('read_web_page', {'url': candidate['url'], 'offset': choice.offset, 'limit': choice.limit}, context=_context(s['research']))
+                if block.get('markdown', '').strip():
+                    entries = blocks.setdefault(choice.candidate_ids[0], [])
+                    entries[:] = [item for item in entries if item['offset'] != block['offset']]
+                    entries.append(block)
+                    result = '网页正文块已读取'
+                else:
+                    result = '网页正文为空或已到末尾'
+                update = {'web_blocks': blocks}
+            except RuntimeError:
+                update = {'warnings': s.get('warnings', []) + ['web_page_read_failed']}
+                result = '网页正文读取失败，可使用搜索摘要或其他候选'
         else:
             if on_stage: on_stage('evidence')
             mapping = dict(_candidate_views(s)[0])
             if len(set(choice.candidate_ids)) != len(choice.candidate_ids) or any(i not in mapping for i in choice.candidate_ids):
                 raise ValueError('精读候选标识无效')
-            update = evidence({**s, 'papers': [mapping[i] for i in choice.candidate_ids], 'evidence_query': s['task']})
+            papers = []
+            extras = []
+            for candidate_id in choice.candidate_ids:
+                candidate = mapping[candidate_id]
+                blocks = s.get('web_blocks', {}).get(candidate_id, []) if kind == 'web' else []
+                converted = [{'url': block['url'], 'title': block['title'] or candidate.get('title', ''),
+                              'content': block['markdown'], 'source_level': 'web_content', 'provider': 'web_page',
+                              'retrieved_at': block['retrieved_at'], 'content_offset': block['offset']}
+                             for block in reversed(blocks) if block.get('markdown', '').strip()]
+                papers.append(converted[0] if converted else candidate)
+                extras.extend(converted[1:])
+            papers.extend(extras[:6-len(papers)])
+            update = evidence({**s, 'papers': papers, 'evidence_query': s['task']})
             result = f"本次新增证据：{update['new_evidence']}"
         return {**update, 'tool_calls': s.get('tool_calls', 0) + 1, 'recent_result': result}
 
@@ -325,7 +368,9 @@ def run(research: dict, *, history: list, on_stage=None):
             return {'route': Route(action='review')}
         if exhausted:
             return {'route': Route(action='report'), 'forced': True, 'forced_reason': '研究预算已耗尽'}
-        if not count:
+        if s.get('feedback_pending'):
+            actions = s['feedback_actions']
+        elif not count:
             actions = (['paper_research', 'web_research'] if source == 'auto' else
                        ['web_research'] if source == 'web' else ['paper_research'])
             if source in ('auto', 'local'): actions.append('direct')
@@ -340,7 +385,7 @@ def run(research: dict, *, history: list, on_stage=None):
                 return {'route': Route(action='report'), 'forced': True, 'forced_reason': '可用研究渠道没有新增证据'}
         payload = {'question': research['query'], 'history': s['history'], 'source': research['source'],
             'available_actions': actions, 'effective_source': effective, 'directions': s.get('directions', []), 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
-            'review': reviewed.model_dump() if reviewed else None, 'delegations_remaining': max(0, 3-count),
+            'review': reviewed.model_dump() if reviewed else None, 'verification_gaps': s.get('verification_gaps', []), 'delegations_remaining': max(0, 3-count),
             'decisions_remaining': max(0, 12-s.get('decisions', 0))}
         for attempt in range(2):
             route = _model(s, 'runtime/route', payload, Route)
@@ -369,10 +414,10 @@ def run(research: dict, *, history: list, on_stage=None):
         try:
             result = (web_graph if action == 'web_research' else paper_graph).invoke(input_state)
         except ResearchToolFailure as exc:
-            if not before or not s.get('results') or s['results'][-1]['source'] == effective:
+            if not before or not s.get('results') or (s['results'][-1]['source'] == effective and not s.get('feedback_pending')):
                 raise exc.__cause__ from None
             result = {**input_state, 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
-        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', [])]}
+        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {})]}
         after = {_evidence_signature(e) for e in result.get('evidence_pool', [])}
         stalled = list(s.get('stalled', []))
         if not (after - before):
@@ -381,7 +426,7 @@ def run(research: dict, *, history: list, on_stage=None):
             stalled = []
         summaries = [{key: p.get(key) for key in ('title', 'doi', 'url', 'original_url', 'source_level')} for p in result.get('candidates', [])[:20]]
         return {'effective_source': effective, 'directions': directions, 'pools': pools, 'stalled': stalled,
-                'delegations': s.get('delegations', 0) + 1, 'review_result': None,
+                'delegations': s.get('delegations', 0) + 1, 'review_result': None, 'feedback_pending': False,
                 'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
                 'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []),
                 'results': (s.get('results', []) + [{'source': effective, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(after-before), 'candidates': summaries, 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
@@ -399,7 +444,15 @@ def run(research: dict, *, history: list, on_stage=None):
 
     def make_report(s):
         result = report_graph.invoke(s)
-        return {'content': result['content'], 'evidence': result['evidence']}
+        gaps = result.get('research_gaps', [])
+        permitted = ['paper_research'] if research['source'] in ('local', 'collection') else ['paper_research', 'web_research']
+        suggested = [g.get('route') for g in gaps if g.get('route') in permitted]
+        if gaps and not s.get('verification_attempted') and s.get('delegations', 0) < 3 and s.get('decisions', 0) < 12:
+            actions = list(dict.fromkeys(suggested)) if suggested else (permitted if any(not g.get('route') for g in gaps) else [])
+            if actions:
+                return {'verification_gaps': gaps, 'verification_attempted': True, 'feedback_pending': True, 'feedback_actions': actions}
+        return {'content': result['content'], 'evidence': result['evidence'], 'feedback_pending': False}
+
 
     graph = StateGraph(State)
     for name, fn in [('supervisor', supervisor), ('delegate', delegate), ('review', review), ('answer', answer), ('report', make_report)]: graph.add_node(name, fn)
@@ -408,7 +461,7 @@ def run(research: dict, *, history: list, on_stage=None):
     graph.add_edge('delegate', 'supervisor')
     graph.add_edge('review', 'supervisor')
     graph.add_edge('answer', END)
-    graph.add_edge('report', END)
+    graph.add_conditional_edges('report', lambda s: 'supervisor' if s.get('feedback_pending') else END)
     result = graph.compile().invoke({'research': research, 'history': [] if research['source'] == 'collection' else list(history),
         'candidates': [], 'query_results': {}, 'evidence': [], 'evidence_pool': [], 'evidence_facets': [research['query']], 'warnings': []}, {'recursion_limit': 100})
     return result['content'], result.get('evidence', [])

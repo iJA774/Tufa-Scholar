@@ -8,12 +8,12 @@
 
 | prompt ID | 输入 | 输出结构 |
 |---|---|---|
-| `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、directions | Route：action、task、answer、directions |
-| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan | Specialist：action、query、candidate_ids、plan |
+| `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、directions、verification_gaps | Route：action、task、answer、directions |
+| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan、review、results、web_blocks、verification_gaps | Specialist：action、query、candidate_ids、plan、offset、limit |
 | `literature/review` | question、directions、evidence、results | Review：sufficient、gaps、summary、coverage、next_steps |
-| `literature/synthesize` | question、history、directions、evidence、review | Draft：sections（heading、paragraphs：text、citations） |
-| `literature/verify_claim` | heading、claim、evidence | Verdict：supported |
-| `literature/revise` | question、draft、feedback、directions、evidence、review | Draft：sections（heading、paragraphs：text、citations） |
+| `literature/synthesize` | question、history、directions、evidence、review、verification_gaps | Draft：sections（heading、paragraphs：text、citations）、limitations |
+| `literature/verify_claim` | heading、claim、evidence | Verdict：status、reason、suggestion、research_query、research_route |
+| `literature/revise` | question、draft、feedback、evidence、verification_gaps | PatchSet：patches（section_index、paragraph_index、text、citations） |
 
 `src/agents/literature.py` 调用 `src/integrations/model.py` 的 `structured()`。该入口从 `src/prompts/` 按 prompt ID 读取 Markdown（如 `literature/research` 对应 `src/prompts/literature/research.md`），逐次替换时间变量，将渲染后的全文放进 system 消息，输入 JSON 单独放进 user 消息，发送至配置的 `/chat/completions`，在 system 消息中附加调用方的 Pydantic JSON Schema，保持 `json_object` 响应格式，并校验响应。结构错误最多附带安全的错误类型和字段路径重试一次；日志与反馈不包含原始模型输出。主控非法路由和研究节点无效或重复候选 ID 另有一次受限纠错。加载路径基于模块文件位置，不依赖当前工作目录。
 

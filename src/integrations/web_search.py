@@ -66,7 +66,7 @@ def _normalise(items, provider, limit, level="web_snippet"):
         if not isinstance(item, dict):
             raise ValueError("invalid response")
         url = _url(item.get("url") or item.get("href") or item.get("link"))
-        title = _text(item.get("title"))
+        title = _text(item.get("title")) or (urlsplit(url).hostname if url else "")
         if not url or not title or url in seen:
             continue
         seen.add(url)

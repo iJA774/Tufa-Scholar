@@ -42,6 +42,25 @@ class SearchFixture(ModelFixture):
         self.wfile.write(raw)
 
 
+def install_page_fixture():
+    # The real worker and HTML parser run with an in-process transport fixture.
+    import src.integrations.web_page as page
+    class FixtureResponse:
+        status = 200
+        def __init__(self): self.body = b'<html><title>Fixture</title><article><h1>Method</h1><p>Attention fixture paper uses attention to combine representations. accuracy was 92%</p></article></html>'
+        def getheader(self, name, default=None): return 'text/html; charset=utf-8' if name == 'Content-Type' else default
+        def read(self, size):
+            chunk, self.body = self.body[:size], self.body[size:]
+            return chunk
+    class FixtureConnection:
+        def __init__(self, *args): pass
+        def request(self, *args, **kwargs): pass
+        def getresponse(self): return FixtureResponse()
+        def close(self): pass
+    page._target = lambda url: (urlsplit(url), 'example.org', 443, '8.8.8.8')
+    page._PinnedHTTPS = FixtureConnection
+
+
 def main():
     provider = ThreadingHTTPServer(('127.0.0.1', 0), SearchFixture)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
@@ -54,7 +73,7 @@ def main():
             env['TUFA_DATA_DIR'] = directory
             port = int(os.environ.get('TUFA_VERIFY_API_PORT', '0')) or free_port()
             base = f'http://127.0.0.1:{port}'
-            for command in ([sys.executable, '-m', 'uvicorn', 'apps.api.main:app', '--host', '127.0.0.1', '--port', str(port)], [sys.executable, '-c', "import scripts.fixture_api; import runpy; runpy.run_module('apps.worker', run_name='__main__')"]):
+            for command in ([sys.executable, '-m', 'uvicorn', 'apps.api.main:app', '--host', '127.0.0.1', '--port', str(port)], [sys.executable, '-c', "import scripts.fixture_api; import scripts.verify_web_search as f; f.install_page_fixture(); import runpy; runpy.run_module('apps.worker', run_name='__main__')"]):
                 processes.append(subprocess.Popen(command, cwd=ROOT, env=env, stdout=sink, stderr=sink))
             try:
                 with httpx.Client(base_url=base, trust_env=False, timeout=10) as client:
@@ -96,16 +115,17 @@ def main():
                     assert '92%' in result['content'] and '30%' not in result['content']
                     evidence = result['evidence'][0]
                     assert evidence['original_url'] == 'https://example.org/research'
-                    assert evidence['provider'] == 'searx' and evidence['retrieved_at']
+                    assert evidence['source_level'] == 'web_content' and evidence['char_start'] == 0 and evidence['char_end'] > 0
+                    assert evidence['provider'] == 'web_page' and evidence['retrieved_at']
                     assert call('GET', f'/projects/{project}/papers') == []
                     csv_text = client.get(f"/reports/{result['report_id']}/evidence.csv").text.lstrip('\ufeff')
-                    assert next(csv.DictReader(io.StringIO(csv_text)))['provider'] == 'searx'
+                    assert next(csv.DictReader(io.StringIO(csv_text)))['provider'] == 'web_page'
                     assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
                     ModelFixture.requests.clear()
                     automatic = call('POST', f'/projects/{project}/questions', json={'question': '汇报一下最近七天国际大事'})
                     automatic_task = wait(automatic['run_id'])
                     assert automatic_task['status'] == 'succeeded' and automatic_task['source'] == 'auto', automatic_task
-                    assert automatic_task['result']['evidence'][0]['provider'] == 'searx'
+                    assert automatic_task['result']['evidence'][0]['provider'] == 'web_page'
                     routed = [json.loads(req['messages'][1]['content']) for req in ModelFixture.requests
                               if '你是研究主控' in req['messages'][0]['content']]
                     assert routed and routed[0]['source'] == 'auto'
@@ -116,14 +136,17 @@ def main():
                     assert cross_task['status'] == 'succeeded', cross_task
                     cross_result = cross_task['result']
                     assert all(('## ' + title) in cross_result['content'] for title in ('概述', '主题分析', '综合判断'))
-                    assert {e['source_level'] for e in cross_result['evidence']} >= {'abstract', 'web_snippet'}
-                    assert any(e.get('provider') == 'searx' and e.get('original_url') for e in cross_result['evidence'])
+                    assert {e['source_level'] for e in cross_result['evidence']} >= {'abstract', 'web_content'}
+                    assert any(e.get('provider') == 'web_page' and e.get('original_url') for e in cross_result['evidence'])
                     cross_csv = client.get(f"/reports/{cross_result['report_id']}/evidence.csv").text.lstrip('\ufeff')
                     rows = list(csv.DictReader(io.StringIO(cross_csv)))
-                    assert {row['source_level'] for row in rows} >= {'abstract', 'web_snippet'}
+                    assert {row['source_level'] for row in rows} >= {'abstract', 'web_content'}
+                    page_row = next(row for row in rows if row['source_level'] == 'web_content')
+                    assert int(page_row['char_end']) > int(page_row['char_start']) >= 0
                     markdown = client.get(f"/reports/{cross_result['report_id']}/markdown").text
                     assert all(('## ' + title) in markdown for title in ('概述', '主题分析', '综合判断'))
                     assert all('[' + e['id'] + ']' in markdown for e in cross_result['evidence'])
+                    assert '论文仅提供摘要，仍需核查原文。' in markdown
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])

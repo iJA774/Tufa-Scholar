@@ -23,7 +23,7 @@ DuckDuckGo 使用 `ddgs`，显式指定 DuckDuckGo 后端；该库可能将无�
 
 参考 [DeerFlow 搜索工具工厂](https://github.com/bytedance/deer-flow/blob/main-1.x/src/tools/search.py) 和 [引擎配置](https://github.com/bytedance/deer-flow/blob/main-1.x/src/config/tools.py)：上游根据 `SEARCH_API` 选一个搜索工具，支持上述八种引擎；上游默认是 Tavily，不意味着所有部署都免密钥。用户无需手填密钥也可能是部署端已配置，或选择了无密钥服务。
 
-上游 [研究节点](https://github.com/bytedance/deer-flow/blob/main-1.x/src/graph/nodes.py) 给研究代理提供搜索与抓取工具；[抓取工具](https://github.com/bytedance/deer-flow/blob/main-1.x/src/tools/crawl.py) 独立负责读取 URL。本项目适配其搜索引擎范围，以 LangGraph 研究子图接入，不复制整个代理框架。当前利用搜索服务提供的内容或摘要；没有新增任意 URL 抓取工具，不能把搜索摘要当作已阅读网页全文。
+上游 [研究节点](https://github.com/bytedance/deer-flow/blob/main-1.x/src/graph/nodes.py) 给研究代理提供搜索与抓取工具；[抓取工具](https://github.com/bytedance/deer-flow/blob/main-1.x/src/tools/crawl.py) 独立负责读取 URL。本项目适配其搜索引擎范围，以 LangGraph 研究子图接入，不复制整个代理框架。当前利用搜索服务提供的内容或摘要；支持读取公开网页的分页正文，但搜索摘要仍不能当作已阅读网页全文。
 
 ## 数据与执行边界
 
@@ -36,3 +36,5 @@ DuckDuckGo 使用 `ddgs`，显式指定 DuckDuckGo 后端；该库可能将无�
 - Markdown 报告、消息与 CSV 证据表保留来源信息。真实搜索覆盖面、限流、真实模型质量需另行实测；本次使用模拟服务验收。
 
 协议依据和依赖见集成代码；主要接口参考 [Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)、[SearXNG](https://docs.searxng.org/dev/search_api.html)、[arXiv](https://info.arxiv.org/help/api/user-manual.html)。
+
+网页读取按清理后的 Markdown 字符分页；读取前校验公网地址并逐跳检查重定向，HTTPS 固定连接已验证 IP 并校验原域名。HTML 优先提取 article/main，去除导航和脚本，不执行 JavaScript。正文证据带绝对字符区间；动态渲染页面和超限响应可能无法读取。
