@@ -116,6 +116,30 @@ class ReportTests(unittest.TestCase):
         graph.invoke({'research': {'source':'local','query':'q'}, 'history':[], 'evidence':[]})
         self.assertEqual(calls, ['literature/synthesize'])
 
+    def test_writer_input_echo_is_discarded_but_citations_still_checked(self):
+        raw = {'sections': [{'heading': '概述', 'paragraphs': [
+            {'text': 'supported result', 'citations': ['a1']},
+            {'text': 'invented result', 'citations': ['fake']}]}],
+            'limitations': [], 'verification_gaps': [{'query': 'input only'}]}
+        original = __import__('copy').deepcopy(raw)
+        parsed = r.Draft.model_validate(raw)
+        self.assertEqual(raw, original)
+        self.assertNotIn('verification_gaps', parsed.model_dump())
+        for extra in ({'claims': []}, {'unknown': 'x'}):
+            with self.assertRaises(ValidationError):
+                r.Draft.model_validate({**raw, **extra})
+        calls = []
+        def model(state, name, payload, schema):
+            if name.endswith('synthesize'): return schema.model_validate(raw)
+            calls.append(payload['claim'])
+            return r.Verdict(status='supported')
+        result = r.build_report_graph(model).invoke({'research': {'source': 'local', 'query': 'q'}, 'history': [], 'evidence': [{'id': 'a1', 'text': 'supported result', 'title': 'paper'}]})
+        self.assertEqual(calls, ['supported result'])
+        self.assertIn('supported result', result['content'])
+        self.assertNotIn('invented result', result['content'])
+        self.assertNotIn('input only', result['content'])
+        self.assertEqual([e['id'] for e in result['evidence']], ['a1'])
+
     def test_empty_report_and_schema(self):
         with self.assertRaises(ValidationError): r.Draft.model_validate({'claims': []})
         result = r.build_report_graph(lambda s,n,p,t: r.Draft(sections=[])).invoke({'research': {'source': 'web', 'query': 'q'}, 'history': [], 'evidence': []})

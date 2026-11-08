@@ -27,6 +27,14 @@ class Draft(BaseModel):
     sections: list[Section] = Field(max_length=6)
     limitations: list[Claim] = Field(default_factory=list, max_length=3)
 
+    @model_validator(mode='before')
+    @classmethod
+    def discard_input_echo(cls, value):
+        if isinstance(value, dict) and 'verification_gaps' in value:
+            value = dict(value)
+            value.pop('verification_gaps')
+        return value
+
     @model_validator(mode='after')
     def bounded_paragraphs(self):
         if sum(len(section.paragraphs) for section in self.sections) + len(self.limitations) > 12:

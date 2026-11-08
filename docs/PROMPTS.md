@@ -15,7 +15,7 @@
 | `literature/verify_claim` | heading、claim、evidence | Verdict：status、reason、suggestion、research_query、research_route |
 | `literature/revise` | question、draft、feedback、evidence、verification_gaps | PatchSet：patches（section_index、paragraph_index、text、citations） |
 
-`src/agents/literature.py` 调用 `src/integrations/model.py` 的 `structured()`。该入口从 `src/prompts/` 按 prompt ID 读取 Markdown（如 `literature/research` 对应 `src/prompts/literature/research.md`），逐次替换时间变量，将渲染后的全文放进 system 消息，输入 JSON 单独放进 user 消息，发送至配置的 `/chat/completions`，在 system 消息中附加调用方的 Pydantic JSON Schema，保持 `json_object` 响应格式，并校验响应。结构错误最多附带安全的错误类型和字段路径重试一次；日志与反馈不包含原始模型输出。主控非法路由和研究节点无效或重复候选 ID 另有一次受限纠错。加载路径基于模块文件位置，不依赖当前工作目录。
+`src/agents/literature.py` 调用 `src/integrations/model.py` 的 `structured()`。该入口从 `src/prompts/` 按 prompt ID 读取 Markdown（如 `literature/research` 对应 `src/prompts/literature/research.md`），逐次替换时间变量，将渲染后的全文放进 system 消息，输入 JSON 单独放进 user 消息，发送至配置的 `/chat/completions`，在 system 消息中附加调用方的 Pydantic JSON Schema，保持 `json_object` 响应格式，并校验响应。Draft 兼容丢弃模型误回显的输入字段 `verification_gaps`，其他额外字段仍拒绝。结构错误最多附带安全的错误类型和字段路径重试一次；日志与反馈不包含原始模型输出。主控非法路由和研究节点无效或重复候选 ID 另有一次受限纠错。加载路径基于模块文件位置，不依赖当前工作目录。
 
 所有提示词正文的前三行固定为：
 

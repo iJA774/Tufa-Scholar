@@ -42,6 +42,8 @@ class ModelFixture(BaseHTTPRequestHandler):
         elif '你是研究报告撰写者' in prompt:
             evidence = data['evidence']
             result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '准确率为 92%', 'citations': [evidence[0]['id']]}, {'text': '成本降低 30%', 'citations': [evidence[0]['id']]}]}] if evidence else []}
+            if data['question'] == 'accuracy and cost?':
+                result['verification_gaps'] = [{'query': 'ECHO_ONLY_PROBE', 'route': 'web_research'}]
             if 'cross-source' in data['question'] and len(evidence) >= 2:
                 paper = next(e for e in evidence if e['source_level'] == 'abstract')
                 web = next(e for e in evidence if e['source_level'] == 'web_content')
@@ -110,6 +112,11 @@ def main():
                 retry=call('POST',f"/runs/{q['run_id']}/retry")
                 completed=wait(retry['id']); assert completed['status']=='succeeded',completed
                 result=completed['result']; assert '证据不足' in result['content'] and '成本降低 30%' not in result['content']
+                assert 'ECHO_ONLY_PROBE' not in result['content'] and 'verification_gaps' not in result['content']
+                synth_requests = [req for req in ModelFixture.requests if '你是研究报告撰写者' in req['messages'][0]['content'] and json.loads(req['messages'][1]['content'])['question'] == 'accuracy and cost?']
+                assert len(synth_requests) == 1, synth_requests
+                synth_index = ModelFixture.requests.index(synth_requests[0])
+                assert not any('你是研究专家' in req['messages'][0]['content'] for req in ModelFixture.requests[synth_index + 1:])
                 evidence=result['evidence']; assert len(evidence)==1 and evidence[0]['page']==1 and evidence[0]['version_id']==paper['versions'][0]['id']
                 assert c.get(paper['versions'][0]['file_url']).content==pdf
                 report=result['report_id']; assert '92%' in c.get(f'/reports/{report}/markdown').text

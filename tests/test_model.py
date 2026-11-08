@@ -89,6 +89,11 @@ class ModelTests(unittest.TestCase):
         self.assertNotIn('secret-field-name', feedback)
         self.assertNotIn('secret-value', feedback)
         self.assertIn('extra_forbidden', feedback)
+        sent = post.call_args.kwargs['json']['messages']
+        self.assertEqual(json.loads(sent[2]['content'])['validation_feedback'], [{'type': 'extra_forbidden', 'path': ['*']}])
+        self.assertIn('隐私规则省略', sent[0]['content'])
+        self.assertIn('未声明字段', sent[0]['content'])
+        self.assertEqual(post.call_count, 2)
 
     def test_invalid_response_retries_only_once_and_http_failure_never_retries(self):
         from src.agents.literature import Route

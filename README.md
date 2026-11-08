@@ -168,6 +168,13 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 报告输入字段回显修复验收（2026-11-08）
+
+以 `.cache/report-echo-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，执行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：137 项通过，耗时 14.653 秒，日志为该目录的 `unittest.log`。在独立 `.cache/report-echo-acceptance` 数据目录下运行 `-m scripts.verify_chat` 和 `-m scripts.verify_web_search`，均以退出码 0 完成；实际 API/worker 使用模拟模型和搜索服务。
+
+两份任务 #13 失败诊断经 `scripts.replay_diagnostic.replay` 和 Draft 离线只读重放通过；比较确认只移除 `verification_gaps`，其他字段值完全相同。本轮未重新调用真实模型或搜索服务，也未修改默认数据。
+
+
 ### 网页搜索失败恢复验收（2026-11-08）
 
 以 `.cache/web-search-recovery-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，执行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：136 项通过，耗时 9.581 秒，日志位于该目录的 `unittest.log`。以 `.cache/web-search-recovery-acceptance` 同样隔离运行 `-m scripts.verify_web_search` 和 `-m scripts.verify_chat`，均以退出码 0 完成；模拟搜索和模型、实际 API/worker 验证五次空结果后 503 的自动审查及证据不足，以及显式网页失败和重试。
