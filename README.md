@@ -168,6 +168,17 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 网页搜索失败恢复验收（2026-11-08）
+
+以 `.cache/web-search-recovery-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，执行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`：136 项通过，耗时 9.581 秒，日志位于该目录的 `unittest.log`。以 `.cache/web-search-recovery-acceptance` 同样隔离运行 `-m scripts.verify_web_search` 和 `-m scripts.verify_chat`，均以退出码 0 完成；模拟搜索和模型、实际 API/worker 验证五次空结果后 503 的自动审查及证据不足，以及显式网页失败和重试。
+
+相同公开查询复测记录 `engine=duckduckgo outcome=failed category=challenge status=202`。当前 DuckDuckGo 仍要求验证，系统不会绕过验证或自动更换供应商；该独立观察不能推断任务 #12 当时各次请求的上游响应。
+
+### DuckDuckGo 独立观察（2026-11-08）
+
+公开查询 `Python official documentation` 的 HTML 请求返回 HTTP 202 及 anomaly-modal 验证标记，DDGS 将该响应报告为无结果。此次独立观察不能说明任务 #12 各次请求的上游响应；适配后的同查询复测结果见上方网页搜索失败恢复验收。
+
+
 ### 网页正文读取与报告核验验收（2026-11-08）
 
 以 `.cache/web-reader-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`：最终 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v` 共 131 项通过，耗时 9.151 秒，日志为该目录下 `unittest.log`。在独立 `.cache/web-reader-acceptance` 中，`-m scripts.verify_chat` 和 `-m scripts.verify_web_search` 均以退出码 0 完成；使用模拟搜索、HTML transport 和模型，实际 API/worker 验证解析、取证、保存、CSV 字符位置与带引用的局限。该模拟验收发生在最终 TLS 信任配置调整前，fixture 不依赖 TLS。

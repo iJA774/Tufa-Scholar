@@ -1,8 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
-from ddgs.exceptions import DDGSException
+from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
 from src.integrations.web_search import search_web
 
@@ -49,14 +50,24 @@ class WebSearchTests(unittest.TestCase):
             self.assertEqual(len(result["content"]), 4000)
             self.assertTrue(request.call_args.kwargs["json"]["include_raw_content"])
 
-    def test_duckduckgo_selects_exact_backend(self):
-        with patch("src.integrations.web_search.web_search_config", return_value=self.config("duckduckgo")), patch("src.integrations.web_search.DDGS") as client:
-            client.return_value.text.return_value = [{"title": "Title", "href": "https://example.org", "body": "body"}]
-            self.assertEqual(search_web("q")[0]["content"], "body")
-            client.assert_called_once_with(timeout=20)
-            client.return_value.text.assert_called_once_with("q", max_results=5, backend="duckduckgo")
-            client.return_value.text.side_effect = DDGSException("No results found.")
-            self.assertEqual(search_web("q"), [])
+    def test_duckduckgo_real_parser_handles_results_and_empty(self):
+        html = '<html><div class="body"><h2>Title</h2><a href="https://example.org">body</a></div></html>'
+        for body, expected in [(html, 1), ('<html><body>No results</body></html>', 0)]:
+            with self.subTest(expected=expected), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client.HttpClient.request', return_value=SimpleNamespace(status_code=200, text=body)) as request:
+                with self.assertLogs('src.integrations.web_search', level='INFO') as logs:
+                    result = search_web('private-query')
+                self.assertEqual(len(result), expected)
+                if expected: self.assertEqual((result[0]['title'], result[0]['url'], result[0]['content']), ('Title', 'https://example.org/', 'body'))
+                else: self.assertIn('outcome=empty', str(logs.output))
+                self.assertEqual(request.call_count, 1)
+
+    def test_duckduckgo_challenge_and_http_errors_are_not_empty(self):
+        for status, body, category in [(202, 'secret anomaly-modal private-query', 'challenge'), (200, '<div class="anomaly-modal">secret</div>', 'challenge'), (429, 'secret', 'rate_limit'), (503, 'secret', 'http_status')]:
+            with self.subTest(status=status), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client.HttpClient.request', return_value=SimpleNamespace(status_code=status, text=body)):
+                with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')
+                text = str(logs.output)
+                self.assertIn('category=' + category, text); self.assertIn('status=' + str(status), text)
+                self.assertNotIn('secret', text); self.assertNotIn('private-query', text); self.assertNotIn('anomaly-modal', text)
 
     def test_wikipedia_and_arxiv(self):
         search = self.response({"query": {"search": [{"title": "科学 Research", "pageid": 17, "snippet": "<span>词条</span>"}]}})
@@ -95,10 +106,51 @@ class WebSearchTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as exc:
                 search_web("q")
             self.assertNotIn("secret-key", str(exc.exception))
-        with patch("src.integrations.web_search.web_search_config", return_value=self.config("duckduckgo")), patch("src.integrations.web_search.DDGS", side_effect=RuntimeError("secret-key")):
+        with patch("src.integrations.web_search.web_search_config", return_value=self.config("duckduckgo")), patch("src.integrations.web_search._Duckduckgo", side_effect=RuntimeError("secret-key")):
             with self.assertRaises(RuntimeError) as exc:
                 search_web("q")
             self.assertNotIn("secret-key", str(exc.exception))
+
+    def test_search_logs_outcomes_and_redacts_sensitive_details(self):
+        row = {'title': 'title', 'url': 'https://example.com', 'content': 'body'}
+        with patch('src.integrations.web_search.web_search_config', return_value=self.config('tavily')), patch('src.integrations.web_search.httpx.request', side_effect=[self.response({'results': [row]}), self.response({'results': []})]):
+            with self.assertLogs('src.integrations.web_search', level='INFO') as logs:
+                self.assertEqual(len(search_web('private-query')), 1)
+                self.assertEqual(search_web('private-query'), [])
+        self.assertIn('outcome=success result_count=1', logs.output[0])
+        self.assertIn('outcome=empty result_count=0', logs.output[1])
+        self.assertTrue(all('elapsed_ms=' in line and 'engine=tavily' in line for line in logs.output))
+        self.assertNotIn('private-query', str(logs.output))
+        self.assertNotIn('secret-key', str(logs.output))
+        self.assertNotIn('https://', str(logs.output))
+
+    def test_search_failure_categories_are_safe(self):
+        request = httpx.Request('GET', 'https://secret-url.invalid/private-query')
+        cases = [
+            (self.response({}, 503), 'http_status', 'status=503'),
+            (httpx.ConnectTimeout('secret-key private-query', request=request), 'timeout', None),
+            (httpx.ConnectError('secret-key private-query', request=request), 'network', None),
+            (self.response({'error': 'secret-key'}), 'invalid_response', None),
+        ]
+        for response, category, status in cases:
+            with self.subTest(category=category), patch('src.integrations.web_search.web_search_config', return_value=self.config('tavily')), patch('src.integrations.web_search.httpx.request') as request_mock:
+                if isinstance(response, Exception): request_mock.side_effect = response
+                else: request_mock.return_value = response
+                with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')
+                text = ' '.join(logs.output)
+                self.assertIn('category=' + category, text)
+                if status: self.assertIn(status, text)
+                for value in ('secret-key', 'private-query', 'secret-url', 'https://'): self.assertNotIn(value, text)
+        for exc, category in [(TimeoutException('secret-key'), 'timeout'), (RatelimitException('secret-key'), 'rate_limit'), (DDGSException('secret-key'), 'provider_error')]:
+            with self.subTest(category=category), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('src.integrations.web_search._Duckduckgo', side_effect=exc):
+                with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')
+                self.assertIn('category=' + category, str(logs.output))
+                self.assertNotIn('secret-key', str(logs.output))
+        for config, category in [(self.config('serper', api_key=''), 'missing_key'), (self.config('private-secret-engine'), 'configuration')]:
+            with patch('src.integrations.web_search.web_search_config', return_value=config):
+                with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')
+                self.assertIn('category=' + category, str(logs.output))
+                self.assertNotIn('private-secret-engine', str(logs.output))
 
     def test_no_key_invalid_config_and_redirect(self):
         with patch("src.integrations.web_search.web_search_config", return_value=self.config("serper", api_key="")), patch("src.integrations.web_search.httpx.request") as request:

@@ -53,6 +53,7 @@ class State(TypedDict, total=False):
     choice: object
     tool_calls: int
     recent_result: str
+    search_status: str
     delegations: int
     review_result: object
     results: list
@@ -80,6 +81,7 @@ def search(s):
     warnings = list(s.get('warnings', []))
     queries = [' '.join(s['queries'])] if research['source'] == 'collection' else s['queries']
     succeeded = False
+    returned_rows = 0
     for query in queries:
         key = query.strip().casefold()
         try:
@@ -91,6 +93,7 @@ def search(s):
                 warnings.extend(result.get('warnings', []))
                 results = result['results']
             succeeded = True
+            returned_rows += len(results)
         except RuntimeError:
             if research['source'] != 'web':
                 raise
@@ -103,9 +106,10 @@ def search(s):
                 rank = position
             entries.append({'paper': paper, 'rank': rank})
     candidates = rank_candidates(query_results, research['source'])
-    if research['source'] == 'web' and not succeeded and not candidates:
+    if research['source'] == 'web' and not succeeded and not query_results and not candidates:
         raise RuntimeError('网页检索失败，无法获取证据，请检查搜索设置或稍后重试。')
-    return {'candidates': candidates, 'papers': candidates[:6], 'query_results': query_results, 'warnings': warnings}
+    return {'candidates': candidates, 'papers': candidates[:6], 'query_results': query_results, 'warnings': warnings,
+            'search_status': 'failed' if not succeeded else ('results' if returned_rows else 'empty')}
 
 
 def _evidence_signature(entry):
@@ -273,7 +277,7 @@ def _research_graph(kind, on_stage):
         payload = {
             'task': s['task'], 'verification_gaps': s.get('verification_gaps', []), 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url')} for key, p in views[:20]],
-            'candidate_count': len(views), 'recent_result': s.get('recent_result', ''),
+            'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
             'evidence': _summary_evidence(s), 'calls_remaining': 6 - s.get('tool_calls', 0),
         }
@@ -302,7 +306,9 @@ def _research_graph(kind, on_stage):
                 update = search({**s, 'queries': [choice.query]})
             except RuntimeError as exc:
                 raise ResearchToolFailure() from exc
-            result = f"检索到 {len(update['candidates'])} 个累计候选"
+            status = update['search_status']
+            result = ('本次网页检索失败；保留此前结果' if status == 'failed' else
+                      '本次检索成功但没有返回结果；仍可使用此前候选' if status == 'empty' else f"检索到 {len(update['candidates'])} 个累计候选")
         elif choice.action == 'read_web_page':
             if on_stage: on_stage('searching_web')
             mapping = dict(_candidate_views(s)[0])
@@ -347,7 +353,7 @@ def _research_graph(kind, on_stage):
     graph.add_node('invoke', invoke)
     graph.add_edge(START, 'decide')
     graph.add_conditional_edges('decide', lambda s: END if s['choice'].action == 'finish' or s.get('tool_calls', 0) >= 6 else 'invoke')
-    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= 6 else 'decide')
+    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= 6 or (s.get('search_status') == 'failed' and not s.get('candidates')) else 'decide')
     return graph.compile()
 
 
@@ -410,13 +416,13 @@ def run(research: dict, *, history: list, on_stage=None):
         scoped_research = {**research, 'source': effective}
         directions = list(dict.fromkeys(s.get('directions', []) + s['route'].directions))
         input_state = {**s, **prior, 'research': scoped_research, 'directions': directions,
-                       'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'plan': []}
+                       'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'plan': []}
         try:
             result = (web_graph if action == 'web_research' else paper_graph).invoke(input_state)
         except ResearchToolFailure as exc:
-            if not before or not s.get('results') or (s['results'][-1]['source'] == effective and not s.get('feedback_pending')):
+            if not before and not (research['source'] == 'auto' and effective == 'web'):
                 raise exc.__cause__ from None
-            result = {**input_state, 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
+            result = {**input_state, 'tool_calls': 1, 'search_status': 'failed', 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
         pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {})]}
         after = {_evidence_signature(e) for e in result.get('evidence_pool', [])}
         stalled = list(s.get('stalled', []))
@@ -429,7 +435,7 @@ def run(research: dict, *, history: list, on_stage=None):
                 'delegations': s.get('delegations', 0) + 1, 'review_result': None, 'feedback_pending': False,
                 'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
                 'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []),
-                'results': (s.get('results', []) + [{'source': effective, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(after-before), 'candidates': summaries, 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
+                'results': (s.get('results', []) + [{'source': effective, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(after-before), 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
 
     def review(s):
         if on_stage: on_stage('assessing')

@@ -174,6 +174,16 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(evidence[0]['source_level'], 'web_snippet')
         self.assertNotIn('private error', content)
 
+    def test_empty_search_preserves_candidates_and_reports_current_status(self):
+        page = result('https://example.com')
+        with patch.object(w.registry, 'invoke', side_effect=[[page], []]):
+            first = w.search({'research': TASK, 'queries': ['first']})
+            second = w.search({'research': TASK, 'queries': ['next'], **first})
+        self.assertEqual(first['search_status'], 'results')
+        self.assertEqual(second['search_status'], 'empty')
+        self.assertEqual(second['candidates'][0]['url'], page['url'])
+        self.assertIn('next', second['query_results'])
+
     def test_search_retains_url_without_snippet(self):
         with patch.object(w.registry, 'invoke', return_value=[result('https://example.com', content='')]):
             found = w.search({'research': TASK, 'queries': ['topic']})
@@ -186,6 +196,33 @@ class WebWorkflowTests(unittest.TestCase):
         with patch.object(w, 'record_failure', return_value='test'), patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke') as invoke:
             with self.assertRaises(ValueError): w.run({**TASK, 'source': 'local'}, history=[])
         invoke.assert_not_called()
+
+    def test_auto_web_empty_then_failure_and_total_failure_can_switch_to_paper(self):
+        for preceding_empty in (5, 0):
+            with self.subTest(preceding_empty=preceding_empty):
+                calls, reviews = [], []
+                def model(name, payload, schema):
+                    if name == 'runtime/route':
+                        calls.append(payload)
+                        if not payload['results']: return w.Route(action='web_research', task='topic', directions=['topic'])
+                        if len(payload['results']) == 1: return w.Route(action='paper_research', task='topic', directions=['topic'])
+                        return w.Route(action='report')
+                    if name == 'literature/research':
+                        return w.Specialist(action='search', query='topic', plan=['search']) if payload['role'] == 'web' else w.Specialist(action='finish', plan=['finish'])
+                    if name == 'literature/review':
+                        reviews.append(payload)
+                        return w.Review(sufficient=False, summary='missing', next_steps=[w.NextStep(direction='topic', goal='查找论文', route='paper_research')] if len(reviews) == 1 else [])
+                    if name in ('literature/synthesize', 'literature/revise'): return w.Draft(sections=[])
+                    raise AssertionError(name)
+                with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', side_effect=[[]] * preceding_empty + [RuntimeError('private')]) as search:
+                    content, evidence = w.run({**TASK, 'source': 'auto'}, history=[])
+                self.assertEqual(search.call_count, preceding_empty + 1)
+                self.assertEqual(reviews[0]['results'][0]['search_status'], 'failed')
+                self.assertEqual(reviews[0]['results'][0]['source'], 'web')
+                self.assertIn('paper_research', calls[1]['available_actions'])
+                self.assertIn('证据不足', content)
+                self.assertNotIn('private', content)
+                self.assertEqual(evidence, [])
 
     def test_web_direct_is_rejected_before_tool_call(self):
         with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:

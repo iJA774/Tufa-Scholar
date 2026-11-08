@@ -17,7 +17,7 @@
 
 `SEARCH_API` 指定引擎，取值为 `duckduckgo`、`tavily`、`infoquest`、`brave_search`、`serper`、`arxiv`、`searx`、`wikipedia`。环境变量优先于本机设置，界面显示其来源。密钥分别保存，不因切换引擎复用其他服务的密钥；空白保留已存值，清除只删除本机值。Searx 不附带公共实例，也不自动部署实例。免密钥不代表不受限流、网络或服务策略影响。
 
-DuckDuckGo 使用 `ddgs`，显式指定 DuckDuckGo 后端；该库可能将无法解析的成功响应报告为无结果，界面无法完全区分此情况与真正的空搜索。遇到空结果可更换关键词或搜索引擎。
+DuckDuckGo 显式使用 HTML 搜索后端。HTTP 202 或带验证标记的响应按验证挑战失败处理，不当作成功空结果；正常成功但无结果仍为空。遇到验证挑战可稍后重试或更换搜索引擎。
 
 ## 与 DeerFlow 1.x 的关系
 
@@ -38,3 +38,7 @@ DuckDuckGo 使用 `ddgs`，显式指定 DuckDuckGo 后端；该库可能将无�
 协议依据和依赖见集成代码；主要接口参考 [Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)、[SearXNG](https://docs.searxng.org/dev/search_api.html)、[arXiv](https://info.arxiv.org/help/api/user-manual.html)。
 
 网页读取按清理后的 Markdown 字符分页；读取前校验公网地址并逐跳检查重定向，HTTPS 固定连接已验证 IP 并校验原域名。HTML 优先提取 article/main，去除导航和脚本，不执行 JavaScript。正文证据带绝对字符区间；动态渲染页面和超限响应可能无法读取。
+
+网页搜索日志记录安全的引擎、结果数、耗时和错误类别；不记录查询、URL、上游异常正文或密钥。成功空结果与失败分开记录；先前已有成功空结果而后续失败时，研究流程保留结果并提示不完整。`auto` 可转交审查，显式网页从未成功且无证据时返回可重试错误。
+
+2026-11-08 的独立公开查询 `Python official documentation` 曾返回 HTTP 202 和 anomaly-modal 验证标记，DDGS 将该响应报告为无结果；该观察不能反推任务 #12 每次请求的上游响应。适配后同查询复测记录为 `failed`、`challenge`、HTTP 202；DuckDuckGo 仍要求验证，系统不会绕过挑战或自动更换供应商。

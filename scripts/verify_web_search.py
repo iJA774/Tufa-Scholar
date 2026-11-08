@@ -20,6 +20,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SearchFixture(ModelFixture):
     fail_search = False
+    empty_failure_searches = 0
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers['Content-Length']))
+        req = json.loads(body)
+        prompt = req['messages'][0]['content']
+        data = json.loads(req['messages'][1]['content'])
+        result = None
+        if '你是研究主控' in prompt and 'empty-then-fail' in data.get('question', ''):
+            result = {'action': 'web_research', 'task': 'empty-then-fail', 'directions': ['研究']} if not data['results'] else {'action': 'report'}
+        elif '你是研究专家' in prompt and 'empty-then-fail' in data.get('task', ''):
+            SearchFixture.empty_failure_searches += 1
+            query = 'failure' if SearchFixture.empty_failure_searches == 6 else 'empty'
+            result = {'action': 'search', 'query': query, 'plan': ['检索']}
+        elif '你是无工具研究审查者' in prompt and 'empty-then-fail' in data.get('question', ''):
+            result = {'sufficient': False, 'gaps': ['未获得网页证据'], 'summary': '检索未完成', 'coverage': [], 'next_steps': []}
+        if result is None:
+            self.rfile = io.BytesIO(body)
+            return super().do_POST()
+        ModelFixture.requests.append(req)
+        raw = json.dumps({'choices': [{'message': {'content': json.dumps(result, ensure_ascii=False)}}]}).encode()
+        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
     def do_GET(self):
         url = urlsplit(self.path)
         if url.path == '/search':
@@ -147,6 +170,14 @@ def main():
                     assert all(('## ' + title) in markdown for title in ('概述', '主题分析', '综合判断'))
                     assert all('[' + e['id'] + ']' in markdown for e in cross_result['evidence'])
                     assert '论文仅提供摘要，仍需核查原文。' in markdown
+                    SearchFixture.empty_failure_searches = 0
+                    mixed = call('POST', f'/projects/{project}/questions', json={'question': 'empty-then-fail', 'source': 'auto'})
+                    mixed_task = wait(mixed['run_id'])
+                    assert mixed_task['status'] == 'succeeded', mixed_task
+                    assert SearchFixture.empty_failure_searches == 6
+                    assert not mixed_task['result']['evidence']
+                    assert '证据不足' in mixed_task['result']['content']
+                    assert '失败' in mixed_task['result']['content'] and '不完整' in mixed_task['result']['content']
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])

@@ -1,16 +1,20 @@
 """Direct, bounded adapters for the configured web search provider."""
 from datetime import datetime, timezone
+import logging
+import time
 from html import unescape
 import re
 from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import httpx
-from ddgs import DDGS
-from ddgs.exceptions import DDGSException
+from ddgs.engines.duckduckgo import Duckduckgo
+from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
 from src.infrastructure.settings import web_search_config
 
+logger = logging.getLogger(__name__)
+_ENGINES = frozenset({'duckduckgo', 'tavily', 'infoquest', 'brave_search', 'serper', 'arxiv', 'searx', 'wikipedia'})
 _TIMEOUT = 20
 _MAX_CONTENT = 4000
 _HEADERS = {"Accept": "application/json", "User-Agent": "Tufa-Scholar/0.1"}
@@ -122,33 +126,54 @@ class _ConfigError(Exception):
     pass
 
 
+class _DuckduckgoStatus(Exception):
+    def __init__(self, category, status):
+        self.category = category
+        self.status = status
+
+
+class _Duckduckgo(Duckduckgo):
+    def request(self, *args, **kwargs):
+        response = self.http_client.request(*args, **kwargs)
+        status = response.status_code
+        if status != 200:
+            raise _DuckduckgoStatus('challenge' if status == 202 else 'rate_limit' if status == 429 else 'http_status', status)
+        body = response.text
+        if 'anomaly-modal' in body.lower():
+            raise _DuckduckgoStatus('challenge', status)
+        return body
+
+
 def search_web(query: str, limit: int = 5) -> list[dict]:
     """Search one configured provider; failures never expose upstream bodies or credentials."""
+    started = time.monotonic()
+    def failure(engine, category, status=None):
+        logger.warning('web_search engine=%s outcome=failed category=%s elapsed_ms=%d status=%s', engine, category, int((time.monotonic() - started) * 1000), status if status is not None else '-')
+
     if not isinstance(query, str) or not query.strip():
+        failure('unknown', 'invalid_input')
         raise ValueError("搜索内容不能为空")
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        failure('unknown', 'invalid_input')
         raise ValueError("搜索数量必须是正整数")
     limit = min(limit, 20)
     try:
         config = web_search_config()
     except Exception:
+        failure('unknown', 'configuration')
         raise RuntimeError("网络搜索配置无效") from None
     engine = config.get("engine") or "duckduckgo"
     key = config.get("api_key") or ""
-    if engine not in {"duckduckgo", "tavily", "infoquest", "brave_search", "serper", "arxiv", "searx", "wikipedia"}:
+    if not isinstance(engine, str) or engine not in _ENGINES:
+        failure('unknown', 'configuration')
         raise RuntimeError("不支持的网络搜索服务")
     if engine in {"tavily", "infoquest", "brave_search", "serper"} and not key:
+        failure(engine, 'missing_key')
         raise RuntimeError("网络搜索服务缺少 API 密钥")
     try:
         if engine == "duckduckgo":
-            try:
-                items = DDGS(timeout=_TIMEOUT).text(query, max_results=limit, backend="duckduckgo")
-            except DDGSException as exc:
-                # ddgs emits this sentinel only when no backend exception was reported.
-                if exc.args == ("No results found.",):
-                    items = []
-                else:
-                    raise
+            found = _Duckduckgo(timeout=_TIMEOUT).search(query) or []
+            items = [{'title': item.title, 'href': item.href, 'body': item.body} for item in found]
         elif engine == "tavily":
             data = _request("POST", "https://api.tavily.com/search", headers={"Authorization": f"Bearer {key}"},
                             json={"query": query, "max_results": limit, "include_raw_content": True}).json()
@@ -195,8 +220,25 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
                     if not isinstance(page, dict):
                         raise ValueError("invalid response")
                     item["extract"] = page.get("extract")
-        return _normalise(items, engine, limit, "abstract" if engine == "arxiv" else "web_snippet")
+        results = _normalise(items, engine, limit, "abstract" if engine == "arxiv" else "web_snippet")
+        logger.info('web_search engine=%s outcome=%s result_count=%d elapsed_ms=%d', engine, 'success' if results else 'empty', len(results), int((time.monotonic() - started) * 1000))
+        return results
     except _ConfigError as exc:
+        failure(engine, 'configuration')
         raise RuntimeError(str(exc)) from None
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, _DuckduckgoStatus):
+            failure(engine, exc.category, exc.status)
+        elif isinstance(exc, httpx.HTTPStatusError):
+            failure(engine, 'http_status', exc.response.status_code)
+        elif isinstance(exc, (httpx.TimeoutException, TimeoutException, TimeoutError)):
+            failure(engine, 'timeout')
+        elif isinstance(exc, httpx.RequestError):
+            failure(engine, 'network')
+        elif isinstance(exc, RatelimitException):
+            failure(engine, 'rate_limit')
+        elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError, ElementTree.ParseError)):
+            failure(engine, 'invalid_response')
+        else:
+            failure(engine, 'provider_error')
         raise RuntimeError("网络搜索失败；请检查服务配置、网络或稍后重试") from None
