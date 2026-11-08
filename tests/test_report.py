@@ -24,6 +24,44 @@ class ReportTests(unittest.TestCase):
         self.assertIn('搜索摘要', result['content']); self.assertIn('https://example.org', result['content'])
         self.assertEqual(result['evidence'], evidence)
 
+    def test_partial_lists_scoped_sources_without_claims(self):
+        from types import SimpleNamespace
+        ev = [{'id': 'a', 'paper_id': 3, 'title': 'chosen', 'text': 'unverified claim'}, {'id': 'b', 'paper_id': 4, 'title': 'outside', 'text': 'other'}]
+        review = SimpleNamespace(coverage=['已查 <b>主题</b>'], gaps=['缺口 [链接](https://example.com)'])
+        result = r.render_partial({'research': {'source': 'collection', 'paper_ids': [3]}, 'evidence': ev, 'review_result': review}, '预算已耗尽')
+        self.assertIn('# 阶段性研究结果', result['content'])
+        self.assertIn('预算已耗尽', result['content'])
+        self.assertIn('已核查方向', result['content']); self.assertIn('未覆盖方向', result['content'])
+        self.assertNotIn('unverified claim', result['content']); self.assertNotIn('outside', result['content'])
+        self.assertNotIn('<b>', result['content']); self.assertEqual(result['evidence'], ev[:1])
+
+    def test_no_supported_conclusions_keeps_sources_and_missing_direction(self):
+        from types import SimpleNamespace
+        evidence = [{'id': 'a', 'title': 'paper', 'text': 'unverified claim'}]
+        draft = r.Draft(sections=[r.Section(heading='概述', paragraphs=[r.Claim(text='unverified claim', citations=['a'])])])
+        state = {'research': {'source': 'local'}, 'evidence': evidence, 'review_result': SimpleNamespace(sufficient=True, gaps=[], coverage=[], next_steps=[]),
+                 'draft': draft, 'accepted': [], 'research_gaps': [{'query': 'missing topic'}], 'outcomes': [{'status': 'missing_evidence'}]}
+        result = r.render(state)
+        self.assertIn('# 阶段性研究结果', result['content'])
+        self.assertIn('missing topic', result['content'])
+        self.assertNotIn('unverified claim', result['content'])
+        self.assertEqual(result['evidence'], evidence)
+        self.assertEqual(result['research_gaps'], state['research_gaps'])
+
+    def test_formal_report_ignores_optional_next_steps(self):
+        from types import SimpleNamespace
+        evidence = [{'id': 'a', 'title': 'paper', 'text': 'supported'}]
+        review = SimpleNamespace(sufficient=True, gaps=[], next_steps=[SimpleNamespace(direction='可选研究')])
+        draft = r.Draft(sections=[r.Section(heading='概述', paragraphs=[r.Claim(text='supported', citations=['a'])])])
+        state = {'research': {'source': 'local'}, 'evidence': evidence, 'review_result': review, 'draft': draft, 'accepted': [(0, 0)]}
+        result = r.render(state)
+        self.assertTrue(result['content'].startswith('# 研究报告'))
+        self.assertNotIn('待查方向', result['content'])
+        state['research_gaps'] = [{'query': '未解决'}]
+        partial = r.render(state)
+        self.assertTrue(partial['content'].startswith('# 阶段性研究结果'))
+        self.assertIn('supported', partial['content'])
+
     def test_revision_preserves_evidence_and_excludes_unsupported(self):
         evidence = [{'id': 'a1', 'text': 'accuracy 92%', 'title': 'paper', 'source_level': 'abstract'}]
         seen = []
@@ -192,4 +230,4 @@ class ReportTests(unittest.TestCase):
     def test_empty_report_and_schema(self):
         with self.assertRaises(ValidationError): r.Draft.model_validate({'claims': []})
         result = r.build_report_graph(lambda s,n,p,t: r.Draft(sections=[])).invoke({'research': {'source': 'web', 'query': 'q'}, 'history': [], 'evidence': []})
-        self.assertIn('研究报告', result['content']); self.assertIn('证据不足', result['content']); self.assertEqual(result['evidence'], [])
+        self.assertIn('阶段性研究结果', result['content']); self.assertIn('证据不足', result['content']); self.assertEqual(result['evidence'], [])

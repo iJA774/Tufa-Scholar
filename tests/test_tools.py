@@ -85,8 +85,35 @@ class ResearchToolsTests(unittest.TestCase):
     @patch('src.literature.evidence.repository.project_evidence', return_value=[])
     def test_external_candidate_cannot_claim_project_paper_id(self, evidence):
         context = ToolContext(1, 'all')
-        result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [{'id': 99, 'title': 'external', 'abstract': 'text'}]}, context=context)
+        result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [{'id': 99, 'title': 'external topic', 'abstract': 'topic text'}]}, context=context)
         self.assertIsNone(result[0]['paper_id'])
+
+    def test_relevance_excludes_generic_terms_and_substring_matches(self):
+        from src.literature.keywords import relevance_terms, relevance_score
+        self.assertEqual(relevance_terms('please research the latest paper'), [])
+        self.assertEqual(relevance_terms('请总结最新研究论文'), [])
+        self.assertEqual(relevance_score(relevance_terms('AI'), 'paid research'), 0)
+        self.assertGreater(relevance_score(relevance_terms('AI'), 'AI research'), 0)
+        self.assertGreater(relevance_score(relevance_terms('AI'), 'AI模型'), 0)
+        self.assertEqual(relevance_score(relevance_terms('AI'), 'paid ai_model'), 0)
+        self.assertGreater(relevance_score(relevance_terms('GPT4'), 'GPT4 模型'), 0)
+
+    @patch('src.literature.evidence.repository.project_evidence', return_value=[])
+    def test_external_abstract_requires_concrete_match_and_supports_search_terms(self, evidence):
+        context = ToolContext(1, 'all')
+        papers = [{'title': 'Deep sea currents', 'abstract': 'Ocean flow observations'},
+                  {'title': 'Transformer efficiency', 'abstract': 'Efficient attention method'}]
+        self.assertEqual(self.registry.invoke('collect_evidence', {'query': '请总结最新研究论文', 'papers': papers}, context=context), [])
+        self.assertEqual(self.registry.invoke('collect_evidence', {'query': '2024 1234', 'papers': [{'title': '2024 1234', 'abstract': 'unrelated'}]}, context=context), [])
+        result = self.registry.invoke('collect_evidence', {'query': '模型效率', 'relevance_queries': ['transformer efficiency'], 'papers': papers}, context=context)
+        self.assertEqual([item['title'] for item in result], ['Transformer efficiency'])
+        self.assertIsNone(result[0]['paper_id'])
+        long_question = ' '.join(f'unique{i}' for i in range(140))
+        result = self.registry.invoke('collect_evidence', {'query': long_question, 'relevance_queries': ['transformer'], 'papers': papers}, context=context)
+        self.assertEqual([item['title'] for item in result], ['Transformer efficiency'])
+        for invalid in ([''], ['x' * 1001], ['q'] * 9):
+            with self.assertRaises(ValueError):
+                self.registry.invoke('collect_evidence', {'query': 'topic', 'relevance_queries': invalid, 'papers': papers}, context=context)
 
     @patch('src.tools.search.search_web')
     def test_web_search_and_evidence_independently(self, search):

@@ -11,7 +11,7 @@ from src.integrations.model import structured
 from src.infrastructure.diagnostics import record_failure
 from src.tools import ToolContext, ToolRegistry
 from src.literature.retrieval import rank_candidates
-from src.literature.keywords import query_terms
+from src.literature.keywords import relevance_terms, relevance_score
 
 logger = logging.getLogger('tufa.agent')
 registry = ToolRegistry()
@@ -21,20 +21,24 @@ def _context(research):
     return ToolContext(research["project_id"], research["source"], tuple(research.get("paper_ids") or ()))
 
 
-from src.agents.report import Claim, Draft, Section, Verdict, build_report_graph, verify as _report_verify, render as _report_render
+from src.agents.report import Claim, Draft, Section, Verdict, build_report_graph, render_partial, verify as _report_verify, render as _report_render
 
 class State(TypedDict, total=False):
     research: dict
     effective_source: str
     directions: list
     pools: dict
-    stalled: list
+    attempted_plans: list
+    excluded_evidence_ids: list
+    read_ids: list
+    executed_queries: list
     plan: list
     web_blocks: dict
     verification_gaps: list
     verification_attempted: bool
     feedback_pending: bool
     feedback_actions: list
+    feedback_goal: str
     history: list
     queries: list
     evidence_query: str
@@ -59,7 +63,6 @@ class State(TypedDict, total=False):
     results: list
     route: object
     decisions: int
-    forced: bool
     forced_reason: str
     verified_content: str
     verified_evidence: list
@@ -126,9 +129,9 @@ EVIDENCE_TEXT_LIMIT = 21600
 
 
 def _select_evidence(pool, facets):
-    terms = [query_terms(facet) for facet in facets]
+    terms = [relevance_terms(facet) for facet in facets]
     texts = [(entry.get('title', '') + ' ' + entry.get('text', '')).casefold() for entry in pool]
-    scores = [[sum(term in text for term in facet) for text in texts] for facet in terms]
+    scores = [[relevance_score(facet, text) for text in texts] for facet in terms]
     selected = []
     size = 0
 
@@ -147,14 +150,31 @@ def _select_evidence(pool, facets):
             if index in selected:
                 break
     for index in sorted(range(len(pool)), key=lambda i: (-sum(row[i] for row in scores), i)):
-        add(index)
+        if sum(row[index] for row in scores) > 0:
+            add(index)
     return [pool[index] for index in selected]
+
+
+
+def _plan_signature(route, goal):
+    return (route, ' '.join(goal.casefold().split()))
+
+
+def _allowed_routes(source):
+    return ['paper_research'] if source in ('local', 'collection') else ['paper_research', 'web_research']
+
+
+def _relevance_queries(question, query, executed):
+    # Reserve space for both actual searches and an original-question excerpt.
+    searches = list(dict.fromkeys(value.strip() for value in reversed(executed) if value.strip()))[:4]
+    parts = [question[i:i+1000].strip() for i in range(0, len(question), 1000)]
+    return list(dict.fromkeys(searches + [part for part in parts if part]))[:8]
 
 
 def evidence(s):
     query = s.get('evidence_query') or s['research']['query']
     found = registry.invoke(
-        'collect_evidence', {'query': query, 'papers': s['papers']}, context=_context(s['research'])
+        'collect_evidence', {'query': query, 'papers': s['papers'], 'relevance_queries': _relevance_queries(s['research']['query'], query, s.get('executed_queries', []))}, context=_context(s['research'])
     )
     pool = list(s.get('evidence_pool', []))
     signatures = {_evidence_signature(item) for item in pool}
@@ -177,7 +197,9 @@ def evidence(s):
     facets = list(s.get('evidence_facets', [s['research']['query']]))
     if query.strip() and query.strip().casefold() not in {q.strip().casefold() for q in facets}:
         facets.append(query)
-    return {'evidence': _select_evidence(pool, facets), 'evidence_pool': pool,
+    facets = list(dict.fromkeys(facets + s.get('executed_queries', [])))
+    excluded = set(s.get('excluded_evidence_ids', []))
+    return {'evidence': _select_evidence([item for item in pool if item['id'] not in excluded], facets), 'evidence_pool': pool,
             'evidence_facets': facets, 'new_evidence': new_evidence}
 
 
@@ -187,7 +209,7 @@ def verify(s):
 
 
 class Route(BaseModel):
-    action: Literal['direct', 'paper_research', 'web_research', 'review', 'report']
+    action: Literal['direct', 'paper_research', 'web_research', 'review', 'report', 'partial']
     task: str = Field(default='', max_length=1000)
     answer: str = Field(default='', max_length=12000)
     directions: list[str] = Field(default_factory=list, max_length=5)
@@ -236,6 +258,7 @@ class Review(BaseModel):
     summary: str = Field(max_length=2000)
     coverage: list[str] = Field(default_factory=list, max_length=10)
     next_steps: list[NextStep] = Field(default_factory=list, max_length=6)
+    irrelevant_evidence_ids: list[str] = Field(default_factory=list, max_length=18)
 
     @model_validator(mode='after')
     def validate_gaps(self):
@@ -276,7 +299,7 @@ def _research_graph(kind, on_stage):
         tools = [tool for tool in registry.list_tools(_context(s['research'])) if tool['name'] in allowed]
         payload = {
             'task': s['task'], 'verification_gaps': s.get('verification_gaps', []), 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
-            'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url')} for key, p in views[:20]],
+            'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url'), 'collected': key in s.get('read_ids', []), 'next_offset': (s.get('web_blocks', {}).get(key) or [{}])[-1].get('next_offset')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
             'evidence': _summary_evidence(s), 'calls_remaining': 6 - s.get('tool_calls', 0),
@@ -306,6 +329,7 @@ def _research_graph(kind, on_stage):
                 update = search({**s, 'queries': [choice.query]})
             except RuntimeError as exc:
                 raise ResearchToolFailure() from exc
+            update['executed_queries'] = list(dict.fromkeys(s.get('executed_queries', []) + ([choice.query] if update['search_status'] != 'failed' else [])))[-7:]
             status = update['search_status']
             result = ('本次网页检索失败；保留此前结果' if status == 'failed' else
                       '本次检索成功但没有返回结果；仍可使用此前候选' if status == 'empty' else f"检索到 {len(update['candidates'])} 个累计候选")
@@ -345,6 +369,7 @@ def _research_graph(kind, on_stage):
                 extras.extend(converted[1:])
             papers.extend(extras[:6-len(papers)])
             update = evidence({**s, 'papers': papers, 'evidence_query': s['task']})
+            update['read_ids'] = list(set(s.get('read_ids', [])) | set(choice.candidate_ids))
             result = f"本次新增证据：{update['new_evidence']}"
         return {**update, 'tool_calls': s.get('tool_calls', 0) + 1, 'recent_result': result}
 
@@ -367,31 +392,38 @@ def run(research: dict, *, history: list, on_stage=None):
         if on_stage: on_stage('planning')
         count = s.get('delegations', 0)
         reviewed = s.get('review_result')
-        exhausted = count >= 3 or s.get('decisions', 0) >= 12
+        exhausted = count >= 6 or s.get('decisions', 0) >= 12
         effective = s.get('effective_source')
         source = research['source']
         if count and not reviewed:
             return {'route': Route(action='review')}
+        if count and reviewed and not s.get('feedback_pending'):
+            if reviewed.sufficient and not reviewed.gaps and s.get('evidence'):
+                return {'route': Route(action='report')}
+            permitted = _allowed_routes(source)
+            attempted = [tuple(item) for item in s.get('attempted_plans', [])]
+            def viable(step):
+                signature = _plan_signature(step.route, step.goal)
+                times = attempted.count(signature)
+                latest = next((item for item in reversed(s.get('results', [])) if _plan_signature(item.get('route', ''), item.get('task', '')) == signature), {})
+                return times == 0 or (times == 1 and latest.get('continuation_available', False))
+            steps = [step for step in reviewed.next_steps if step.route in permitted and step.goal.strip() and step.direction.strip() and viable(step)]
+            if exhausted or not steps:
+                logger.info('research_partial reason=%s delegations=%d decisions=%d attempted=%d', 'budget' if exhausted else 'no_plan', count, s.get('decisions', 0), len(attempted))
+                return {'route': Route(action='partial'), 'forced_reason': '研究预算已耗尽' if exhausted else '没有可执行的补研计划'}
+            step = steps[0]
+            return {'route': Route(action=step.route, task=step.goal, directions=[step.direction]), 'decisions': s.get('decisions', 0) + 1}
         if exhausted:
-            return {'route': Route(action='report'), 'forced': True, 'forced_reason': '研究预算已耗尽'}
+            return {'route': Route(action='partial'), 'forced_reason': '研究预算已耗尽'}
         if s.get('feedback_pending'):
-            actions = s['feedback_actions']
-        elif not count:
+            return {'route': Route(action=s['feedback_actions'][0], task=s['feedback_goal'], directions=[s['feedback_goal'][:500]]), 'decisions': s.get('decisions', 0) + 1}
+        else:
             actions = (['paper_research', 'web_research'] if source == 'auto' else
                        ['web_research'] if source == 'web' else ['paper_research'])
             if source in ('auto', 'local'): actions.append('direct')
-        else:
-            actions = (['paper_research'] if source in ('local', 'collection') else ['paper_research', 'web_research'])
-            actions = [action for action in actions if action not in s.get('stalled', [])]
-            tried = {'web_research' if item['source'] == 'web' else 'paper_research' for item in s.get('results', [])}
-            suggested = {step.route for step in reviewed.next_steps} if not reviewed.sufficient else set()
-            cross_source = [action for action in actions if action in suggested and action not in tried]
-            actions = cross_source if cross_source else actions + ['report']
-            if actions == ['report']:
-                return {'route': Route(action='report'), 'forced': True, 'forced_reason': '可用研究渠道没有新增证据'}
         payload = {'question': research['query'], 'history': s['history'], 'source': research['source'],
             'available_actions': actions, 'effective_source': effective, 'directions': s.get('directions', []), 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
-            'review': reviewed.model_dump() if reviewed else None, 'verification_gaps': s.get('verification_gaps', []), 'delegations_remaining': max(0, 3-count),
+            'review': reviewed.model_dump() if reviewed else None, 'verification_gaps': s.get('verification_gaps', []), 'delegations_remaining': max(0, 6-count),
             'decisions_remaining': max(0, 12-s.get('decisions', 0))}
         for attempt in range(2):
             route = _model(s, 'runtime/route', payload, Route)
@@ -416,31 +448,42 @@ def run(research: dict, *, history: list, on_stage=None):
         scoped_research = {**research, 'source': effective}
         directions = list(dict.fromkeys(s.get('directions', []) + s['route'].directions))
         input_state = {**s, **prior, 'research': scoped_research, 'directions': directions,
-                       'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'plan': []}
+                       'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'executed_queries': list(prior.get('executed_queries', [])), 'plan': []}
         try:
             result = (web_graph if action == 'web_research' else paper_graph).invoke(input_state)
         except ResearchToolFailure as exc:
-            if not before and not (research['source'] == 'auto' and effective == 'web'):
+            if not before and not prior.get('candidates') and not (research['source'] == 'auto' and effective == 'web'):
                 raise exc.__cause__ from None
             result = {**input_state, 'tool_calls': 1, 'search_status': 'failed', 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
-        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {})]}
-        after = {_evidence_signature(e) for e in result.get('evidence_pool', [])}
-        stalled = list(s.get('stalled', []))
-        if not (after - before):
-            if action not in stalled: stalled.append(action)
-        else:
-            stalled = []
+        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {}), ('read_ids', []), ('executed_queries', [])]}
+        facets = result.get('evidence_facets', [])
+        excluded = set(s.get('excluded_evidence_ids', []))
+        facet_terms = [relevance_terms(f) for f in facets]
+        relevant_new = [e for e in result.get('evidence_pool', []) if _evidence_signature(e) not in before and e['id'] not in excluded and any(relevance_score(terms, (e.get('title', '') + ' ' + e.get('text', '')).casefold()) > 0 for terms in facet_terms)]
+        attempted = list(s.get('attempted_plans', []))
+        signature = _plan_signature(action, s['route'].task)
+        attempted.append(signature)
+        old_keys = {item['id'] for item in prior.get('candidate_identities', [])}
+        new_keys = {item['id'] for item in result.get('candidate_identities', [])}
+        unread = max(0, len(result.get('candidate_identities', [])) - len(result.get('read_ids', [])))
+        old_offsets = {(key, block['offset']) for key, blocks in prior.get('web_blocks', {}).items() for block in blocks}
+        continuation = bool((new_keys - old_keys) - set(result.get('read_ids', []))) or any((key, block['offset']) not in old_offsets and block.get('next_offset') is not None for key, blocks in result.get('web_blocks', {}).items() for block in blocks)
         summaries = [{key: p.get(key) for key in ('title', 'doi', 'url', 'original_url', 'source_level')} for p in result.get('candidates', [])[:20]]
-        return {'effective_source': effective, 'directions': directions, 'pools': pools, 'stalled': stalled,
+        return {'effective_source': effective, 'directions': directions, 'pools': pools, 'attempted_plans': attempted,
                 'delegations': s.get('delegations', 0) + 1, 'review_result': None, 'feedback_pending': False,
                 'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
                 'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []),
-                'results': (s.get('results', []) + [{'source': effective, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(after-before), 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
+                'results': (s.get('results', []) + [{'source': effective, 'route': action, 'continuation_available': continuation, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(relevant_new), 'new_candidates': len(new_keys-old_keys), 'unread_candidates': unread, 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
 
     def review(s):
         if on_stage: on_stage('assessing')
-        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', [])}, Review)
-        return {'review_result': result}
+        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', [])}, Review)
+        allowed_ids = {item['id'] for item in s.get('evidence', [])}
+        excluded = set(s.get('excluded_evidence_ids', [])) | (set(result.irrelevant_evidence_ids) & allowed_ids)
+        working = [item for item in s.get('evidence', []) if item['id'] not in excluded]
+        if result.gaps or not working:
+            result = result.model_copy(update={'sufficient': False})
+        return {'review_result': result, 'evidence': working, 'excluded_evidence_ids': list(excluded)}
 
     def answer(s):
         if on_stage: on_stage('answering')
@@ -451,22 +494,31 @@ def run(research: dict, *, history: list, on_stage=None):
     def make_report(s):
         result = report_graph.invoke(s)
         gaps = result.get('research_gaps', [])
-        permitted = ['paper_research'] if research['source'] in ('local', 'collection') else ['paper_research', 'web_research']
-        suggested = [g.get('route') for g in gaps if g.get('route') in permitted]
-        if gaps and not s.get('verification_attempted') and s.get('delegations', 0) < 3 and s.get('decisions', 0) < 12:
-            actions = list(dict.fromkeys(suggested)) if suggested else (permitted if any(not g.get('route') for g in gaps) else [])
-            if actions:
-                return {'verification_gaps': gaps, 'verification_attempted': True, 'feedback_pending': True, 'feedback_actions': actions}
+        permitted = _allowed_routes(research['source'])
+        attempted = {tuple(item) for item in s.get('attempted_plans', [])}
+        if gaps and not s.get('verification_attempted') and s.get('delegations', 0) < 6 and s.get('decisions', 0) < 12:
+            for gap in gaps:
+                goal = (gap.get('query') or '').strip()
+                if not goal: continue
+                recommended = gap.get('route')
+                choices = [recommended] if recommended in permitted else (permitted if recommended is None else [])
+                choices = [action for action in choices if _plan_signature(action, goal) not in attempted]
+                if choices:
+                    return {'verification_gaps': gaps, 'verification_attempted': True, 'feedback_pending': True, 'feedback_actions': choices, 'feedback_goal': goal}
         return {'content': result['content'], 'evidence': result['evidence'], 'feedback_pending': False}
 
 
+    def partial(s):
+        return render_partial(s, s.get('forced_reason', '证据不足'))
+
     graph = StateGraph(State)
-    for name, fn in [('supervisor', supervisor), ('delegate', delegate), ('review', review), ('answer', answer), ('report', make_report)]: graph.add_node(name, fn)
+    for name, fn in [('partial', partial), ('supervisor', supervisor), ('delegate', delegate), ('review', review), ('answer', answer), ('report', make_report)]: graph.add_node(name, fn)
     graph.add_edge(START, 'supervisor')
-    graph.add_conditional_edges('supervisor', lambda s: {'direct': 'answer', 'paper_research': 'delegate', 'web_research': 'delegate', 'review': 'review', 'report': 'report'}[s['route'].action])
+    graph.add_conditional_edges('supervisor', lambda s: {'direct': 'answer', 'paper_research': 'delegate', 'web_research': 'delegate', 'review': 'review', 'report': 'report', 'partial': 'partial'}[s['route'].action])
     graph.add_edge('delegate', 'supervisor')
     graph.add_edge('review', 'supervisor')
     graph.add_edge('answer', END)
+    graph.add_edge('partial', END)
     graph.add_conditional_edges('report', lambda s: 'supervisor' if s.get('feedback_pending') else END)
     result = graph.compile().invoke({'research': research, 'history': [] if research['source'] == 'collection' else list(history),
         'candidates': [], 'query_results': {}, 'evidence': [], 'evidence_pool': [], 'evidence_facets': [research['query']], 'warnings': []}, {'recursion_limit': 100})

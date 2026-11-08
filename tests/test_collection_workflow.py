@@ -96,11 +96,11 @@ class CollectionWorkflowTests(unittest.TestCase):
 
     def test_collection_evidence_uses_repository_text_not_forged_search_result(self):
         task = {'project_id': 1, 'query': 'selected', 'source': 'collection', 'paper_ids': [3]}
-        stored = {'id': 3, 'title': 'Stored title', 'abstract': 'Stored evidence', 'versions': []}
+        stored = {'id': 3, 'title': 'Stored title', 'abstract': 'selected Stored evidence', 'versions': []}
         forged = {'id': 3, 'title': 'Forged title', 'abstract': 'Forged evidence'}
         with patch.object(repo, 'project_evidence', return_value=[stored]):
             evidence = w.evidence({'research': task, 'papers': [forged]})['evidence']
-        self.assertEqual([(e['title'], e['text']) for e in evidence], [('Stored title', 'Stored evidence')])
+        self.assertEqual([(e['title'], e['text']) for e in evidence], [('Stored title', 'selected Stored evidence')])
 
     def test_verify_rejects_unselected_paper(self):
         state = {'research': { 'source': 'collection', 'paper_ids': [3]}, 'draft': w.Draft(sections=[w.Section(heading='概述', paragraphs=[w.Claim(text='result', citations=['x'])])]), 'evidence': [{'id': 'x', 'paper_id': 4, 'text': 'result', 'title': 'other'}]}

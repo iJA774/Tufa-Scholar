@@ -22,3 +22,5 @@ tools 是能力目录，不是输出 action 的取值；action 只能是 search�
 区分 search_status：empty 表示请求成功但没有候选，failed 表示渠道请求失败，不得混为一谈。连续无结果应及时改写或结束研究交由审查；渠道失败时说明不完整并考虑允许的其他渠道。
 
 search_status 描述本次检索：empty 时仍可精读此前保留的候选；results 表示本次返回了结果，即使与已有候选重复。
+
+候选 collected 表示已取证，不代表已读网页正文；next_offset 有值可继续读网页。围绕明确任务搜索并实际执行查询，再针对相关材料取证。

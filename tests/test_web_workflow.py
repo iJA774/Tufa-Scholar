@@ -5,10 +5,10 @@ from src.agents import literature as w
 from src.persistence import repository
 
 
-TASK = {'project_id': 2, 'query': 'research', 'source': 'web'}
+TASK = {'project_id': 2, 'query': 'topic', 'source': 'web'}
 
 
-def result(url, level='web_snippet', content='Research found 95%.'):
+def result(url, level='web_snippet', content='Topic research found 95%.'):
     return {'title': 'Source ' + url, 'url': url, 'content': content,
             'source_level': level, 'retrieved_at': '2026-11-06T10:00:00+08:00',
             'provider': 'test', 'published_at': '2025-01-01'}
@@ -21,12 +21,13 @@ def scripted_model(*, rounds=1, queries=None, assert_excerpt=False):
     def model(name, payload, schema, **kwargs):
         if name == 'runtime/route':
             if len(payload['results']) < rounds and ('web_research' if payload['source'] == 'web' else 'paper_research') in payload['available_actions']:
-                calls['delegation'] += 1
-                calls['step'] = 0
                 action = 'web_research' if payload['source'] == 'web' and 'web_research' in payload['available_actions'] else 'paper_research'
                 return w.Route(action=action, task='research', directions=['research'])
             return w.Route(action='report')
         if name == 'literature/research':
+            if not payload['recent_result']:
+                calls['delegation'] += 1
+                calls['step'] = 0
             step = calls['step']
             calls['step'] += 1
             if step == 0:
@@ -35,6 +36,8 @@ def scripted_model(*, rounds=1, queries=None, assert_excerpt=False):
                 return w.Specialist(plan=['检索取证'], action='read', candidate_ids=[c['id'] for c in payload['candidates'][:6]])
             return w.Specialist(plan=['检索取证'], action='finish')
         if name == 'literature/review':
+            if calls['delegation'] < rounds:
+                return w.Review(sufficient=False, gaps=['需补研'], summary='审查', next_steps=[w.NextStep(direction='research', goal=f'research {calls["delegation"]}', route='web_research')])
             return w.Review(sufficient=bool(payload['evidence']), gaps=[] if payload['evidence'] else ['缺少证据'], summary='审查')
         if name == 'literature/synthesize':
             if assert_excerpt:
@@ -86,9 +89,9 @@ class WebWorkflowTests(unittest.TestCase):
         local.assert_not_called()
 
     def test_no_new_evidence_stops_and_limits_excerpt(self):
-        with patch.object(w, 'structured', side_effect=scripted_model(rounds=3, queries=['first', 'again', 'third'], assert_excerpt=True)), patch('src.tools.search.search_web', return_value=[result('https://example.com', content='a' * 2000)]) as search:
+        with patch.object(w, 'structured', side_effect=scripted_model(rounds=3, queries=['first', 'again', 'third'], assert_excerpt=True)), patch('src.tools.search.search_web', return_value=[result('https://example.com', content='topic ' + 'a' * 2000)]) as search:
             w.run(TASK, history=[])
-        self.assertEqual(search.call_count, 2)
+        self.assertEqual(search.call_count, 3)
 
     def test_all_failed_requests_fail_safely_and_can_be_retried(self):
         with patch.object(w, 'structured', side_effect=scripted_model()), patch('src.tools.search.search_web', side_effect=RuntimeError('secret')):
@@ -112,7 +115,7 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(evidence, [])
 
     def test_collection_never_searches_web(self):
-        task = {'project_id': 2, 'query': 'research', 'source': 'collection', 'paper_ids': [7]}
+        task = {'project_id': 2, 'query': 'topic', 'source': 'collection', 'paper_ids': [7]}
         paper = {'id': 7, 'title': 'Local', 'abstract': 'local text', 'versions': []}
         with patch.object(w, 'structured', side_effect=scripted_model()), patch('src.tools.search.search_web') as search, patch.object(repository, 'project_evidence', return_value=[paper]), patch.object(repository, 'local_search', return_value=[]):
             w.run(task, history=[])
@@ -140,13 +143,13 @@ class WebWorkflowTests(unittest.TestCase):
         def invoke(name, arguments, *, context):
             if name == 'read_web_page':
                 offsets.append(arguments['offset'])
-                return {'url': arguments['url'], 'title': 'page', 'markdown': 'first text' if arguments['offset'] == 0 else 'second text', 'offset': arguments['offset'], 'next_offset': 10 if arguments['offset'] == 0 else None, 'retrieved_at': '2026-11-07'}
+                return {'url': arguments['url'], 'title': 'page', 'markdown': 'topic first text' if arguments['offset'] == 0 else 'topic second text', 'offset': arguments['offset'], 'next_offset': 10 if arguments['offset'] == 0 else None, 'retrieved_at': '2026-11-07'}
             return original(name, arguments, context=context)
         with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', return_value=[result('https://example.com')]), patch.object(w.registry, 'invoke', side_effect=invoke):
             _, evidence = w.run(TASK, history=[])
         self.assertEqual(offsets, [0, 10])
         self.assertEqual(snapshots[0]['next_offset'], 10)
-        self.assertEqual({e['text'] for e in evidence}, {'first text', 'second text'})
+        self.assertEqual({e['text'] for e in evidence}, {'topic first text', 'topic second text'})
         self.assertEqual({e['char_start'] for e in evidence}, {0, 10})
 
     def test_page_failure_preserves_empty_or_available_search_snippet(self):
@@ -208,6 +211,7 @@ class WebWorkflowTests(unittest.TestCase):
                         if len(payload['results']) == 1: return w.Route(action='paper_research', task='topic', directions=['topic'])
                         return w.Route(action='report')
                     if name == 'literature/research':
+                        if payload['role'] == 'paper': calls.append({'paper_invoked': True})
                         return w.Specialist(action='search', query='topic', plan=['search']) if payload['role'] == 'web' else w.Specialist(action='finish', plan=['finish'])
                     if name == 'literature/review':
                         reviews.append(payload)
@@ -219,7 +223,7 @@ class WebWorkflowTests(unittest.TestCase):
                 self.assertEqual(search.call_count, preceding_empty + 1)
                 self.assertEqual(reviews[0]['results'][0]['search_status'], 'failed')
                 self.assertEqual(reviews[0]['results'][0]['source'], 'web')
-                self.assertIn('paper_research', calls[1]['available_actions'])
+                self.assertTrue(any(item.get('paper_invoked') for item in calls))
                 self.assertIn('证据不足', content)
                 self.assertNotIn('private', content)
                 self.assertEqual(evidence, [])

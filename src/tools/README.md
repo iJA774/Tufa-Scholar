@@ -30,7 +30,7 @@ evidence = registry.invoke(
 | `search_papers` | `query` | 含 `query`、`source`、`method`、`results`、`warnings` 的字典 | `local`、`openalex`、`all`、`collection` |
 | `search_web` | `query`、可选 `limit`（1–5，默认 5） | 网页结果列表，含 URL、文本、来源层级、引擎和获取时间 | `web` |
 | `read_web_page` | `url`、`offset`（默认 0）、`limit`（默认 1000，最大 4000） | 清理后的 Markdown 字符片段及下一偏移、最终 URL、标题和获取时间 | `web` |
-| `collect_evidence` | `query`、`papers`（最多六条检索结果） | 带原文定位或网页出处的证据列表 | 全部来源 |
+| `collect_evidence` | `query`、`papers`（最多六条检索结果）、可选 `relevance_queries`（最多八条，每条非空且不超过 1000 字符） | 带原文定位或网页出处的证据列表 | 全部来源 |
 
 `source="all"` 指项目文献与 OpenAlex，不包含网页搜索。网页调用先创建 `ToolContext(project_id=1, source="web")`，再执行 `search_web`；结果列表可直接作为 `collect_evidence` 的 `papers`。
 
@@ -44,7 +44,7 @@ evidence = registry.invoke(
 
 工具上下文由应用构造，是内部调用契约。本轮未增加面向 HTTP 的任意工具执行接口。
 
-本地与收藏夹取证从项目仓储读取正文路径、版本与元数据，传入候选不能指定任意本机文件。收藏夹候选还必须属于快照。外部论文摘要和网页片段保留各自来源层级，网页不自动进入论文库。
+本地与收藏夹取证从项目仓储读取正文路径、版本与元数据，传入候选不能指定任意本机文件。收藏夹候选还必须属于快照。外部论文摘要和网页片段保留各自来源层级，网页不自动进入论文库。外部论文摘要须与 `query` 或 `relevance_queries` 的具体词有词面重合才会生成证据；后者可传原问题和实际执行的检索词，跨语言需提供对应语言检索词。纯数字不作为主题词，带字母的技术缩写和编号可参与匹配；此检查不是语义召回，项目论文与网页取证窗口不受该门槛影响。
 
 每次取证最多处理六条候选。论文从最新有可用文本的版本读取缓存页文本，按查询选出每篇最多六个片段，每段最多 1200 字符，并保留原文版本与页码。摘要和网页片段也最多 1200 字符。页文本和取证边界见 [文献业务说明](../literature/README.md)。
 

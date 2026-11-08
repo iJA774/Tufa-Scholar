@@ -14,3 +14,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 网页正文读取可提供分块文本，需按来源和范围判断，勿将片段说成完整网页。
 
 区分 search_status：empty 表示请求成功但没有候选，failed 表示渠道请求失败，不得混为一谈。连续无结果应及时改写或结束研究交由审查；渠道失败时说明不完整并考虑允许的其他渠道。
+
+审查 evidence 与原问题的实质相关性，irrelevant_evidence_ids 只填写当前证据 ID；候选未取证、需换词或渠道失败时，在允许的 allowed_routes 内给出具体不同的 next_steps，避免 attempted_plans 已尝试目标。
+
+将 next_steps 按重要度排列，提出能推进回答的具体目标；常见局限若不妨碍回答，不应列为必需 gaps。已尝试目标若产生新未读候选或可续读正文，可建议同计划恢复一次。

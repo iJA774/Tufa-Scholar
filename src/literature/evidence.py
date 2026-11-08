@@ -4,11 +4,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pypdf import PdfReader
 
-from src.literature.keywords import query_terms
+from src.literature.keywords import query_terms, relevance_terms, relevance_score
 from src.persistence import repository
 
 
-def collect_evidence(project_id, source, paper_ids, query, papers):
+def collect_evidence(project_id, source, paper_ids, query, papers, relevance_queries=None):
     if source == 'web':
         items = papers
         found = []
@@ -49,6 +49,7 @@ def collect_evidence(project_id, source, paper_ids, query, papers):
     records = repository.project_evidence(project_id, allowed) if allowed is not None else repository.project_evidence(project_id)
     local = {p['id']: p for p in records if allowed is None or p['id'] in allowed}
     found = []
+    relevance = [relevance_terms(item) for item in [query, *(relevance_queries or [])]]
     for incoming in papers:
         record = local.get(incoming.get('id'))
         if source in {'local', 'collection'} and not record:
@@ -80,6 +81,9 @@ def collect_evidence(project_id, source, paper_ids, query, papers):
             for _, version_id, page_num, offset, text in sorted(candidates, key=lambda x: (-x[0], x[2], x[3]))[:6]:
                 suffix = f"s{offset}" if offset else ''
                 found.append({'id': f"p{p['id']}v{version_id}p{page_num}{suffix}", 'paper_id': p['id'], 'title': p['title'], 'source_level': 'full_text', 'version_id': version_id, 'page': page_num, 'text': text})
+        if not record and p.get('abstract'):
+            if not any(relevance_score(terms, p.get('title', '') + ' ' + p['abstract'][:1200]) for terms in relevance):
+                continue
         if not any(e.get('paper_id') == p.get('id') and (p.get('id') is not None or e['title'] == p['title']) for e in found) and p.get('abstract'):
             found.append({'id': f"a{len(found)+1}", 'paper_id': p.get('id'), 'title': p['title'], 'source_level': 'abstract', 'version_id': None, 'page': None, 'text': p['abstract'][:1200], 'original_url': p.get('original_url')})
     return found

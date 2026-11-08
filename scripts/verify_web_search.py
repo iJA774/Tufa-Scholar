@@ -171,12 +171,15 @@ def main():
                     assert all('[' + e['id'] + ']' in markdown for e in cross_result['evidence'])
                     assert '论文仅提供摘要，仍需核查原文。' in markdown
                     SearchFixture.empty_failure_searches = 0
+                    ModelFixture.requests.clear()
                     mixed = call('POST', f'/projects/{project}/questions', json={'question': 'empty-then-fail', 'source': 'auto'})
                     mixed_task = wait(mixed['run_id'])
                     assert mixed_task['status'] == 'succeeded', mixed_task
                     assert SearchFixture.empty_failure_searches == 6
                     assert not mixed_task['result']['evidence']
                     assert '证据不足' in mixed_task['result']['content']
+                    assert mixed_task['result']['content'].startswith('# 阶段性研究结果')
+                    assert not any('你是研究报告撰写者' in req['messages'][0]['content'] for req in ModelFixture.requests)
                     assert '失败' in mixed_task['result']['content'] and '不完整' in mixed_task['result']['content']
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})

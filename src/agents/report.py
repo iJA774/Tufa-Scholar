@@ -174,18 +174,56 @@ def _reference(e):
     return f"[{e['id']}] {e.get('title', '')} · 论文摘要" + (f" · {e['original_url']}" if e.get('original_url') else '')
 
 
+
+def _safe_direction(value):
+    value = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', str(value))
+    value = re.sub(r'https?://\S+|<[^>]*>', '', value)
+    value = re.sub(r'[`*_#\[\]\r\n]+', ' ', value)
+    return ' '.join(value.split())[:150]
+
+
+def render_partial(state, reason):
+    """Render collected sources and coverage without presenting unverified conclusions."""
+    research = state['research']
+    allowed = set(research.get('paper_ids') or []) if research['source'] == 'collection' else None
+    kept = [e for e in state.get('evidence', []) if allowed is None or e.get('paper_id') in allowed]
+    lines = ['# 阶段性研究结果', _safe_direction(reason), '审查未完成或证据不足，尚未生成核验结论。']
+    review = state.get('review_result')
+    pending = list(getattr(review, 'gaps', [])) if review else list(state.get('directions', []))
+    pending += [gap.get('query', '') for gap in state.get('research_gaps', []) if gap.get('query')]
+    if review and not getattr(review, 'sufficient', False):
+        pending += [step.direction for step in getattr(review, 'next_steps', [])]
+    for label, values in [('已核查方向', getattr(review, 'coverage', []) if review else []),
+                          ('未覆盖方向', list(dict.fromkeys(pending)))]:
+        for value in values[:5]:
+            clean = _safe_direction(value)
+            if clean: lines.append(label + '：' + clean + '。')
+    for warning, text in [('web_search_failed', '网页检索部分或全部失败，结果不完整，请稍后重试。'),
+                          ('web_page_read_failed', '网页正文读取部分失败，结果可能不完整。'),
+                          ('paper_search_failed', '论文外部检索部分失败，结果可能不完整。')]:
+        if warning in state.get('warnings', []): lines.append(text)
+    if research['source'] == 'web' and not kept and not state.get('warnings'):
+        lines.append('本次网页检索未找到可用文本证据。')
+    if kept:
+        lines.append('## 已收集资料\n' + '\n'.join(_reference(e) for e in kept))
+    else:
+        lines.append('本次没有可列出的资料。')
+    return {'content': '\n\n'.join(lines), 'evidence': kept}
+
 def render(s):
     if s.get('draft_format_failed'):
-        allowed = set(s['research'].get('paper_ids') or []) if s['research']['source'] == 'collection' else None
-        kept = [e for e in s['evidence'] if allowed is None or e.get('paper_id') in allowed]
-        lines = ['# 研究报告', '报告格式校验失败，本次仅提供已收集资料，尚未生成核验结论。']
-        if kept:
-            lines.append('## 已收集资料\n' + '\n'.join(_reference(e) for e in kept))
-        else:
-            lines.append('本次没有可列出的资料。')
-        return {'content': '\n\n'.join(lines), 'evidence': kept, 'research_gaps': []}
+        result = render_partial(s, '报告格式校验失败，本次仅提供已收集资料。')
+        return {**result, 'research_gaps': []}
     accepted = set(map(tuple, s.get('accepted', [])))
-    lines = ['# 研究报告']
+    if not accepted:
+        result = render_partial(s, '本次没有通过核验的结论。')
+        return {**result, 'research_gaps': s.get('research_gaps', [])}
+    review = s.get('review_result')
+    has_verified = any(position[0] >= 0 for position in s.get('accepted', [])) and bool(s.get('evidence'))
+    partial = (not has_verified or bool(s.get('research_gaps'))
+               or any(o.get('status') == 'missing_evidence' for o in s.get('outcomes', []))
+               or review is None or not review.sufficient or bool(review.gaps))
+    lines = ['# 阶段性研究结果' if partial else '# 研究报告']
     used = set()
     for si, section in enumerate(s['draft'].sections):
         paragraphs = [p for pi, p in enumerate(section.paragraphs) if (si, pi) in accepted]
@@ -200,8 +238,9 @@ def render(s):
         for p in limitations:
             used.update(p.citations)
             lines.append(p.text + ' ' + ' '.join(f'[{i}]' for i in p.citations))
-    kept = [e for e in s['evidence'] if e['id'] in used]
-    lines.append('## 范围与待核查')
+    allowed = set(s['research'].get('paper_ids') or []) if s['research']['source'] == 'collection' else None
+    kept = [e for e in s['evidence'] if (e['id'] in used or not has_verified) and (allowed is None or e.get('paper_id') in allowed)]
+    lines.append('## 范围与待核查' if partial else '## 证据范围')
     scope = {'auto': '自动选择来源', 'all': '项目与外部论文', 'local': '项目论文', 'openalex': '外部论文', 'collection': '指定收藏夹', 'web': '网页'}.get(s['research']['source'], '所选来源')
     lines.append('首选来源：' + scope + '。')
     levels = []
@@ -232,12 +271,9 @@ def render(s):
     if review and not review.sufficient:
         lines.append('现有证据尚不足以全面回答问题。')
     steps = getattr(review, 'next_steps', []) if review else []
-    directions = [g['query'] for g in s.get('research_gaps', []) if g.get('query')] + ([step.direction for step in steps] or gaps)
+    directions = [g['query'] for g in s.get('research_gaps', []) if g.get('query')] + (([step.direction for step in steps] or gaps) if review and (not review.sufficient or gaps) else [])
     for direction in directions[:3]:
-        clean = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', direction)
-        clean = re.sub(r'https?://\S+|<[^>]*>', '', clean)
-        clean = re.sub(r'[`*_#\[\]\r\n]+', ' ', clean)
-        clean = ' '.join(clean.split())[:150]
+        clean = _safe_direction(direction)
         if clean:
             lines.append('待查方向：' + clean + '。')
     lines.append('材料可能包含原文片段、论文摘要或网页片段；摘要和片段不代表完整原文。')

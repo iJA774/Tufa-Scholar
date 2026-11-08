@@ -1,8 +1,8 @@
 """Validate and adapt evidence tool calls to research services."""
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from src.literature.evidence import collect_evidence
 from .search import SearchPapersInput
@@ -30,7 +30,15 @@ class WebCandidate(Candidate):
 
 
 class CollectEvidenceInput(SearchPapersInput):
+    relevance_queries: list[Annotated[str, Field(min_length=1, max_length=1000)]] = Field(default_factory=list, max_length=8, description='相关性查询，最多八条')
     papers: list[Candidate] = Field(max_length=6, description='已检索的论文或网页结果，最多六条')
+
+    @field_validator('relevance_queries')
+    @classmethod
+    def validate_relevance_queries(cls, values):
+        if any(not value.strip() for value in values):
+            raise ValueError('相关性查询无效')
+        return [value.strip() for value in values]
 
 
 def _collect_evidence(params, context):
@@ -47,6 +55,8 @@ def _collect_evidence(params, context):
             items = [item.model_dump(exclude_unset=True) for item in params.papers]
     except (ValidationError, ValueError):
         raise ValueError('工具参数无效') from None
+    if params.relevance_queries:
+        return collect_evidence(context.project_id, context.source, context.paper_ids, params.query, items, relevance_queries=params.relevance_queries)
     return collect_evidence(context.project_id, context.source, context.paper_ids, params.query, items)
 
 
