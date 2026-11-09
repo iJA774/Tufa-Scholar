@@ -1,4 +1,7 @@
 import unittest
+import io
+from pypdf import PdfWriter
+from pypdf.generic import NameObject, DictionaryObject, DecodedStreamObject
 from unittest.mock import patch
 from src.integrations import web_page
 PinnedHTTPS = web_page._PinnedHTTPS
@@ -67,6 +70,32 @@ class WebPageTests(unittest.TestCase):
         e = self.registry.invoke('collect_evidence', {'query': 'keyword', 'papers': [candidate]}, context=self.context)[0]
         self.assertIn('keyword', e['text']); self.assertEqual(e['char_start'], 1000)
         self.assertEqual(e['char_end'] - e['char_start'], len(e['text']))
+
+    def test_pdf_actual_bytes_and_pagination(self):
+        writer = PdfWriter()
+        for text in ('First page ' + 'alpha ' * 200, 'Second page election deadline'):
+            page = writer.add_blank_page(width=612, height=792)
+            font = DictionaryObject({NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')})
+            page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): writer._add_object(font)})})
+            stream = DecodedStreamObject()
+            stream.set_data(('BT /F1 12 Tf 20 700 Td (' + text + ') Tj ET').encode())
+            page[NameObject('/Contents')] = writer._add_object(stream)
+        output = io.BytesIO(); writer.write(output)
+        Connection.responses = [Response(body=output.getvalue(), headers={'Content-Type': 'application/pdf'}) for _ in range(2)]
+        first = self.registry.invoke('read_web_page', {'url': 'https://example.com/a.pdf'}, context=self.context)
+        second = self.registry.invoke('read_web_page', {'url': 'https://example.com/a.pdf', 'offset': first['next_offset']}, context=self.context)
+        self.assertIn('第 1 页', first['markdown'])
+        self.assertIn('第 2 页', second['markdown'])
+        self.assertIn('election deadline', second['markdown'])
+        self.assertEqual(second['offset'], len(first['markdown']))
+
+    def test_pdf_rejects_invalid_empty_and_encrypted(self):
+        writer = PdfWriter(); writer.add_blank_page(width=100, height=100)
+        empty = io.BytesIO(); writer.write(empty)
+        writer.encrypt('password'); encrypted = io.BytesIO(); writer.write(encrypted)
+        for body in (b'not pdf', empty.getvalue(), encrypted.getvalue()):
+            Connection.responses = [Response(body=body, headers={'Content-Type': 'application/pdf'})]
+            with self.assertRaises(web_page.WebPageError): web_page.fetch_page('https://example.com/a.pdf')
 
     def test_reject_nonpublic_addresses_ports_and_encodings(self):
         for address in ('224.0.0.1', '240.0.0.1', 'fe80::1%4'):

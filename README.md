@@ -168,6 +168,13 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 搜索失败后直读与公开 PDF 验收（2026-11-09）
+
+在 `.cache/direct-pdf-tests` 下隔离 `TEMP`、`TMP` 和 `TUFA_DATA_DIR`，后端回归 173 项通过，耗时 12.753 秒，日志为该目录的 `unittest.log`。模拟实际 API/worker 的 `verify_chat` 与 `verify_web_search` 均以退出码 0 完成；网页入口最终复核覆盖备用搜索一次失败后跨委派直读模拟公开 PDF、生成报告并保存来源小结。
+
+两份本地真实任务 #3 诊断经 `python -m scripts.replay_diagnostic` 按新规则离线重放均为“未复现”，即该直读动作现被允许。公开同类查询观察到 DuckDuckGo HTTP 202、备用服务 provider_error；使用最终网页工具读取真实 FEC PDF 的前两块，各 1000 字符，第二块偏移为 1000。未重跑真实完整模型任务；公开组件观察不保证服务持续可用。
+
+
 ### 备用搜索与研究小结验收（2026-11-09）
 
 以 `.cache/research-notes-tests` 为 `TEMP`、`TMP`，其 `data` 为 `TUFA_DATA_DIR`，后端回归 168 项通过，耗时 11.343 秒，日志为该目录的 `unittest.log`。隔离运行实际 API/worker，模拟搜索、网页读取和模型的 `verify_web_search` 与 `verify_chat` 均通过，日志位于 `.cache/research-notes-acceptance/web/verify.log` 和 `chat/verify.log`；持久化测试覆盖运行中、完成后及重试。`pnpm check:web` 和 `pnpm build:web` 通过。隔离 IAB 提交自动范围的 `typed-rate-limit` 后，展开研究过程并验证了初步发现与引用链接。

@@ -104,6 +104,25 @@ def _direct_url_key(url):
         return ''
 
 
+
+def _can_read_direct(kind, state, candidate_count):
+    if kind != 'web': return False
+    return bool(state.get('web_search_blocked') or
+                (state.get('auto_web') and candidate_count == 0 and
+                 (state.get('fallback_reason') or state.get('web_failures', 0) or state.get('web_empty_count', 0))))
+
+
+def specialist_semantic_error(choice, *, kind, blocked, can_direct, candidate_ids, direct_url_attempts):
+    if choice.action == 'search' and kind == 'web' and blocked: return 'search_blocked'
+    if choice.action == 'read_web_page' and choice.url:
+        key = _direct_url_key(choice.url)
+        if not (kind == 'web' and can_direct and key and choice.offset == 0 and key not in direct_url_attempts and len(direct_url_attempts) < 2):
+            return 'invalid_direct_url'
+    if choice.action == 'read_web_page' and kind != 'web': return 'invalid_candidate_ids'
+    if choice.action in ('read', 'read_web_page') and (len(set(choice.candidate_ids)) != len(choice.candidate_ids) or any(i not in candidate_ids for i in choice.candidate_ids)):
+        return 'invalid_candidate_ids'
+    return ''
+
 def _web_actionable(s):
     if not s.get('web_search_blocked'):
         return True
@@ -385,8 +404,10 @@ def _research_graph(kind, on_stage):
             allowed.add('read_web_page')
             if s.get('web_search_blocked'): allowed.discard('search_web')
         tools = [tool for tool in registry.list_tools(_context(s['research'])) if tool['name'] in allowed]
+        can_direct = _can_read_direct(kind, s, len(views))
+        direct_reason = ('blocked' if s.get('web_search_blocked') else 'search_unavailable' if can_direct else '')
         payload = {
-            'task': s['task'], 'verification_gaps': s.get('verification_gaps', []), 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
+            'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason, 'task': s['task'], 'verification_gaps': s.get('verification_gaps', []), 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url'), 'collected': key in s.get('read_ids', []), 'next_offset': (s.get('web_blocks', {}).get(key) or [{}])[-1].get('next_offset')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
@@ -396,25 +417,18 @@ def _research_graph(kind, on_stage):
         for attempt in range(2):
             choice = _model(s, 'literature/research', payload, Specialist)
             logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
-            valid_action = choice.action != 'read_web_page' or kind == 'web'
-            if kind == 'web' and s.get('web_search_blocked') and choice.action == 'search': valid_action = False
-            if choice.action == 'read_web_page' and choice.url:
-                key = _direct_url_key(choice.url)
-                valid_action = bool(kind == 'web' and s.get('web_search_blocked') and key and choice.offset == 0 and key not in s.get('direct_url_attempts', []) and len(s.get('direct_url_attempts', [])) < 2)
-            valid_candidates = choice.action not in ('read', 'read_web_page') or (len(set(choice.candidate_ids)) == len(choice.candidate_ids) and all(i in valid_ids for i in choice.candidate_ids))
-            if valid_action and valid_candidates:
-                break
-            code = ('search_blocked' if choice.action == 'search' and s.get('web_search_blocked') else
-                    'invalid_direct_url' if choice.action == 'read_web_page' and choice.url and not valid_action else 'invalid_candidate_ids')
+            code = specialist_semantic_error(choice, kind=kind, blocked=bool(s.get('web_search_blocked')),
+                can_direct=can_direct, candidate_ids=valid_ids, direct_url_attempts=s.get('direct_url_attempts', []))
+            if not code: break
             diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
                 response=choice.model_dump(), errors=[code],
-                context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1})
+                context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1, 'role': kind, 'search_blocked': bool(s.get('web_search_blocked')), 'can_read_direct_url': can_direct, 'direct_url_attempts': s.get('direct_url_attempts', [])})
             logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
             if attempt:
-                if s.get('web_search_blocked') and (choice.action == 'search' or (choice.action == 'read_web_page' and choice.url)):
+                if kind == 'web' and (s.get('web_search_blocked') or can_direct) and (choice.action == 'search' or (choice.action == 'read_web_page' and choice.url)):
                     return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan}
                 raise ValueError('精读候选标识无效')
-            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]]}}
+            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
         return {'choice': choice, 'candidate_identities': identities, 'plan': choice.plan}
 
     def invoke(s):
@@ -489,7 +503,7 @@ def _research_graph(kind, on_stage):
     graph.add_node('invoke', invoke)
     graph.add_edge(START, 'decide')
     graph.add_conditional_edges('decide', lambda s: END if s['choice'].action == 'finish' or s.get('tool_calls', 0) >= MAX_TOOL_CALLS else 'invoke')
-    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= MAX_TOOL_CALLS or (s.get('search_status') == 'failed' and not s.get('candidates') and not s.get('web_search_blocked')) else 'decide')
+    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= MAX_TOOL_CALLS or (s.get('search_status') == 'failed' and not s.get('candidates') and not s.get('web_search_blocked') and not (kind == 'web' and s.get('auto_web') and s.get('web_backend') == 'alternative' and s.get('fallback_reason'))) else 'decide')
     return graph.compile()
 
 
@@ -590,7 +604,7 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
 
     def review(s):
         if on_stage: on_stage('assessing')
-        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
+        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'can_read_direct_url': _can_read_direct('web', {**s, 'auto_web': research['source'] == 'auto'}, len(s.get('pools', {}).get('web_research', {}).get('candidates', []))), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
         allowed_ids = {item['id'] for item in s.get('evidence', [])}
         excluded = set(s.get('excluded_evidence_ids', [])) | (set(result.irrelevant_evidence_ids) & allowed_ids)
         working = [item for item in s.get('evidence', []) if item['id'] not in excluded]

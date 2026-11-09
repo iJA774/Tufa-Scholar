@@ -321,6 +321,59 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(state['web_search_blocked'], 'empty')
         self.assertNotIn('web_search_failed', state['warnings'])
 
+    def test_auto_fallback_transient_failure_allows_direct_read_next_delegation(self):
+        from src.integrations.web_search import WebSearchError
+        notes, reviews = [], []
+        def model(name, payload, schema):
+            if name == 'runtime/route': return w.Route(action='web_research', task='first', directions=['election'])
+            if name == 'literature/research':
+                if not reviews: return w.Specialist(action='search', query='election', plan=['search'])
+                if payload['search_backend'] == 'primary': return w.Specialist(action='search', query='election', plan=['search'])
+                if not payload['candidates']:
+                    self.assertTrue(payload['can_read_direct_url'])
+                    return w.Specialist(action='read_web_page', url='https://www.fec.gov/resources/cms-content/documents/2026pdates.pdf', query='election', plan=['read'])
+                if payload['candidates'] and not payload['evidence']: return w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']], plan=['collect'])
+                return w.Specialist(action='finish', plan=['finish'])
+            if name == 'literature/review':
+                reviews.append(payload)
+                return w.Review(sufficient=len(reviews)>1, summary='审查', gaps=[] if len(reviews)>1 else ['缺材料'], next_steps=[] if len(reviews)>1 else [w.NextStep(direction='选举', goal='重试搜索' if len(reviews)==1 else '查官网', route='web_research')])
+            if name == 'literature/synthesize': return w.Draft(sections=[w.Section(heading='结果', paragraphs=[w.Claim(text='election results', citations=[payload['evidence'][0]['id']])])])
+            if name == 'literature/verify_claim': return w.Verdict(status='supported')
+            raise AssertionError(name)
+        original = w.registry.invoke
+        def invoke(name, arguments, *, context):
+            if name == 'read_web_page': return {'url': arguments['url'], 'title': 'FEC', 'markdown': 'election results', 'offset': 0, 'next_offset': None, 'retrieved_at': '2026-11-07'}
+            return original(name, arguments, context=context)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', side_effect=WebSearchError('private', 'network')) as primary, patch('src.tools.search.search_web_fallback', side_effect=WebSearchError('private', 'provider_error')) as fallback, patch.object(w.registry, 'invoke', side_effect=invoke):
+            content, evidence = w.run({**TASK, 'source': 'auto', 'query': 'election'}, history=[], on_subtask=notes.append)
+        self.assertEqual(primary.call_count, 2)
+        self.assertEqual(fallback.call_count, 1)
+        self.assertEqual(evidence[0]['original_url'], 'https://www.fec.gov/resources/cms-content/documents/2026pdates.pdf')
+        self.assertIn('election results', content)
+
+    def test_paper_search_remains_available_after_web_block(self):
+        from src.integrations.web_search import WebSearchError
+        paper = {'id': 7, 'title': 'election study', 'abstract': 'election evidence', 'versions': []}
+        reviews = []
+        def model(name, payload, schema):
+            if name == 'runtime/route': return w.Route(action='web_research', task='election', directions=['election'])
+            if name == 'literature/research':
+                if payload['role'] == 'web':
+                    return w.Specialist(action='search', query='election', plan=['search']) if not payload['recent_result'] else w.Specialist(action='finish', plan=['finish'])
+                if not payload['recent_result']: return w.Specialist(action='search', query='election', plan=['search'])
+                if payload['recent_result'].startswith('检索'): return w.Specialist(action='read', candidate_ids=[payload['candidates'][0]['id']], plan=['read'])
+                return w.Specialist(action='finish', plan=['finish'])
+            if name == 'literature/review':
+                reviews.append(payload)
+                return w.Review(sufficient=len(reviews)>1, summary='审查', gaps=[] if len(reviews)>1 else ['缺论文'], next_steps=[] if len(reviews)>1 else [w.NextStep(route='paper_research', direction='论文', goal='查论文')])
+            if name == 'literature/synthesize': return w.Draft(sections=[w.Section(heading='结果', paragraphs=[w.Claim(text='election evidence', citations=[payload['evidence'][0]['id']])])])
+            if name == 'literature/verify_claim': return w.Verdict(status='supported')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', side_effect=WebSearchError('private', 'challenge', 202)), patch('src.tools.search.search_web_fallback', side_effect=WebSearchError('private', 'challenge', 202)), patch('src.tools.search.retrieve', return_value={'results': [paper]}) as papers, patch.object(repository, 'project_evidence', return_value=[paper]):
+            _, evidence = w.run({**TASK, 'source': 'auto', 'query': 'election'}, history=[])
+        self.assertEqual(papers.call_count, 1)
+        self.assertEqual(len(evidence), 1)
+
     def test_web_direct_is_rejected_before_tool_call(self):
         with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:
             with self.assertRaises(ValueError):

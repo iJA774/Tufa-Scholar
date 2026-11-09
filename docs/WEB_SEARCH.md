@@ -37,10 +37,10 @@ DuckDuckGo 显式使用 HTML 搜索后端。HTTP 202 或带验证标记的响应
 
 协议依据和依赖见集成代码；主要接口参考 [Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)、[SearXNG](https://docs.searxng.org/dev/search_api.html)、[arXiv](https://info.arxiv.org/help/api/user-manual.html)。
 
-网页读取按清理后的 Markdown 字符分页；读取前校验公网地址并逐跳检查重定向，HTTPS 固定连接已验证 IP 并校验原域名。HTML 优先提取 article/main，去除导航和脚本，不执行 JavaScript。正文证据带绝对字符区间；动态渲染页面和超限响应可能无法读取。
+网页读取按清理后的 Markdown 字符分页；读取前校验公网地址并逐跳检查重定向，HTTPS 固定连接已验证 IP 并校验原域名。HTML 优先提取 article/main，去除导航和脚本，不执行 JavaScript。正文证据带绝对字符区间；动态渲染页面和超限响应可能无法读取。公开 PDF 也可在受限子进程提取可复制文字，下载上限 2 MB，最多 50 页或 20 万字符，截断时有标记；扫描件、加密文件或解析超时不可读取。提取结果作为网页正文的字符定位，不视作已导入论文的 PDF 页码锚点。
 
 网页搜索日志记录安全的引擎、结果数、耗时和错误类别；不记录查询、URL、上游异常正文或密钥。成功空结果与失败分开记录；先前已有成功空结果而后续失败时，研究流程保留结果并提示不完整。`auto` 可转交审查，显式网页从未成功且无证据时返回可重试错误。
 
 2026-11-08 的独立公开查询 `Python official documentation` 曾返回 HTTP 202 和 anomaly-modal 验证标记，DDGS 将该响应报告为无结果；该观察不能反推任务 #12 每次请求的上游响应。适配后同查询复测记录为 `failed`、`challenge`、HTTP 202；DuckDuckGo 仍要求验证，系统不会绕过验证；自动问答可在条件满足时尝试备用检索。
 
-仅 `auto` 问答在搜索受阻或连续两次无候选空结果时可受控尝试 DDGS 的 Bing/Yahoo 备用检索；显式来源和独立搜索不自动切换。遇验证挑战、限流、认证或配置问题时暂停该任务后续搜索；可恢复类型连续失败两次后暂停，成功空结果会重置连续失败计数。暂停仅影响搜索：仍可读取已有候选，并可尝试最多两个不同的已知公开官方 URL，经同一公网地址检查读取正文后再取证。
+仅 `auto` 问答在搜索受阻或连续两次无候选空结果时可受控尝试 DDGS 的 Bing/Yahoo 备用检索；显式来源和独立搜索不自动切换。遇验证挑战、限流、认证或配置问题时暂停该任务后续搜索；可恢复类型连续失败两次后暂停，成功空结果会重置连续失败计数。暂停仅影响搜索；`auto` 无候选且搜索失败或空结果后即可尝试最多两个不同的已知公开官方 URL，不必等待第二次备用失败；仍可读取已有候选，经同一公网地址检查读取正文后再取证。

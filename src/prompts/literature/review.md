@@ -23,3 +23,5 @@ search_blocked 非空表示网页搜索已暂停，不应建议反复改词；�
 
 prior_subtask_notes 或 subtask_notes 是先前研究线索，不是独立证据；只能以本次 evidence 中的材料支持结论。
 针对 current_task 和 current_source，subtask_findings 最多3条，每条含 text 和 citations（仅当前 evidence 的有效 ID）；无可引用结论时留空。subtask_gap 可简述当前缺口。search_backend 为 alternative 表示已切换备用，empty_searches 为连续空结果数。
+
+can_read_direct_url 表示自动模式网页搜索未提供可用候选且已出现失败或空结果，或搜索已暂停；为真时可提议可信公开官网直读，遵守次数及 URL 范围。

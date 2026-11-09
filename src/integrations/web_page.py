@@ -3,6 +3,8 @@ import http.client
 import ipaddress
 import re
 import socket
+import subprocess
+import sys
 import httpx
 import time
 from datetime import datetime, timezone
@@ -10,6 +12,49 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit, quote
 
 MAX_BYTES = 2_000_000
+
+
+def _extract_pdf(data):
+    import io
+    import pypdf.filters as filters
+    from pypdf import PdfReader
+
+    for name in ('FLATE_MAX_BUFFER_SIZE', 'JBIG2_MAX_OUTPUT_LENGTH', 'LZW_MAX_OUTPUT_LENGTH',
+                 'MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH', 'MAX_DECLARED_STREAM_LENGTH',
+                 'RUN_LENGTH_MAX_OUTPUT_LENGTH', 'ZLIB_MAX_OUTPUT_LENGTH'):
+        if hasattr(filters, name):
+            setattr(filters, name, min(getattr(filters, name), 8_000_000))
+    if not data.startswith(b'%PDF-'):
+        raise ValueError('invalid PDF')
+    reader = PdfReader(io.BytesIO(data), strict=True)
+    if reader.is_encrypted or not reader.pages:
+        raise ValueError('unreadable PDF')
+    parts, found_text, remaining = [], False, 200_000
+    for i, page in enumerate(reader.pages):
+        if i >= 50 or remaining <= 0:
+            parts.append('[PDF 内容已截断]')
+            break
+        text = (page.extract_text() or '').strip()
+        if text:
+            found_text = True
+            parts.append(f'## 第 {i + 1} 页\n\n' + text[:remaining])
+            truncated = len(text) > remaining
+            remaining -= len(text[:remaining])
+            if truncated:
+                parts.append('[PDF 内容已截断]')
+                break
+    if not found_text:
+        raise ValueError('no extractable text')
+    return '\n\n'.join(parts)
+
+
+def _pdf_text(data):
+    if not data.startswith(b'%PDF-'):
+        raise ValueError('invalid PDF')
+    result = subprocess.run([sys.executable, '-I', '-B', __file__, '--extract-pdf'], input=data,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=True,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    return result.stdout.decode('utf-8')
 
 
 class WebPageError(RuntimeError):
@@ -103,7 +148,7 @@ def fetch_page(url):
             try:
                 path = quote(parts.path or '/', safe="/%:@!$&'()*+,;=-._~")
                 if parts.query: path += '?' + quote(parts.query, safe="/%?:@!$&'()*+,;=-._~")
-                conn.request('GET', path, headers={'Host': f'[{hostname}]' if ':' in hostname else hostname, 'Accept': 'text/html,text/plain', 'Accept-Encoding': 'identity', 'User-Agent': 'TufaScholar/1.0', 'Connection': 'close'})
+                conn.request('GET', path, headers={'Host': f'[{hostname}]' if ':' in hostname else hostname, 'Accept': 'text/html,text/plain,application/pdf', 'Accept-Encoding': 'identity', 'User-Agent': 'TufaScholar/1.0', 'Connection': 'close'})
                 response = conn.getresponse()
                 if response.status in (301, 302, 303, 307, 308):
                     location = response.getheader('Location')
@@ -113,7 +158,7 @@ def fetch_page(url):
                 if response.status != 200: raise ValueError
                 content_type = response.getheader('Content-Type', '').lower()
                 media_type = content_type.split(';', 1)[0].strip()
-                if media_type not in ('text/html', 'text/plain') or response.getheader('Content-Encoding', 'identity').lower().strip() not in ('', 'identity'): raise ValueError
+                if media_type not in ('text/html', 'text/plain', 'application/pdf') or response.getheader('Content-Encoding', 'identity').lower().strip() not in ('', 'identity'): raise ValueError
                 deadline = time.monotonic() + 20
                 chunks, size = [], 0
                 while True:
@@ -123,16 +168,23 @@ def fetch_page(url):
                     chunks.append(chunk); size += len(chunk)
                     if size > MAX_BYTES: raise ValueError
                 data = b''.join(chunks)
-                match = re.search(r'charset=([\w.-]+)', content_type)
-                try: text = data.decode(match.group(1) if match else 'utf-8', errors='replace')
-                except LookupError: text = data.decode('utf-8', errors='replace')
-                if media_type == 'text/html':
-                    parser = _Text(); parser.feed(text)
-                    title, text = ''.join(parser.title).strip(), parser.result()
-                else: title, text = '', text.strip()
+                if media_type == 'application/pdf':
+                    title, text = '', _pdf_text(data)
+                else:
+                    match = re.search(r'charset=([\w.-]+)', content_type)
+                    try: text = data.decode(match.group(1) if match else 'utf-8', errors='replace')
+                    except LookupError: text = data.decode('utf-8', errors='replace')
+                    if media_type == 'text/html':
+                        parser = _Text(); parser.feed(text)
+                        title, text = ''.join(parser.title).strip(), parser.result()
+                    else: title, text = '', text.strip()
                 return {'url': url, 'title': title, 'markdown': text, 'retrieved_at': datetime.now(timezone.utc).isoformat()}
             finally:
                 conn.close()
         raise ValueError
     except Exception:
         raise WebPageError('网页读取失败或地址不可访问') from None
+
+
+if __name__ == '__main__' and sys.argv[1:] == ['--extract-pdf']:
+    sys.stdout.buffer.write(_extract_pdf(sys.stdin.buffer.read()).encode('utf-8'))

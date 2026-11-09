@@ -37,9 +37,33 @@ def replay(artifact):
         return '复现' if not isinstance(response, dict) or response.get('action') not in context.get('allowed_actions', []) else '未复现'
     if kind == 'semantic_candidates':
         ids = response.get('candidate_ids') if isinstance(response, dict) else None
-        if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
+        if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids): return '复现'
+        if len(set(ids)) != len(ids) or any(i not in context.get('candidate_ids', []) for i in ids): return '复现'
+        if not isinstance(response, dict) or response.get('action') not in ('read_web_page', 'search'):
+            return '未复现'
+        from src.agents.literature import Specialist, specialist_semantic_error
+        try:
+            choice = Specialist.model_validate(response)
+        except ValidationError:
             return '复现'
-        return '复现' if len(set(ids)) != len(ids) or any(i not in context.get('candidate_ids', []) for i in ids) else '未复现'
+        payload = artifact.get('payload') or {}
+        role = context.get('role') or payload.get('role')
+        if not role: return '无法离线复现：缺少来源上下文'
+        if choice.url:
+            attempts = context.get('direct_url_attempts')
+            if attempts is None:
+                if payload.get('direct_url_attempts_remaining') == 2: attempts = []
+                else: return '无法离线复现：缺少网址尝试记录'
+            can_direct = context.get('can_read_direct_url')
+            if can_direct is None:
+                if payload.get('search_blocked'): can_direct = True
+                elif payload.get('fallback_reason') and payload.get('candidate_count') == 0: can_direct = True
+                else: return '无法离线复现：缺少直读范围信息'
+        else:
+            attempts, can_direct = [], False
+        code = specialist_semantic_error(choice, kind=role, blocked=bool(context.get('search_blocked', payload.get('search_blocked'))),
+            can_direct=can_direct, candidate_ids=set(context.get('candidate_ids', [])), direct_url_attempts=attempts)
+        return '复现：' + code if code else '未复现'
     return '只能诊断，无法离线复现'
 
 

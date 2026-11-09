@@ -29,3 +29,5 @@ search_blocked 非空表示本任务网页搜索服务已暂停；不要反复�
 
 prior_subtask_notes 或 subtask_notes 是先前研究线索，不是独立证据；只能以本次 evidence 中的材料支持结论。
 search_backend 为 alternative 时使用备用搜索；empty_searches 表示连续空结果次数，可结合候选和渠道调整计划。
+
+can_read_direct_url 表示自动模式网页搜索未提供可用候选且已出现失败或空结果，或搜索已暂停；为真时可提议可信公开官网直读，遵守次数及 URL 范围。

@@ -13,7 +13,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
-from scripts.verify_chat import ModelFixture, free_port
+from scripts.verify_chat import ModelFixture, free_port, make_pdf
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +22,7 @@ class SearchFixture(ModelFixture):
     fail_search = False
     empty_failure_searches = 0
     rate_limit_searches = 0
+    direct_primary_searches = 0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-Length']))
@@ -29,7 +30,22 @@ class SearchFixture(ModelFixture):
         prompt = req['messages'][0]['content']
         data = json.loads(req['messages'][1]['content'])
         result = None
-        if '你是研究主控' in prompt and 'typed-rate-limit' in data.get('question', ''):
+        if '你是研究主控' in prompt and 'direct-case' in data.get('question', ''):
+            result = {'action': 'web_research', 'task': 'direct-case accuracy first', 'directions': ['accuracy']} if not data['results'] else {'action': 'report'}
+        elif '你是研究专家' in prompt and 'direct-case' in data.get('task', ''):
+            if 'official' in data['task']:
+                result = ({'action': 'read_web_page', 'url': 'https://www.fec.gov/resources/cms-content/documents/fec_fixture.pdf', 'query': 'accuracy', 'plan': ['读取官方资料']} if not data['recent_result'] else {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['取证']} if '网页正文' in data['recent_result'] else {'action': 'finish', 'plan': ['完成']})
+            elif 'retry' in data['task'] and data['recent_result']:
+                result = {'action': 'finish', 'plan': ['结束本轮']}
+            else:
+                result = {'action': 'search', 'query': 'direct-case', 'plan': ['搜索']}
+        elif '你是无工具研究审查者' in prompt and 'direct-case' in data.get('question', ''):
+            count = len(data['results'])
+            if count < 3:
+                result = {'sufficient': False, 'gaps': ['accuracy 资料'], 'summary': '继续查找', 'coverage': [], 'next_steps': [{'direction': 'accuracy', 'goal': 'direct-case accuracy ' + ('retry' if count == 1 else 'official'), 'route': 'web_research'}]}
+            else:
+                result = {'sufficient': True, 'gaps': [], 'summary': '资料已找到', 'coverage': ['accuracy'], 'next_steps': [], 'subtask_findings': [{'text': '资料包含准确率 92%', 'citations': [data['evidence'][0]['id']]}]}
+        elif '你是研究主控' in prompt and 'typed-rate-limit' in data.get('question', ''):
             result = {'action': 'web_research', 'task': 'typed-rate-limit 政策', 'directions': ['政策']} if not data['results'] else {'action': 'report'}
         elif '你是研究专家' in prompt and 'typed-rate-limit' in data.get('task', ''):
             result = ({'action': 'search', 'query': 'typed-429', 'plan': ['检索']} if not data['recent_result'] else {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['读取']} if data['candidates'] and '检索到' in data['recent_result'] else {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['取证']} if data['candidates'] and '网页正文' in data['recent_result'] else {'action': 'finish', 'plan': ['完成']})
@@ -56,6 +72,10 @@ class SearchFixture(ModelFixture):
         url = urlsplit(self.path)
         if url.path == '/search':
             query = parse_qs(url.query).get('q', [''])[0]
+            if query == 'direct-case':
+                SearchFixture.direct_primary_searches += 1
+                self.send_error(503)
+                return
             if query == 'typed-429':
                 SearchFixture.rate_limit_searches += 1
                 self.send_error(429)
@@ -83,20 +103,27 @@ def install_page_fixture():
     import src.integrations.web_page as page
     class FixtureResponse:
         status = 200
-        def __init__(self): self.body = '<html><title>Fixture</title><article><h1>Method</h1><p>政策 Attention fixture paper uses attention to combine representations. accuracy was 92%</p></article></html>'.encode('utf-8')
-        def getheader(self, name, default=None): return 'text/html; charset=utf-8' if name == 'Content-Type' else default
+        def __init__(self, pdf=False):
+            self.pdf = pdf
+            self.body = make_pdf() if pdf else '<html><title>Fixture</title><article><h1>Method</h1><p>政策 Attention fixture paper uses attention to combine representations. accuracy was 92%</p></article></html>'.encode('utf-8')
+        def getheader(self, name, default=None): return ('application/pdf' if self.pdf else 'text/html; charset=utf-8') if name == 'Content-Type' else default
         def read(self, size):
             chunk, self.body = self.body[:size], self.body[size:]
             return chunk
     class FixtureConnection:
         def __init__(self, *args): pass
-        def request(self, *args, **kwargs): pass
-        def getresponse(self): return FixtureResponse()
+        def request(self, method, path, **kwargs): self.path = path
+        def getresponse(self): return FixtureResponse(self.path.endswith('.pdf'))
         def close(self): pass
-    page._target = lambda url: (urlsplit(url), 'example.org', 443, '8.8.8.8')
+    page._target = lambda url: (urlsplit(url), urlsplit(url).hostname, 443, '8.8.8.8')
     page._PinnedHTTPS = FixtureConnection
     import src.tools.search as search
-    search.search_web_fallback = lambda query, limit=5: ([{'title': '政策 fixture', 'url': 'https://example.org/research', 'content': '政策 accuracy was 92%', 'source_level': 'web_snippet', 'provider': 'fixture_alternative', 'retrieved_at': '2026-11-09'}] if query == 'typed-429' else [])
+    def fallback(query, limit=5):
+        if query == 'direct-case':
+            from src.integrations.web_search import WebSearchError
+            raise WebSearchError('模拟失败', 'provider_error')
+        return ([{'title': '政策 fixture', 'url': 'https://example.org/research', 'content': '政策 accuracy was 92%', 'source_level': 'web_snippet', 'provider': 'fixture_alternative', 'retrieved_at': '2026-11-09'}] if query == 'typed-429' else [])
+    search.search_web_fallback = fallback
 
 
 def main():
@@ -204,6 +231,19 @@ def main():
                     assert limited_task['result']['evidence']
                     assert limited_task['subtasks'] and limited_task['subtasks'][0]['sources']
                     assert limited_task['subtasks'][0]['status'] in ('findings', 'sources_only')
+                    SearchFixture.direct_primary_searches = 0
+                    ModelFixture.requests.clear()
+                    direct = call('POST', f'/projects/{project}/questions', json={'question': 'direct-case accuracy', 'source': 'auto'})
+                    direct_task = wait(direct['run_id'])
+                    assert direct_task['status'] == 'succeeded', direct_task
+                    assert SearchFixture.direct_primary_searches == 2
+                    direct_payloads = [json.loads(req['messages'][1]['content']) for req in ModelFixture.requests if '你是研究专家' in req['messages'][0]['content'] and 'direct-case accuracy official' in json.loads(req['messages'][1]['content']).get('task', '')]
+                    assert direct_payloads and direct_payloads[0]['can_read_direct_url'] is True
+                    assert not direct_payloads[0]['search_blocked'] and direct_payloads[0]['search_backend'] == 'alternative'
+                    assert any(e.get('original_url') == 'https://www.fec.gov/resources/cms-content/documents/fec_fixture.pdf' and e.get('source_level') == 'web_content' for e in direct_task['result']['evidence'])
+                    assert any(s.get('original_url') == 'https://www.fec.gov/resources/cms-content/documents/fec_fixture.pdf' for note in direct_task['subtasks'] for s in note['sources'])
+                    assert any(note['status'] in ('findings', 'sources_only') for note in direct_task['subtasks'])
+                    assert '92%' in direct_task['result']['content']
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])

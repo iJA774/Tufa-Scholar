@@ -32,6 +32,15 @@ class DiagnosticsTest(unittest.TestCase):
             second = record_failure(kind='network_error', payload={}, schema={})
             self.assertNotIn('run_id', json.loads((Path(tmp) / 'diagnostics' / (second + '.json')).read_text(encoding='utf-8'))['context'])
 
+    def test_direct_url_replay_uses_semantic_context(self):
+        artifact = {'kind': 'semantic_candidates', 'response': {'action': 'read_web_page', 'url': 'https://fec.gov/results', 'query': 'election', 'candidate_ids': [], 'plan': ['read']},
+                    'payload': {'role': 'web', 'fallback_reason': 'network', 'candidate_count': 0, 'direct_url_attempts_remaining': 2}, 'context': {'candidate_ids': []}}
+        self.assertEqual(replay(artifact), '未复现')
+        artifact['response']['url'] = 'https://[broken'
+        self.assertEqual(replay(artifact), '复现：invalid_direct_url')
+        artifact['payload'].pop('direct_url_attempts_remaining')
+        self.assertIn('无法离线复现', replay(artifact))
+
     def test_semantic_replay(self):
         self.assertEqual(replay([]), '诊断格式无效')
         self.assertEqual(replay({'context': []}), '诊断格式无效')
