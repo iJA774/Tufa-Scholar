@@ -115,6 +115,14 @@ class ResearchToolsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.registry.invoke('collect_evidence', {'query': 'topic', 'relevance_queries': invalid, 'papers': papers}, context=context)
 
+    @patch('src.tools.search.search_web_fallback')
+    def test_web_alternative_is_explicit(self, fallback):
+        fallback.return_value = []
+        self.assertEqual(self.registry.invoke('search_web', {'query': 'topic', 'backend': 'alternative'}, context=self.web), [])
+        fallback.assert_called_once_with('topic', limit=5)
+        with self.assertRaises(ValueError):
+            self.registry.invoke('search_web', {'query': 'topic', 'backend': 'auto'}, context=self.web)
+
     @patch('src.tools.search.search_web')
     def test_web_search_and_evidence_independently(self, search):
         search.return_value = [{'title': 'page', 'url': 'https://EXAMPLE.org/a#fragment', 'content': 'x' * 1500,

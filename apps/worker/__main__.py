@@ -30,6 +30,7 @@ def run_once():
                 content, evidence = run(
                     research, history=history,
                     on_stage=lambda stage: repository.update_stage(task['id'], stage),
+                    on_subtask=lambda note: repository.record_subtask(task['id'], note),
                 )
             repository.finish_chat_task(task['id'], content, evidence)
         else:

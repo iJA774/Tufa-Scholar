@@ -5,9 +5,24 @@ import ModelControls, { ModelChoice } from "../ModelControls";
 import { webSourceLabel } from "../WebSearchPanel";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { api, json, messageOf } from "./api";
-import type { Collection, Conversation, Message, Paper, Run } from "./types";
+import type { Collection, Conversation, Message, Paper, Run, Subtask } from "./types";
 const statusText: Record<string, string> = { queued: "等待处理", pending: "等待处理", running: "正在处理", succeeded: "回答完成", success: "回答完成", completed: "回答完成", failed: "任务失败", interrupted: "任务已中断" };
 const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", searching_web: "搜索网页", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "回答完成", done: "回答完成", retrieving: "检索文献", generating: "生成回答", synthesizing: "整理证据", planning: "规划问题", evidence: "提取证据", assessing: "检查证据缺口", verifying: "核验结论", answering: "生成回答" };
+function safeSourceUrl(value?: string | null) {
+  try { const url = new URL(value || ""); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined; } catch { return undefined; }
+}
+function ResearchActivity({ items }: { items?: Subtask[] }) {
+  if (!items?.length) return null;
+  return <details className="research-activity"><summary>研究过程 · {items.length} 步（初步结果）</summary>
+    {items.map(step => <div key={step.index}><strong>{step.index}. {step.task}</strong>
+      {step.findings?.map((finding, i) => <p key={i}>{finding.text} {finding.citations.map(id => `[${id}]`).join(" ")}</p>)}
+      {step.status === "sources_only" && <p>已找到相关资料，结论仍待核验。</p>}
+      {step.status === "no_evidence" && <p>本步暂无可用证据。</p>}
+      {step.sources?.map(source => { const href = safeSourceUrl(source.original_url); return <div key={source.id}>{href ? <a href={href} target="_blank" rel="noreferrer">{source.title || source.id} ↗</a> : <span>{source.title || source.id}</span>} [{source.id}]</div>; })}
+      {step.gap && <p>待查：{step.gap}</p>}
+    </div>)}
+  </details>;
+}
 type Props = {
   projectId: number;
   collections: Collection[];
@@ -30,6 +45,8 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
   const [source, setSource] = useState("auto");
   const [run, setRun] = useState<Run>();
   const [runs, setRuns] = useState<Run[]>([]);
+  const [historyRuns, setHistoryRuns] = useState<Record<number, Run>>({});
+  const requestedHistoryRuns = useRef(new Set<number>());
   const [busy, setBusy] = useState("");
   const epoch = useRef(0);
   const currentConversation = useRef<number | undefined>(undefined);
@@ -47,6 +64,8 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
     const controller = new AbortController();
     setConversations([]);
     setRuns([]);
+    setHistoryRuns({});
+    requestedHistoryRuns.current.clear();
     setRun(undefined);
     setMessages([]);
     setConversationId(undefined);
@@ -99,6 +118,17 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
     });
     return () => controller.abort();
   }, [run?.id, run?.status, conversationId, projectId]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const ids = [...new Set(messages.filter(m => m.role === "assistant" && m.run_id).map(m => m.run_id as number))];
+    const missing = ids.filter(id => !runs.some(r => r.id === id) && !requestedHistoryRuns.current.has(id));
+    if (!missing.length) return;
+    missing.forEach(id => requestedHistoryRuns.current.add(id));
+    Promise.all(missing.map(id => api<Run>(`/runs/${id}`).catch(() => undefined))).then(values => {
+      if (!controller.signal.aborted) setHistoryRuns(previous => ({ ...previous, ...Object.fromEntries(values.filter((value): value is Run => !!value).map(value => [value.id, value])) }));
+    });
+    return () => { controller.abort(); missing.forEach(id => requestedHistoryRuns.current.delete(id)); };
+  }, [messages, projectId]);
   useRunPolling({
     run, projectId, conversationId,
     fetchRun: (id, signal) => api<Run>(`/runs/${id}`, { signal }),
@@ -181,12 +211,13 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
             <div className="message-label">
               {m.role === "user" ? "你" : "TUFA"}
             </div>
+            {m.role === "assistant" && m.run_id && <ResearchActivity items={(runs.find(r => r.id === m.run_id) || historyRuns[m.run_id])?.subtasks} />}
             <div className="message-content">
               {m.content}
             </div>
             {m.metadata?.evidence?.map((c, i) => <div className="citation" key={i}>
               {c.version_id ? <a href={`/api/paper-versions/${c.version_id}/file${c.page ? `#page=${c.page}` : ""}`} target="_blank" rel="noreferrer">
-                {c.title || `参考文献 ${i + 1}`} ↗</a> : c.original_url ? <a href={c.original_url} target="_blank" rel="noreferrer">
+                {c.title || `参考文献 ${i + 1}`} ↗</a> : safeSourceUrl(c.original_url) ? <a href={safeSourceUrl(c.original_url)} target="_blank" rel="noreferrer">
                   {c.title || `参考文献 ${i + 1}`} ↗</a> : <span>
                 {c.title || `参考文献 ${i + 1}`}
               </span>}{c.id && ` [${c.id}]`}{c.page && ` · 第 ${c.page} 页`}{c.source_level && ["abstract", "web_snippet", "web_content"].includes(c.source_level) && ` · ${webSourceLabel(c.source_level)}`}{c.provider && ` · ${c.provider}`}{c.retrieved_at && ` · 检索于 ${new Date(c.retrieved_at).toLocaleString("zh-CN")}`}
@@ -200,6 +231,7 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
             <p>提出你的研究问题，一起寻找相关证据。</p>
           </div>}
         </div>
+        {run && !["succeeded", "success", "completed"].includes(run.status) && <ResearchActivity items={run.subtasks} />}
         {run && <div className="chat-status" role="status">
           {statusText[run.status] || run.status}{run.stage && (stageText[run.stage] || run.stage) !== (statusText[run.status] || run.status) && ` · ${stageText[run.stage] || run.stage}`}{run.error && <p>
             {run.error} <Link href="/settings">检查服务设置</Link>

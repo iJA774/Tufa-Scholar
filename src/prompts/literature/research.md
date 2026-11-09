@@ -26,3 +26,6 @@ search_status 描述本次检索：empty 时仍可精读此前保留的候选；
 候选 collected 表示已取证，不代表已读网页正文；next_offset 有值可继续读网页。围绕明确任务搜索并实际执行查询，再针对相关材料取证。
 
 search_blocked 非空表示本任务网页搜索服务已暂停；不要反复改写搜索。可读取已有候选，或仅网页角色在预算内以可信公开官网 URL 调用 read_web_page，并在 query 提供来源语言的主题词供本地相关性判断；URL 不含查询参数或片段，不得包含私有信息。无可靠候选或可执行替代计划时结束。
+
+prior_subtask_notes 或 subtask_notes 是先前研究线索，不是独立证据；只能以本次 evidence 中的材料支持结论。
+search_backend 为 alternative 时使用备用搜索；empty_searches 表示连续空结果次数，可结合候选和渠道调整计划。

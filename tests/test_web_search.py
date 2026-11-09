@@ -3,10 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
-import primp
 from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
-from src.integrations.web_search import WebSearchError, search_web
+from src.integrations.web_search import WebSearchError, search_web, search_web_fallback
 
 
 class WebSearchTests(unittest.TestCase):
@@ -54,7 +53,7 @@ class WebSearchTests(unittest.TestCase):
     def test_duckduckgo_real_parser_handles_results_and_empty(self):
         html = '<html><div class="body"><h2>Title</h2><a href="https://example.org">body</a></div></html>'
         for body, expected in [(html, 1), ('<html><body>No results</body></html>', 0)]:
-            with self.subTest(expected=expected), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client.HttpClient.request', return_value=SimpleNamespace(status_code=200, text=body)) as request:
+            with self.subTest(expected=expected), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client2.HttpClient2.request', return_value=SimpleNamespace(status_code=200, text=body)) as request:
                 with self.assertLogs('src.integrations.web_search', level='INFO') as logs:
                     result = search_web('private-query')
                 self.assertEqual(len(result), expected)
@@ -64,7 +63,7 @@ class WebSearchTests(unittest.TestCase):
 
     def test_duckduckgo_challenge_and_http_errors_are_not_empty(self):
         for status, body, category in [(202, 'secret anomaly-modal private-query', 'challenge'), (200, '<div class="anomaly-modal">secret</div>', 'challenge'), (429, 'secret', 'rate_limit'), (503, 'secret', 'http_status')]:
-            with self.subTest(status=status), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client.HttpClient.request', return_value=SimpleNamespace(status_code=status, text=body)):
+            with self.subTest(status=status), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('ddgs.http_client2.HttpClient2.request', return_value=SimpleNamespace(status_code=status, text=body)):
                 with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(WebSearchError) as raised: search_web('private-query')
                 self.assertEqual((raised.exception.category, raised.exception.status), (category, status))
                 text = str(logs.output)
@@ -161,7 +160,7 @@ class WebSearchTests(unittest.TestCase):
                     search_web('private-query')
                 self.assertEqual((raised.exception.category, raised.exception.status), (category, status))
                 self.assertNotIn('private-query', str(raised.exception))
-        for cause, category in [(primp.TimeoutError('secret'), 'timeout'), (primp.ConnectError('secret'), 'network')]:
+        for cause, category in [(httpx.ConnectTimeout('secret'), 'timeout'), (httpx.ConnectError('secret'), 'network')]:
             wrapped = DDGSException('secret')
             wrapped.__cause__ = cause
             with self.subTest(category=category), patch('src.integrations.web_search.web_search_config', return_value=self.config('duckduckgo')), patch('src.integrations.web_search._Duckduckgo', side_effect=wrapped):
@@ -173,6 +172,28 @@ class WebSearchTests(unittest.TestCase):
             with self.assertRaises(WebSearchError) as raised:
                 search_web('q')
             self.assertEqual((raised.exception.category, raised.exception.status), ('missing_key', None))
+
+    def test_fallback_success_empty_and_failure(self):
+        with patch('src.integrations.web_search.DDGS') as client:
+            client.return_value.text.return_value = [{'title': 'Title', 'href': 'https://example.org/a#frag', 'body': '<b>Text</b>'}]
+            result = search_web_fallback('private query', 2)
+            self.assertEqual((result[0]['url'], result[0]['content'], result[0]['provider']), ('https://example.org/a', 'Text', 'ddgs_fallback'))
+            self.assertTrue(result[0]['retrieved_at'])
+            client.return_value.text.assert_called_once_with('private query', max_results=2, backend='bing,yahoo')
+            client.return_value.text.side_effect = DDGSException('No results found.')
+            self.assertEqual(search_web_fallback('q'), [])
+            client.return_value.text.side_effect = DDGSException('private query secret')
+            with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(WebSearchError) as raised:
+                search_web_fallback('private query')
+            self.assertEqual(raised.exception.category, 'provider_error')
+            self.assertNotIn('secret', str(logs.output) + str(raised.exception))
+
+    def test_fallback_missing_backend_never_uses_auto(self):
+        with patch.dict('src.integrations.web_search.ENGINES', {'text': {}}, clear=True), patch('src.integrations.web_search.DDGS') as client:
+            with self.assertRaises(WebSearchError) as raised:
+                search_web_fallback('q')
+            self.assertEqual(raised.exception.category, 'provider_error')
+            client.assert_not_called()
 
     def test_no_key_invalid_config_and_redirect(self):
         with patch("src.integrations.web_search.web_search_config", return_value=self.config("serper", api_key="")), patch("src.integrations.web_search.httpx.request") as request:

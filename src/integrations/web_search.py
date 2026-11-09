@@ -8,7 +8,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import httpx
-import primp
+from ddgs import DDGS
+from ddgs.engines import ENGINES
 from ddgs.engines.duckduckgo import Duckduckgo
 from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
@@ -250,7 +251,7 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
         elif isinstance(exc, RatelimitException):
             category = 'rate_limit'
         else:
-            # DDGS preserves primp errors as causes; inspect types only, never text.
+            # Inspect typed causes only, never upstream error text.
             cause = exc
             seen = set()
             chain = []
@@ -258,9 +259,9 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
                 seen.add(id(cause))
                 chain.append(cause)
                 cause = cause.__cause__
-            if any(isinstance(e, (httpx.TimeoutException, TimeoutException, TimeoutError, primp.TimeoutError, primp.DNSTimeoutError)) for e in chain):
+            if any(isinstance(e, (httpx.TimeoutException, TimeoutException, TimeoutError)) for e in chain):
                 category = 'timeout'
-            elif any(isinstance(e, (httpx.RequestError, primp.ConnectError, primp.DNSError)) for e in chain):
+            elif any(isinstance(e, (httpx.RequestError)) for e in chain):
                 category = 'network'
             elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError, ElementTree.ParseError)):
                 category = 'invalid_response'
@@ -268,3 +269,46 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
                 category = 'provider_error'
         failure(engine, category, status)
         raise WebSearchError("网络搜索失败；请检查服务配置、网络或稍后重试", category, status) from None
+
+
+def search_web_fallback(query: str, limit: int = 5) -> list[dict]:
+    """Explicit credential-free alternative; never includes the primary DDG backend."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("搜索内容不能为空")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("搜索数量必须是正整数")
+    started = time.monotonic()
+    # DDGS logs raw upstream exceptions at INFO, which can contain query/URL.
+    ddgs_logger = logging.getLogger('ddgs.ddgs')
+    class _SuppressDetails(logging.Filter):
+        def filter(self, record):
+            return False
+    suppress = _SuppressDetails()
+    ddgs_logger.addFilter(suppress)
+    try:
+        try:
+            backends = ('bing', 'yahoo')
+            if not all(name in ENGINES['text'] for name in backends):
+                raise RuntimeError('alternative backends unavailable')
+            items = DDGS(timeout=_TIMEOUT).text(query, max_results=min(limit, 20), backend=','.join(backends))
+        except DDGSException as exc:
+            if type(exc) is DDGSException and str(exc) == 'No results found.':
+                items = []
+            else:
+                raise
+        results = _normalise(items, 'ddgs_fallback', min(limit, 20))
+    except Exception as exc:
+        if isinstance(exc, TimeoutException):
+            category = 'timeout'
+        elif isinstance(exc, RatelimitException):
+            category = 'rate_limit'
+        elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError)):
+            category = 'invalid_response'
+        else:
+            category = 'provider_error'
+        logger.warning('web_search engine=ddgs_fallback outcome=failed category=%s elapsed_ms=%d status=-', category, int((time.monotonic() - started) * 1000))
+        raise WebSearchError("网络搜索失败；请检查服务配置、网络或稍后重试", category) from None
+    finally:
+        ddgs_logger.removeFilter(suppress)
+    logger.info('web_search engine=ddgs_fallback outcome=%s result_count=%d elapsed_ms=%d', 'success' if results else 'empty', len(results), int((time.monotonic() - started) * 1000))
+    return results

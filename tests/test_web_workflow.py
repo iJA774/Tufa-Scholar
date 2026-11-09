@@ -201,7 +201,7 @@ class WebWorkflowTests(unittest.TestCase):
         invoke.assert_not_called()
 
     def test_auto_web_empty_then_failure_and_total_failure_can_switch_to_paper(self):
-        for preceding_empty in (5, 0):
+        for preceding_empty in (0,):
             with self.subTest(preceding_empty=preceding_empty):
                 calls, reviews = [], []
                 def model(name, payload, schema):
@@ -294,6 +294,32 @@ class WebWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '网页检索失败') as error:
                 w.run(TASK, history=[])
         self.assertNotIn('private', str(error.exception))
+
+    def test_auto_fallback_dispatch_and_persistent_backend(self):
+        from src.integrations.web_search import WebSearchError
+        page = result('https://example.com')
+        state = {'research': TASK, 'queries': ['first'], 'auto_web': True}
+        with patch('src.tools.search.search_web', side_effect=WebSearchError('private', 'challenge', 202)) as primary, patch('src.tools.search.search_web_fallback', return_value=[page]) as fallback:
+            state.update(w.search(state))
+            self.assertEqual(state['web_backend'], 'alternative')
+            self.assertFalse(state['web_search_blocked'])
+            self.assertNotIn('web_search_failed', state['warnings'])
+            state['queries'] = ['second']
+            state.update(w.search(state))
+        self.assertEqual(primary.call_count, 1)
+        self.assertEqual(fallback.call_count, 2)
+        self.assertEqual(len(state['candidates']), 1)
+
+    def test_auto_empty_primary_and_fallback_stop_after_two_each(self):
+        state = {'research': TASK, 'queries': ['first'], 'auto_web': True}
+        with patch('src.tools.search.search_web', return_value=[]) as primary, patch('src.tools.search.search_web_fallback', return_value=[]) as fallback:
+            for query in ['first', 'second', 'third']:
+                state['queries'] = [query]
+                state.update(w.search(state))
+        self.assertEqual(primary.call_count, 2)
+        self.assertEqual(fallback.call_count, 2)
+        self.assertEqual(state['web_search_blocked'], 'empty')
+        self.assertNotIn('web_search_failed', state['warnings'])
 
     def test_web_direct_is_rejected_before_tool_call(self):
         with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:

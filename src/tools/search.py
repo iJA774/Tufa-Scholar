@@ -1,7 +1,9 @@
 """Tool adapters for paper and web search."""
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from src.integrations.web_search import search_web
+from src.integrations.web_search import search_web, search_web_fallback
 from src.literature.retrieval import retrieve, retrieve_collection
 
 
@@ -20,6 +22,7 @@ class SearchPapersInput(BaseModel):
 
 class SearchWebInput(SearchPapersInput):
     limit: int = Field(default=5, ge=1, le=5, description='最多返回的网页数量')
+    backend: Literal['configured', 'alternative'] = Field(default='configured', description='已配置服务或免密钥备用路径')
 
 
 def _search_papers(params, context):
@@ -29,6 +32,8 @@ def _search_papers(params, context):
 
 
 def _search_web(params, context):
+    if params.backend == 'alternative':
+        return search_web_fallback(params.query, limit=params.limit)
     return search_web(params.query, limit=params.limit)
 
 

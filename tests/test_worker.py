@@ -19,8 +19,10 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('worker agent')['id']
             first = repository.create_question(project, None, 'first question', 'local')
             observed = []
-            def agent(research, *, history, on_stage):
+            def agent(research, *, history, on_stage, on_subtask):
                 on_stage('planning')
+                on_subtask({'index': 1, 'source': 'local', 'task': 'topic', 'status': 'no_evidence', 'findings': [], 'sources': []})
+                on_subtask({'index': 1, 'source': 'local', 'task': 'duplicate', 'status': 'no_evidence', 'findings': [], 'sources': []})
                 observed.append((research, history, repository.get_task(current['run_id'])['stage']))
                 return 'answer', []
             current = first
@@ -31,6 +33,11 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
             self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'})
             self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
+            self.assertEqual([n['task'] for n in repository.get_task(first['run_id'])['subtasks']], ['topic'])
+            from fastapi.testclient import TestClient
+            from apps.api.main import app
+            with TestClient(app) as client:
+                self.assertEqual(client.get(f"/runs/{first['run_id']}").json()['subtasks'][0]['task'], 'topic')
             collection = repository.create_collection(project, 'snapshot')['id']
             current = repository.create_question(project, first['conversation_id'], 'collection question', 'collection', collection_id=collection)
             with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', side_effect=AssertionError('collection loaded history')) as load:
@@ -40,6 +47,24 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(observed[1][0]['paper_ids'], [])
             self.assertEqual(repository.get_task(current['run_id'])['status'], 'succeeded')
 
+    def test_subtasks_survive_failure_and_retry_starts_empty(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
+            initialize_storage()
+            project = repository.create_project('notes')['id']
+            run_id = repository.create_question(project, None, 'question', 'local')['run_id']
+            note = {'index': 2, 'source': 'local', 'task': 'study', 'status': 'sources_only', 'findings': [], 'sources': [{'id': 'a', 'title': 'paper', 'source_level': 'abstract'}]}
+            repository.record_subtask(run_id, note)
+            self.assertEqual(repository.get_task(run_id)['subtasks'], [])
+            repository.claim_task()
+            repository.record_subtask(run_id, note)
+            repository.record_subtask(run_id, {**note, 'task': 'duplicate'})
+            repository.fail_task(run_id, 'failed')
+            self.assertEqual(repository.get_task(run_id)['subtasks'], [note])
+            retried = repository.retry_task(run_id)
+            self.assertEqual(retried['subtasks'], [])
+            repository.record_subtask(run_id, {**note, 'index': 3})
+            self.assertEqual(repository.get_task(run_id)['subtasks'], [note])
+
     def test_diagnostic_scope_tracks_task_and_resets_after_exception(self):
         from apps.worker.__main__ import run_once
         from src.infrastructure.diagnostics import record_failure
@@ -48,7 +73,7 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('scope')['id']
             task = repository.create_question(project, None, 'question', 'local')
             ids = []
-            def agent(research, *, history, on_stage):
+            def agent(research, *, history, on_stage, on_subtask):
                 self.assertNotIn('id', research)
                 ids.append(record_failure(kind='test', payload={}, schema={}))
                 raise RuntimeError('failure')

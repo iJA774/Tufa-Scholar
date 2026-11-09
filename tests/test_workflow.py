@@ -389,6 +389,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(writers), 1)
         self.assertEqual(len(evidence), 1)
 
+    def test_subtask_notes_validate_citations_and_reach_next_round_and_writer(self):
+        paper = {'id': 3, 'title': 'attention paper', 'abstract': 'attention evidence', 'versions': []}
+        notes, next_inputs, writers = [], [], []
+        def model(name, payload, schema):
+            if name == 'runtime/route': return route(action='paper_research', task='attention')
+            if name == 'literature/research':
+                if payload['prior_subtask_notes']: next_inputs.append(payload['prior_subtask_notes'])
+                if not payload['recent_result']: return specialist(action='search', query='attention')
+                if payload['recent_result'].startswith('检索'): return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                return specialist(action='finish')
+            if name == 'literature/review':
+                if not notes:
+                    eid = payload['evidence'][0]['id']
+                    return w.Review(sufficient=False, summary='不足', gaps=['补查'], subtask_findings=[w.SubtaskFinding(text='有效', citations=[eid]), w.SubtaskFinding(text='伪造', citations=['fake'])], next_steps=[w.NextStep(route='paper_research', direction='研究', goal='不同目标')])
+                return w.Review(sufficient=True, summary='ok')
+            if name == 'literature/synthesize':
+                writers.append(payload)
+                return draft(claims=[w.Claim(text='attention evidence', citations=[payload['evidence'][0]['id']])])
+            if name == 'literature/verify_claim': return w.Verdict(status='supported')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]):
+            w.run(TASK, history=[], on_subtask=notes.append)
+        self.assertEqual(len(notes), 2)
+        self.assertEqual(notes[0]['status'], 'findings')
+        self.assertEqual([item['text'] for item in notes[0]['findings']], ['有效'])
+        self.assertTrue(next_inputs)
+        self.assertEqual(writers[0]['subtask_notes'][0]['findings'][0]['text'], '有效')
+
+    def test_review_discards_malformed_optional_findings(self):
+        review = w.Review.model_validate({'sufficient': False, 'summary': '不足', 'subtask_findings': [
+            {'text': ' ', 'citations': ['e1']}, {'text': '无引用', 'citations': []},
+            {'text': '有效', 'citations': ['e1']}, {'text': '坏结构'}]})
+        self.assertEqual([item.text for item in review.subtask_findings], ['有效'])
+        self.assertFalse(review.sufficient)
+
     def test_direct_graph_uses_history_without_tools(self):
         history = [{'role': 'user', 'content': 'prior question'}]
         def model(name, payload, schema):

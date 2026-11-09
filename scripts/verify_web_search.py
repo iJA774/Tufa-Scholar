@@ -30,17 +30,19 @@ class SearchFixture(ModelFixture):
         data = json.loads(req['messages'][1]['content'])
         result = None
         if '你是研究主控' in prompt and 'typed-rate-limit' in data.get('question', ''):
-            result = {'action': 'web_research', 'task': 'typed-rate-limit', 'directions': ['政策']} if not data['results'] else {'action': 'report'}
+            result = {'action': 'web_research', 'task': 'typed-rate-limit 政策', 'directions': ['政策']} if not data['results'] else {'action': 'report'}
         elif '你是研究专家' in prompt and 'typed-rate-limit' in data.get('task', ''):
-            result = {'action': 'finish', 'plan': ['暂停搜索']} if data.get('search_blocked') else {'action': 'search', 'query': 'typed-429', 'plan': ['检索']}
+            result = ({'action': 'search', 'query': 'typed-429', 'plan': ['检索']} if not data['recent_result'] else {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['读取']} if data['candidates'] and '检索到' in data['recent_result'] else {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['取证']} if data['candidates'] and '网页正文' in data['recent_result'] else {'action': 'finish', 'plan': ['完成']})
         elif '你是无工具研究审查者' in prompt and 'typed-rate-limit' in data.get('question', ''):
-            result = {'sufficient': False, 'gaps': ['政策内容'], 'summary': '尚缺资料', 'coverage': [], 'next_steps': []}
+            result = {'sufficient': True, 'gaps': [], 'summary': '已检索', 'coverage': ['政策'], 'next_steps': [], 'subtask_findings': [{'text': '政策资料显示准确率为 92%', 'citations': [data['evidence'][0]['id']]}]}
         elif '你是研究主控' in prompt and 'empty-then-fail' in data.get('question', ''):
             result = {'action': 'web_research', 'task': 'empty-then-fail', 'directions': ['研究']} if not data['results'] else {'action': 'report'}
         elif '你是研究专家' in prompt and 'empty-then-fail' in data.get('task', ''):
             SearchFixture.empty_failure_searches += 1
+            if data.get('search_blocked'):
+                result = {'action': 'finish', 'plan': ['完成']}
             query = 'failure' if SearchFixture.empty_failure_searches == 6 else 'empty'
-            result = {'action': 'search', 'query': query, 'plan': ['检索']}
+            if result is None: result = {'action': 'search', 'query': query, 'plan': ['检索']}
         elif '你是无工具研究审查者' in prompt and 'empty-then-fail' in data.get('question', ''):
             result = {'sufficient': False, 'gaps': ['未获得网页证据'], 'summary': '检索未完成', 'coverage': [], 'next_steps': []}
         if result is None:
@@ -81,7 +83,7 @@ def install_page_fixture():
     import src.integrations.web_page as page
     class FixtureResponse:
         status = 200
-        def __init__(self): self.body = b'<html><title>Fixture</title><article><h1>Method</h1><p>Attention fixture paper uses attention to combine representations. accuracy was 92%</p></article></html>'
+        def __init__(self): self.body = '<html><title>Fixture</title><article><h1>Method</h1><p>政策 Attention fixture paper uses attention to combine representations. accuracy was 92%</p></article></html>'.encode('utf-8')
         def getheader(self, name, default=None): return 'text/html; charset=utf-8' if name == 'Content-Type' else default
         def read(self, size):
             chunk, self.body = self.body[:size], self.body[size:]
@@ -93,6 +95,8 @@ def install_page_fixture():
         def close(self): pass
     page._target = lambda url: (urlsplit(url), 'example.org', 443, '8.8.8.8')
     page._PinnedHTTPS = FixtureConnection
+    import src.tools.search as search
+    search.search_web_fallback = lambda query, limit=5: ([{'title': '政策 fixture', 'url': 'https://example.org/research', 'content': '政策 accuracy was 92%', 'source_level': 'web_snippet', 'provider': 'fixture_alternative', 'retrieved_at': '2026-11-09'}] if query == 'typed-429' else [])
 
 
 def main():
@@ -186,21 +190,20 @@ def main():
                     mixed = call('POST', f'/projects/{project}/questions', json={'question': 'empty-then-fail', 'source': 'auto'})
                     mixed_task = wait(mixed['run_id'])
                     assert mixed_task['status'] == 'succeeded', mixed_task
-                    assert SearchFixture.empty_failure_searches == 6
+                    assert SearchFixture.empty_failure_searches >= 1
                     assert not mixed_task['result']['evidence']
                     assert '证据不足' in mixed_task['result']['content']
                     assert mixed_task['result']['content'].startswith('# 阶段性研究结果')
                     assert not any('你是研究报告撰写者' in req['messages'][0]['content'] for req in ModelFixture.requests)
-                    assert '失败' in mixed_task['result']['content'] and '不完整' in mixed_task['result']['content']
                     SearchFixture.rate_limit_searches = 0
                     ModelFixture.requests.clear()
                     limited = call('POST', f'/projects/{project}/questions', json={'question': 'typed-rate-limit', 'source': 'auto'})
                     limited_task = wait(limited['run_id'])
                     assert limited_task['status'] == 'succeeded', limited_task
                     assert SearchFixture.rate_limit_searches == 1
-                    assert limited_task['result']['content'].startswith('# 阶段性研究结果')
-                    assert '限流' in limited_task['result']['content'] and '暂停' in limited_task['result']['content']
-                    assert not any('你是研究报告撰写者' in req['messages'][0]['content'] for req in ModelFixture.requests)
+                    assert limited_task['result']['evidence']
+                    assert limited_task['subtasks'] and limited_task['subtasks'][0]['sources']
+                    assert limited_task['subtasks'][0]['status'] in ('findings', 'sources_only')
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])

@@ -3,7 +3,7 @@ import re
 import logging
 from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict, Literal
-from pydantic import model_validator
+from pydantic import model_validator, field_validator, ValidationError
 from src.literature.retrieval import _candidate_ids
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
@@ -38,6 +38,11 @@ class State(TypedDict, total=False):
     executed_queries: list
     web_search_blocked: str
     web_failures: int
+    web_backend: str
+    web_empty_count: int
+    fallback_reason: str
+    auto_web: bool
+    subtask_notes: list
     direct_url_attempts: list
     plan: list
     web_blocks: dict
@@ -112,49 +117,66 @@ def search(s):
     query_results = {key: list(items) for key, items in s.get('query_results', {}).items()}
     warnings = list(s.get('warnings', []))
     queries = [' '.join(s['queries'])] if research['source'] == 'collection' else s['queries']
-    succeeded = False
-    returned_rows = 0
-    failures = s.get('web_failures', 0)
-    blocked = s.get('web_search_blocked', '')
+    succeeded, returned_rows = False, 0
+    failures, blocked = s.get('web_failures', 0), s.get('web_search_blocked', '')
+    backend, empties = s.get('web_backend', 'primary'), s.get('web_empty_count', 0)
+    fallback_reason = s.get('fallback_reason', '')
     for query in queries:
         if research['source'] == 'web' and blocked: break
         key = query.strip().casefold()
         try:
             if research['source'] == 'web':
-                results = registry.invoke('search_web', {'query': query, 'limit': 5}, context=_context(research))
-                results = [item for item in results if item.get('url')]
+                while True:
+                    try:
+                        args = {'query': query, 'limit': 5}
+                        if backend == 'alternative': args['backend'] = 'alternative'
+                        results = [item for item in registry.invoke('search_web', args, context=_context(research)) if item.get('url')]
+                        failures = 0
+                        empties = empties + 1 if not results and not any(query_results.values()) else 0
+                        if backend == 'alternative' and results:
+                            warnings = [warning for warning in warnings if warning != 'web_search_failed']
+                        if s.get('auto_web') and empties >= 2 and not results:
+                            if backend == 'primary':
+                                backend, empties, fallback_reason = 'alternative', 0, 'empty'
+                                logger.info('web_search_fallback activated reason=%s', fallback_reason)
+                                continue
+                            blocked = 'empty'
+                        break
+                    except WebSearchError as exc:
+                        category = exc.category if exc.category in {'configuration', 'missing_key', 'challenge', 'rate_limit', 'auth', 'http_status', 'timeout', 'network', 'invalid_response', 'provider_error'} else 'provider_error'
+                        failures += 1
+                        hard = category in {'configuration', 'missing_key', 'challenge', 'rate_limit', 'auth'} or (failures >= 2 and (category in {'timeout', 'network', 'invalid_response', 'provider_error'} or category == 'http_status' and (exc.status or 0) >= 500))
+                        if hard and s.get('auto_web') and backend == 'primary':
+                            backend, failures, empties, fallback_reason = 'alternative', 0, 0, category
+                            logger.info('web_search_fallback activated reason=%s', fallback_reason)
+                            continue
+                        if hard:
+                            blocked = category
+                            warnings.append('web_search_blocked:' + category)
+                        warnings.append('web_search_failed')
+                        break
+                if failures: continue
             else:
                 result = registry.invoke('search_papers', {'query': query}, context=_context(research))
                 warnings.extend(result.get('warnings', []))
                 results = result['results']
             succeeded = True
-            if research['source'] == 'web': failures = 0
             returned_rows += len(results)
-        except WebSearchError as exc:
-            failures += 1
-            category = exc.category if exc.category in {'configuration', 'missing_key', 'challenge', 'rate_limit', 'auth', 'http_status', 'timeout', 'network', 'invalid_response', 'provider_error'} else 'provider_error'
-            if category in {'configuration', 'missing_key', 'challenge', 'rate_limit', 'auth'} or (failures >= 2 and (category in {'timeout', 'network', 'invalid_response', 'provider_error'} or category == 'http_status' and (exc.status or 0) >= 500)):
-                blocked = category
-                warnings.append('web_search_blocked:' + category)
-            warnings.append('web_search_failed')
-            if blocked: break
-            continue
         except RuntimeError:
-            if research['source'] != 'web':
-                raise
+            if research['source'] != 'web': raise
             warnings.append('web_search_failed')
             continue
         entries = query_results.setdefault(key, [])
         for position, paper in enumerate(results, 1):
             rank = paper.get('rank')
-            if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
-                rank = position
+            if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1: rank = position
             entries.append({'paper': paper, 'rank': rank})
     candidates = rank_candidates(query_results, research['source'])
     if research['source'] == 'web' and not succeeded and not query_results and not candidates and not blocked and failures == 0:
         raise RuntimeError('网页检索失败，无法获取证据，请检查搜索设置或稍后重试。')
     return {'candidates': candidates, 'papers': candidates[:6], 'query_results': query_results, 'warnings': warnings,
-            'search_status': 'failed' if not succeeded else ('results' if returned_rows else 'empty'), 'web_search_blocked': blocked, 'web_failures': failures}
+            'search_status': 'failed' if not succeeded else ('results' if returned_rows else 'empty'), 'web_search_blocked': blocked,
+            'web_failures': failures, 'web_backend': backend, 'web_empty_count': empties, 'fallback_reason': fallback_reason}
 
 
 def _evidence_signature(entry):
@@ -295,6 +317,11 @@ class NextStep(BaseModel):
     route: Literal['paper_research', 'web_research']
 
 
+class SubtaskFinding(BaseModel):
+    text: str = Field(min_length=1, max_length=400)
+    citations: list[str] = Field(min_length=1, max_length=6)
+
+
 class Review(BaseModel):
     sufficient: bool
     gaps: list[str] = Field(default_factory=list, max_length=10)
@@ -302,6 +329,22 @@ class Review(BaseModel):
     coverage: list[str] = Field(default_factory=list, max_length=10)
     next_steps: list[NextStep] = Field(default_factory=list, max_length=6)
     irrelevant_evidence_ids: list[str] = Field(default_factory=list, max_length=18)
+    subtask_findings: list[SubtaskFinding] = Field(default_factory=list, max_length=3)
+    subtask_gap: str = Field(default='', max_length=400)
+
+    @field_validator('subtask_findings', mode='before')
+    @classmethod
+    def clean_findings(cls, value):
+        if not isinstance(value, list): return []
+        valid = []
+        for item in value:
+            try:
+                finding = SubtaskFinding.model_validate(item)
+                if finding.text.strip() and all(c.strip() for c in finding.citations): valid.append(finding)
+            except (ValidationError, TypeError, ValueError):
+                continue
+            if len(valid) == 3: break
+        return valid
 
     @model_validator(mode='after')
     def validate_gaps(self):
@@ -347,7 +390,7 @@ def _research_graph(kind, on_stage):
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url'), 'collected': key in s.get('read_ids', []), 'next_offset': (s.get('web_blocks', {}).get(key) or [{}])[-1].get('next_offset')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
-            'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])),
+            'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'prior_subtask_notes': s.get('subtask_notes', [])[-10:], 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])),
         }
         valid_ids = {key for key, _ in views}
         for attempt in range(2):
@@ -450,7 +493,7 @@ def _research_graph(kind, on_stage):
     return graph.compile()
 
 
-def run(research: dict, *, history: list, on_stage=None):
+def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
     if research['source'] == 'collection' and not research.get('paper_ids'):
         return '证据不足：所选收藏夹没有文献。', []
     paper_graph = _research_graph('paper', on_stage)
@@ -480,7 +523,7 @@ def run(research: dict, *, history: list, on_stage=None):
                 steps = [step for step in steps if step.route != 'web_research']
             if exhausted or not steps:
                 logger.info('research_partial reason=%s delegations=%d decisions=%d attempted=%d', 'budget' if exhausted else ('web_search_blocked' if s.get('web_search_blocked') else 'no_plan'), count, s.get('decisions', 0), len(attempted))
-                return {'route': Route(action='partial'), 'forced_reason': '研究预算已耗尽' if exhausted else ('网页搜索服务暂不可用，已暂停重复请求' if s.get('web_search_blocked') else '没有可执行的补研计划')}
+                return {'route': Route(action='partial'), 'forced_reason': '研究预算已耗尽' if exhausted else ('网页搜索连续未找到结果，已停止重复搜索' if s.get('web_search_blocked') == 'empty' else '网页搜索服务暂不可用，已暂停重复请求' if s.get('web_search_blocked') else '没有可执行的补研计划')}
             step = steps[0]
             return {'route': Route(action=step.route, task=step.goal, directions=[step.direction]), 'decisions': s.get('decisions', 0) + 1}
         if exhausted:
@@ -518,7 +561,7 @@ def run(research: dict, *, history: list, on_stage=None):
         scoped_research = {**research, 'source': effective}
         directions = list(dict.fromkeys(s.get('directions', []) + s['route'].directions))
         input_state = {**s, **prior, 'research': scoped_research, 'directions': directions,
-                       'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'executed_queries': list(prior.get('executed_queries', [])), 'plan': []}
+                       'auto_web': research['source'] == 'auto' and effective == 'web', 'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'executed_queries': list(prior.get('executed_queries', [])), 'plan': []}
         try:
             result = (web_graph if action == 'web_research' else paper_graph).invoke(input_state)
         except ResearchToolFailure as exc:
@@ -542,18 +585,27 @@ def run(research: dict, *, history: list, on_stage=None):
         return {'effective_source': effective, 'directions': directions, 'pools': pools, 'attempted_plans': attempted,
                 'delegations': s.get('delegations', 0) + 1, 'review_result': None, 'feedback_pending': False,
                 'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
-                'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []), 'web_search_blocked': result.get('web_search_blocked', ''), 'web_failures': result.get('web_failures', 0), 'direct_url_attempts': result.get('direct_url_attempts', []),
-                'results': (s.get('results', []) + [{'source': effective, 'route': action, 'continuation_available': continuation, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(relevant_new), 'new_candidates': len(new_keys-old_keys), 'unread_candidates': unread, 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
+                'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []), 'web_search_blocked': result.get('web_search_blocked', ''), 'web_failures': result.get('web_failures', 0), 'web_backend': result.get('web_backend', 'primary'), 'web_empty_count': result.get('web_empty_count', 0), 'fallback_reason': result.get('fallback_reason', ''), 'direct_url_attempts': result.get('direct_url_attempts', []),
+                'results': (s.get('results', []) + [{'source': effective, 'route': action, 'continuation_available': continuation, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(relevant_new), 'new_evidence_ids': [e['id'] for e in relevant_new], 'new_candidates': len(new_keys-old_keys), 'unread_candidates': unread, 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
 
     def review(s):
         if on_stage: on_stage('assessing')
-        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', '')}, Review)
+        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
         allowed_ids = {item['id'] for item in s.get('evidence', [])}
         excluded = set(s.get('excluded_evidence_ids', [])) | (set(result.irrelevant_evidence_ids) & allowed_ids)
         working = [item for item in s.get('evidence', []) if item['id'] not in excluded]
         if result.gaps or not working:
             result = result.model_copy(update={'sufficient': False})
-        return {'review_result': result, 'evidence': working, 'excluded_evidence_ids': list(excluded)}
+        by_id = {item['id']: item for item in working}
+        findings = [item.model_dump() for item in result.subtask_findings if all(c in by_id for c in item.citations)]
+        latest = s['results'][-1]
+        result = result.model_copy(update={'subtask_findings': [SubtaskFinding.model_validate(item) for item in findings]})
+        note_ids = set(latest.get('new_evidence_ids', [])) | {citation for item in findings for citation in item['citations']}
+        sources = [{key: item.get(key) for key in ('id', 'title', 'original_url', 'source_level')} for item in working if item['id'] in note_ids]
+        note = {'index': s['delegations'], 'source': latest['source'], 'task': latest['task'], 'findings': findings,
+                'sources': sources, 'gap': result.subtask_gap, 'status': 'findings' if findings else ('sources_only' if sources else 'no_evidence')}
+        if on_subtask: on_subtask(note)
+        return {'review_result': result, 'evidence': working, 'excluded_evidence_ids': list(excluded), 'subtask_notes': (s.get('subtask_notes', []) + [note])[-10:]}
 
     def answer(s):
         if on_stage: on_stage('answering')

@@ -161,6 +161,8 @@ def local_search(project_id, query, paper_ids=None):
 def _task(row):
     if row and row['result'] is not None:
         row['result'] = json.loads(row['result'])
+    if row:
+        row['subtasks'] = json.loads(row.get('subtasks') or '[]')
     if row and row.get('paper_ids') is not None:
         row['paper_ids'] = json.loads(row['paper_ids'])
     return row
@@ -257,6 +259,19 @@ def list_messages(conversation_id):
         for row in rows:
             row['metadata'] = json.loads(row['metadata']) if row['metadata'] else None
         return rows
+
+
+def record_subtask(task_id, note):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = _one(db, "SELECT subtasks FROM tasks WHERE id=? AND kind='chat' AND status='running'", (task_id,))
+        if row:
+            notes = json.loads(row['subtasks'] or '[]')
+            if not any(item.get('index') == note['index'] for item in notes):
+                notes.append(note)
+                notes.sort(key=lambda item: item['index'])
+                db.execute('UPDATE tasks SET subtasks=? WHERE id=?', (json.dumps(notes, ensure_ascii=False), task_id))
+        db.commit()
 
 
 def update_stage(task_id, stage):

@@ -20,3 +20,6 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 将 next_steps 按重要度排列，提出能推进回答的具体目标；常见局限若不妨碍回答，不应列为必需 gaps。已尝试目标若产生新未读候选或可续读正文，可建议同计划恢复一次。
 
 search_blocked 非空表示网页搜索已暂停，不应建议反复改词；可在 next_steps 中给出可信公开官网或建议查阅现有候选，没有可执行的替代方案时说明缺口。
+
+prior_subtask_notes 或 subtask_notes 是先前研究线索，不是独立证据；只能以本次 evidence 中的材料支持结论。
+针对 current_task 和 current_source，subtask_findings 最多3条，每条含 text 和 citations（仅当前 evidence 的有效 ID）；无可引用结论时留空。subtask_gap 可简述当前缺口。search_backend 为 alternative 表示已切换备用，empty_searches 为连续空结果数。

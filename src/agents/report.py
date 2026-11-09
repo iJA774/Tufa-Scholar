@@ -103,6 +103,7 @@ class ReportState(TypedDict, total=False):
     revised: bool
     content: str
     research_gaps: list
+    subtask_notes: list
     verification_gaps: list
     outcomes: list
     patched_positions: list
@@ -313,7 +314,17 @@ def build_report_graph(model, on_stage=None):
     def draft(s):
         if on_stage: on_stage('synthesizing')
         review = s.get('review_result')
-        payload = {'question': s['research']['query'], 'history': s.get('history', []), 'directions': s.get('directions', []), 'verification_gaps': s.get('verification_gaps', []), 'evidence': s['evidence'], 'review': review.model_dump() if review else None}
+        evidence_ids = {entry['id'] for entry in s['evidence']}
+        notes = [{**note,
+                  'findings': [finding for finding in note['findings'] if all(c in evidence_ids for c in finding['citations'])],
+                  'sources': [source for source in note['sources'] if source['id'] in evidence_ids]}
+                 for note in s.get('subtask_notes', [])[-10:]]
+        review_data = review.model_dump() if review else None
+        if review_data:
+            review_data['subtask_findings'] = [finding for finding in review_data.get('subtask_findings', []) if all(c in evidence_ids for c in finding['citations'])]
+        payload = {'question': s['research']['query'], 'history': s.get('history', []), 'subtask_notes': notes,
+                   'directions': s.get('directions', []), 'verification_gaps': s.get('verification_gaps', []),
+                   'evidence': s['evidence'], 'review': review_data}
         try:
             return {'draft': model(s, 'literature/synthesize', payload, Draft), 'empty_retried': s.get('empty_retried', False)}
         except StructuredOutputError:

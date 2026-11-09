@@ -2,7 +2,7 @@
 
 `literature.py` 保存科研问答的 LangGraph 图及结构化模型输出：主控动态选择直接回答、研究委派、审查或报告；论文和网页研究各有独立子图，报告子图负责综合、核验及至多一次局部修订，缺证据可反馈主控补研。入口为 `run(research, *, history, on_stage=None)`，返回回答正文与证据。
 
-`research` 包含 `query`、`project_id`、`source`，`auto` 由主控自主选择直接回答、论文或网页，审查缺口后可在论文与网页之间切换，可带 `paper_ids`、`model_name` 与 `reasoning_effort`；`history` 是调用方准备的对话消息列表。Agent 不需要任务 ID，不直接导入仓储或修改任务状态。可选 `on_stage(stage)` 在节点执行前接收阶段名；worker 负责读历史、提供回调、领取任务及原子提交结果。
+`research` 包含 `query`、`project_id`、`source`，`auto` 由主控自主选择直接回答、论文或网页，审查缺口后可在论文与网页之间切换，可带 `paper_ids`、`model_name` 与 `reasoning_effort`；`history` 是调用方准备的对话消息列表。Agent 不需要任务 ID，不直接导入仓储或修改任务状态。可选 `on_subtask(note)` 每次审查后报告初步发现、来源及缺口，由调用方保存。可选 `on_stage(stage)` 在节点执行前接收阶段名；worker 负责读历史、提供回调、领取任务及原子提交结果。
 
 ```python
 from src.agents.literature import run
@@ -28,4 +28,4 @@ content, evidence = run(
 
 网页专家可分页读取公网网页正文，取证保留 Markdown 字符范围。报告核验的 unsupported 坐标和原因写入私有诊断，普通日志仅记录诊断 ID 和数量。
 
-搜索服务验证、限流、认证或配置失败时，本任务暂停后续搜索；暂时性错误连续两次也暂停，成功空结果重置计数。不自动切换服务。仍可读取已有候选，或经受限网页读取尝试最多两个不同的已知公开官方 URL，再正常取证。
+搜索服务验证、限流、认证或配置失败时，本任务暂停后续搜索；暂时性错误连续两次也暂停，成功空结果重置计数。仅 `auto` 可在受阻或连续两次无候选空结果时使用 DDGS 的 Bing/Yahoo 备用检索；显式范围不切换。仍可读取已有候选，或经受限网页读取尝试最多两个不同的已知公开官方 URL，再正常取证。

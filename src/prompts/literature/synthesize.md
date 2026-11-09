@@ -14,3 +14,5 @@ question 是问题；history 仅用于理解问题；directions 是研究方向�
 ## 输出
 仅输出包含 sections 和 limitations 的 JSON。limitations 是有引用依据的具体局限段落；没有依据时为空。不要输出输入字段或其他字段。完整示例：
 {"sections":[{"heading":"概述","paragraphs":[{"text":"有依据的完整段落。","citations":["a1"]}]}],"limitations":[{"text":"材料报告了相应局限。","citations":["a1"]}]}
+
+prior_subtask_notes 或 subtask_notes 是先前研究线索，不是独立证据；只能以本次 evidence 中的材料支持结论。

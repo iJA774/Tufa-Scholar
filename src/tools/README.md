@@ -28,11 +28,11 @@ evidence = registry.invoke(
 | 工具 | 参数 | 返回 | 适用来源 |
 |---|---|---|---|
 | `search_papers` | `query` | 含 `query`、`source`、`method`、`results`、`warnings` 的字典 | `local`、`openalex`、`all`、`collection` |
-| `search_web` | `query`、可选 `limit`（1–5，默认 5） | 网页结果列表，含 URL、文本、来源层级、引擎和获取时间 | `web` |
+| `search_web` | `query`、可选 `limit`（1–5，默认 5）、`backend`（`configured` 或 `alternative`，默认 `configured`） | 网页结果列表，含 URL、文本、来源层级、引擎和获取时间 | `web` |
 | `read_web_page` | `url`、`offset`（默认 0）、`limit`（默认 1000，最大 4000） | 清理后的 Markdown 字符片段及下一偏移、最终 URL、标题和获取时间 | `web` |
 | `collect_evidence` | `query`、`papers`（最多六条检索结果）、可选 `relevance_queries`（最多八条，每条非空且不超过 1000 字符） | 带原文定位或网页出处的证据列表 | 全部来源 |
 
-`source="all"` 指项目文献与 OpenAlex，不包含网页搜索。网页调用先创建 `ToolContext(project_id=1, source="web")`，再执行 `search_web`；结果列表可直接作为 `collect_evidence` 的 `papers`。
+`source="all"` 指项目文献与 OpenAlex，不包含网页搜索。网页调用先创建 `ToolContext(project_id=1, source="web")`，再执行 `search_web`；显式选择 `alternative` 时使用免密钥的 DDGS 备用引擎，结果的 provider 为 `ddgs_fallback`；默认路径仍使用设置中的服务，不自动切换。结果列表可直接作为 `collect_evidence` 的 `papers`。
 
 收藏夹上下文示例：`ToolContext(project_id=1, source="collection", paper_ids=(3, 7))`。调用方使用任务提交时保存的论文 ID 快照，不在执行时重新读取收藏夹当前成员。冻结的上下文复制论文 ID 序列，避免后续修改原列表改变范围。
 
