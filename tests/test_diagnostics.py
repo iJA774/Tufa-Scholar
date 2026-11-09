@@ -41,6 +41,16 @@ class DiagnosticsTest(unittest.TestCase):
         artifact['payload'].pop('direct_url_attempts_remaining')
         self.assertIn('无法离线复现', replay(artifact))
 
+    def test_legacy_model_validation_mixed_candidate_replays_semantically(self):
+        url = 'https://www.fec.gov/resources/cms-content/documents/2026pdates.pdf'
+        response = {'action': 'read_web_page', 'candidate_ids': ['C1'], 'url': url, 'query': '', 'offset': 3000, 'plan': ['read']}
+        artifact = {'kind': 'model_validation', 'response': json.dumps(response), 'payload': {'role': 'web', 'candidates': [{'id': 'C1', 'url': url}]}, 'context': {'prompt_id': 'literature/research'}}
+        self.assertEqual(replay(artifact), '未复现')
+        artifact['payload']['candidates'][0]['url'] = 'https://example.org/other'
+        self.assertEqual(replay(artifact), '复现：conflicting_candidate_url')
+        artifact['payload']['candidates'] = []
+        self.assertNotEqual(replay(artifact), '未复现')
+
     def test_semantic_replay(self):
         self.assertEqual(replay([]), '诊断格式无效')
         self.assertEqual(replay({'context': []}), '诊断格式无效')

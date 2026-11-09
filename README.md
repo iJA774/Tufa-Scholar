@@ -168,6 +168,13 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 网页动作契约验收（2026-11-09）
+
+隔离后端回归 177 项通过，耗时 14.015 秒，日志为 `.cache/web-action-contract-tests/unittest.log`。实际 API/worker 配合模拟模型和服务运行 `verify_web_search` 与 `verify_chat` 均以退出码 0 完成，日志分别位于 `.cache/web-action-contract-acceptance/web/verify.log` 和 `chat/verify.log`；网页入口覆盖匹配候选 ID 与 URL 同时出现时续读下一块并引用。
+
+两份任务 #4 历史终止响应按新规则离线重放通过；重复网址的回放返回具体重复代码。本轮未重跑真实完整模型任务。
+
+
 ### 搜索失败后直读与公开 PDF 验收（2026-11-09）
 
 在 `.cache/direct-pdf-tests` 下隔离 `TEMP`、`TMP` 和 `TUFA_DATA_DIR`，后端回归 173 项通过，耗时 12.753 秒，日志为该目录的 `unittest.log`。模拟实际 API/worker 的 `verify_chat` 与 `verify_web_search` 均以退出码 0 完成；网页入口最终复核覆盖备用搜索一次失败后跨委派直读模拟公开 PDF、生成报告并保存来源小结。

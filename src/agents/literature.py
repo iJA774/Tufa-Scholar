@@ -4,6 +4,7 @@ import logging
 from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict, Literal
 from pydantic import model_validator, field_validator, ValidationError
+from pydantic_core import PydanticCustomError
 from src.literature.retrieval import _candidate_ids
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
@@ -112,10 +113,15 @@ def _can_read_direct(kind, state, candidate_count):
                  (state.get('fallback_reason') or state.get('web_failures', 0) or state.get('web_empty_count', 0))))
 
 
-def specialist_semantic_error(choice, *, kind, blocked, can_direct, candidate_ids, direct_url_attempts):
+def specialist_semantic_error(choice, *, kind, blocked, can_direct, candidate_ids, direct_url_attempts, candidate_urls=None):
     if choice.action == 'search' and kind == 'web' and blocked: return 'search_blocked'
-    if choice.action == 'read_web_page' and choice.url:
+    if choice.action == 'read_web_page' and choice.url and choice.candidate_ids:
+        known = (candidate_urls or {}).get(choice.candidate_ids[0], '')
+        same = bool(known and (choice.url == known or (_direct_url_key(choice.url) and _direct_url_key(choice.url) == _direct_url_key(known))))
+        if kind != 'web' or not same: return 'conflicting_candidate_url'
+    elif choice.action == 'read_web_page' and choice.url:
         key = _direct_url_key(choice.url)
+        if key and key in direct_url_attempts: return 'repeated_direct_url'
         if not (kind == 'web' and can_direct and key and choice.offset == 0 and key not in direct_url_attempts and len(direct_url_attempts) < 2):
             return 'invalid_direct_url'
     if choice.action == 'read_web_page' and kind != 'web': return 'invalid_candidate_ids'
@@ -317,16 +323,23 @@ class Specialist(BaseModel):
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=1000, ge=1, le=4000)
 
+    @field_validator('plan', mode='before')
+    @classmethod
+    def validate_plan(cls, value):
+        if not isinstance(value, list) or not value or len(value) > 6 or any(not isinstance(item, str) or not item.strip() or len(item) > 500 for item in value):
+            raise PydanticCustomError('specialist_plan_invalid', '研究计划不能为空')
+        return value
+
     @model_validator(mode='after')
     def validate_action(self):
-        if any(not p.strip() or len(p) > 500 for p in self.plan):
-            raise ValueError('研究计划不能为空')
         if self.action == 'search' and not self.query.strip():
-            raise ValueError('搜索查询不能为空')
-        if self.action == 'read_web_page' and not ((len(self.candidate_ids) == 1 and not self.url) or (not self.candidate_ids and self.url and self.query.strip())):
-            raise ValueError('读取网页须指定一个候选')
+            raise PydanticCustomError('specialist_search_query_required', '搜索查询不能为空')
+        if self.action == 'read_web_page' and not self.candidate_ids and self.url and not self.query.strip():
+            raise PydanticCustomError('specialist_direct_query_required', '直读网址需提供主题词')
+        if self.action == 'read_web_page' and not (len(self.candidate_ids) == 1 or (not self.candidate_ids and self.url and self.query.strip())):
+            raise PydanticCustomError('specialist_web_target_required', '读取网页须指定一个候选或网址')
         if self.action == 'read' and not self.candidate_ids:
-            raise ValueError('精读候选不能为空')
+            raise PydanticCustomError('specialist_read_candidates_required', '精读候选不能为空')
         return self
 
 
@@ -411,24 +424,27 @@ def _research_graph(kind, on_stage):
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url'), 'collected': key in s.get('read_ids', []), 'next_offset': (s.get('web_blocks', {}).get(key) or [{}])[-1].get('next_offset')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
-            'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'prior_subtask_notes': s.get('subtask_notes', [])[-10:], 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])),
+            'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'prior_subtask_notes': s.get('subtask_notes', [])[-10:], 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])), 'attempted_direct_urls': s.get('direct_url_attempts', []),
         }
         valid_ids = {key for key, _ in views}
         for attempt in range(2):
             choice = _model(s, 'literature/research', payload, Specialist)
             logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
             code = specialist_semantic_error(choice, kind=kind, blocked=bool(s.get('web_search_blocked')),
-                can_direct=can_direct, candidate_ids=valid_ids, direct_url_attempts=s.get('direct_url_attempts', []))
-            if not code: break
+                can_direct=can_direct, candidate_ids=valid_ids, direct_url_attempts=s.get('direct_url_attempts', []), candidate_urls={key: item.get('url', '') for key, item in views})
+            if not code:
+                if choice.action == 'read_web_page' and choice.candidate_ids and choice.url:
+                    choice = choice.model_copy(update={'url': '', 'query': ''})
+                break
             diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
                 response=choice.model_dump(), errors=[code],
                 context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1, 'role': kind, 'search_blocked': bool(s.get('web_search_blocked')), 'can_read_direct_url': can_direct, 'direct_url_attempts': s.get('direct_url_attempts', [])})
             logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
             if attempt:
-                if kind == 'web' and (s.get('web_search_blocked') or can_direct) and (choice.action == 'search' or (choice.action == 'read_web_page' and choice.url)):
+                if kind == 'web' and (code == 'conflicting_candidate_url' or ((s.get('web_search_blocked') or can_direct) and (choice.action == 'search' or (choice.action == 'read_web_page' and choice.url)))):
                     return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan}
                 raise ValueError('精读候选标识无效')
-            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
+            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'instruction': ('该网址已尝试，请选择其他可信网址或结束' if code == 'repeated_direct_url' else '候选分页只传 candidate_ids，省略 url 和 query' if code == 'conflicting_candidate_url' else ''), 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
         return {'choice': choice, 'candidate_identities': identities, 'plan': choice.plan}
 
     def invoke(s):
@@ -604,7 +620,7 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
 
     def review(s):
         if on_stage: on_stage('assessing')
-        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'can_read_direct_url': _can_read_direct('web', {**s, 'auto_web': research['source'] == 'auto'}, len(s.get('pools', {}).get('web_research', {}).get('candidates', []))), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
+        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'can_read_direct_url': _can_read_direct('web', {**s, 'auto_web': research['source'] == 'auto'}, len(s.get('pools', {}).get('web_research', {}).get('candidates', []))), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'attempted_direct_urls': s.get('direct_url_attempts', []), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
         allowed_ids = {item['id'] for item in s.get('evidence', [])}
         excluded = set(s.get('excluded_evidence_ids', [])) | (set(result.irrelevant_evidence_ids) & allowed_ids)
         working = [item for item in s.get('evidence', []) if item['id'] not in excluded]

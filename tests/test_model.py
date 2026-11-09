@@ -75,6 +75,26 @@ class ModelTests(unittest.TestCase):
                 for secret in ('secret-key', 'private-key-secret', 'secret-value', 'private question'):
                     self.assertNotIn(secret, feedback)
 
+    def test_specialist_direct_web_feedback_at_http_boundary(self):
+        from src.agents.literature import Specialist
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': 'secret-key'}
+        bad = {'action': 'read_web_page', 'url': 'https://example.org/private', 'plan': ['private-plan']}
+        good = dict(bad, query='election dates')
+        sent = []
+        def post(url, **kwargs):
+            sent.append(kwargs['json'])
+            body = bad if len(sent) == 1 else good
+            return httpx.Response(200, request=httpx.Request('POST', url), json={'choices': [{'message': {'content': json.dumps(body)}}]})
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', side_effect=post), self.assertLogs('src.integrations.model', level='INFO') as logs:
+            result = structured('literature/research', {'question': 'private-question'}, Specialist)
+        self.assertEqual(result.query, 'election dates')
+        feedback = json.loads(sent[1]['messages'][2]['content'])['validation_feedback']
+        self.assertEqual(feedback, [{'type': 'specialist_direct_query_required', 'path': []}])
+        safe = sent[1]['messages'][2]['content'] + ' '.join(logs.output)
+        for secret in ('secret-key', 'private-question', 'private-plan', 'example.org', '直读网址需提供主题词'):
+            self.assertNotIn(secret, safe)
+        self.assertEqual(len(sent), 2)
+
     def test_unknown_field_name_is_redacted_from_feedback_and_logs(self):
         from pydantic import ConfigDict
         class StrictOutput(BaseModel):

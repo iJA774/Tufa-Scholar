@@ -26,12 +26,15 @@ def replay(artifact):
             return '无法离线复现：未知提示词'
         try:
             if isinstance(response, str):
-                cls.model_validate_json(response)
+                parsed = cls.model_validate_json(response)
             else:
-                cls.model_validate(response)
+                parsed = cls.model_validate(response)
         except ValidationError as exc:
             from src.integrations.model import _safe_validation_errors
             return '复现：' + json.dumps(_safe_validation_errors(exc, cls.model_json_schema()), ensure_ascii=False)
+        if context.get('prompt_id') == 'literature/research' and parsed.action == 'read_web_page' and parsed.url and parsed.candidate_ids:
+            payload = artifact.get('payload') or {}
+            return replay({'kind': 'semantic_candidates', 'response': parsed.model_dump(), 'payload': payload, 'context': {'candidate_ids': [c.get('id') for c in payload.get('candidates', [])], 'role': payload.get('role')}})
         return '未复现'
     if kind == 'semantic_route':
         return '复现' if not isinstance(response, dict) or response.get('action') not in context.get('allowed_actions', []) else '未复现'
@@ -49,7 +52,7 @@ def replay(artifact):
         payload = artifact.get('payload') or {}
         role = context.get('role') or payload.get('role')
         if not role: return '无法离线复现：缺少来源上下文'
-        if choice.url:
+        if choice.url and not choice.candidate_ids:
             attempts = context.get('direct_url_attempts')
             if attempts is None:
                 if payload.get('direct_url_attempts_remaining') == 2: attempts = []
@@ -61,8 +64,11 @@ def replay(artifact):
                 else: return '无法离线复现：缺少直读范围信息'
         else:
             attempts, can_direct = [], False
+        candidate_urls = {c.get('id'): c.get('url', '') for c in payload.get('candidates', [])}
+        if choice.url and choice.candidate_ids and not candidate_urls.get(choice.candidate_ids[0]):
+            return '无法离线复现：缺少候选网址'
         code = specialist_semantic_error(choice, kind=role, blocked=bool(context.get('search_blocked', payload.get('search_blocked'))),
-            can_direct=can_direct, candidate_ids=set(context.get('candidate_ids', [])), direct_url_attempts=attempts)
+            can_direct=can_direct, candidate_ids=set(context.get('candidate_ids', [])), direct_url_attempts=attempts, candidate_urls=candidate_urls)
         return '复现：' + code if code else '未复现'
     return '只能诊断，无法离线复现'
 

@@ -119,7 +119,10 @@ def _safe_validation_errors(exc, json_schema):
     collect(json_schema)
     allowed_types = {'json_invalid', 'missing', 'literal_error', 'string_type', 'list_type',
                      'bool_type', 'model_type', 'extra_forbidden', 'too_long', 'too_short',
-                     'string_too_long', 'string_too_short', 'value_error'}
+                     'string_too_long', 'string_too_short', 'value_error',
+                     'specialist_search_query_required', 'specialist_read_candidates_required',
+                     'specialist_web_target_required', 'specialist_direct_query_required',
+                     'specialist_plan_invalid'}
     result = []
     for error in exc.errors(include_input=False, include_context=False, include_url=False):
         path = [part if type(part) is int or (isinstance(part, str) and part in fields) else '*' for part in error['loc']]

@@ -374,6 +374,40 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(papers.call_count, 1)
         self.assertEqual(len(evidence), 1)
 
+    def test_candidate_url_pagination_normalizes_and_conflicts_rejected(self):
+        page = result('https://www.fec.gov/resources/cms-content/documents/2026pdates.pdf')
+        state = {'research': TASK, 'task': 'topic', 'history': [], 'candidates': [page], 'evidence': [], 'direct_url_attempts': ['https://x.test/', 'https://y.test/']}
+        attempts = []
+        def model(name, payload, schema):
+            self.assertFalse(payload['can_read_direct_url'])
+            if not payload['recent_result']:
+                return w.Specialist(action='read_web_page', candidate_ids=['C1'], url=page['url'], query='', offset=3000, plan=['continue'])
+            return w.Specialist(action='finish', plan=['done'])
+        def invoke(name, arguments, *, context):
+            attempts.append((name, arguments))
+            return {'url': page['url'], 'title': 'FEC', 'markdown': 'text', 'offset': 3000, 'next_offset': None, 'retrieved_at': '2026-11-07'}
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', side_effect=invoke):
+            result_state = w._research_graph('web', None).invoke(state)
+        self.assertEqual(attempts, [('read_web_page', {'url': page['url'], 'offset': 3000, 'limit': 1000})])
+        self.assertEqual(result_state['direct_url_attempts'], state['direct_url_attempts'])
+        mixed = w.Specialist(action='read_web_page', candidate_ids=['C1'], url='https://elsewhere.test/', offset=3000, plan=['read'])
+        self.assertEqual(w.specialist_semantic_error(mixed, kind='web', blocked=True, can_direct=False, candidate_ids={'C1'}, direct_url_attempts=[], candidate_urls={'C1': page['url']}), 'conflicting_candidate_url')
+        with patch.object(w, 'structured', return_value=mixed), patch.object(w, 'record_failure', return_value='test'), patch.object(w.registry, 'invoke') as guarded:
+            stopped = w._research_graph('web', None).invoke(state)
+        self.assertEqual(stopped['choice'].action, 'finish')
+        guarded.assert_not_called()
+        repeated = w.Specialist(action='read_web_page', url='https://EXAMPLE.org', query='topic', plan=['read'])
+        self.assertEqual(w.specialist_semantic_error(repeated, kind='web', blocked=True, can_direct=True, candidate_ids=set(), direct_url_attempts=['https://example.org/']), 'repeated_direct_url')
+
+    def test_web_tool_catalog_exposes_docstring_contract(self):
+        from src.tools import ToolContext
+        from src.tools.read_web_page import _read
+        tools = w.registry.list_tools(ToolContext(2, 'web'))
+        entry = next(item for item in tools if item['name'] == 'read_web_page')
+        self.assertEqual(entry['description'], _read.__doc__)
+        self.assertIn('"offset":3000', entry['description'])
+        self.assertIn('attempted_direct_urls', entry['description'])
+
     def test_web_direct_is_rejected_before_tool_call(self):
         with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:
             with self.assertRaises(ValueError):
