@@ -16,7 +16,7 @@
 | `src/integrations/` | 外部服务协议适配：OpenAlex、模型与网页搜索。 |
 | `src/literature/` | 文献业务。`retrieval.py` 负责检索排名及收藏夹候选，`evidence.py` 负责 PDF、摘要和网页片段取证。 |
 | `src/persistence/` | `storage.py` 管理 SQLite 和数据路径，`repository.py` 管理持久化与事务。 |
-| `src/infrastructure/` | `settings.py` 管理本机配置及环境变量，`logging_setup.py` 管理日志脱敏与轮转。 |
+| `src/infrastructure/` | `settings.py` 管理本机配置及环境变量，`logging_setup.py` 管理运行日志的脱敏、轮转与清理。 |
 | `src/prompts/` | 集中存放 Markdown 提示词，保留 `literature/` 与 `runtime/` 分类。 |
 | `data/` | 保存 research.db、原始文献和导出报告；加入 Git 忽略。 |
 
@@ -68,6 +68,8 @@ Agent 入口为 `run(research, *, history, on_stage=None, on_subtask=None)`：�
 ## 4. 提示词
 
 网页搜索可由 `auto` 路由或通过显式 `web` 来源选择，配置、协议与证据边界见 [WEB_SEARCH.md](WEB_SEARCH.md)。搜索服务结果经统一集成函数进入有限补检流程，保存 URL、获取时间、引擎及摘要/正文层级；不写入论文库；收藏夹隔离不变，`all` 的论文工具范围仍为本地和 OpenAlex，但审查后可单独委派网页研究。模型只读取作为数据传入的网页文本。
+
+网页读取的网络与解析故障由集成层归类。研究子图按任务保留候选的失败记录及已成功读取的正文块，向模型反馈安全原因和偏移，避免后续委派重复请求不可读取的候选。摘要仍通过原有取证工具处理。
 
 提示词写作与加载契约见 [PROMPTS.md](PROMPTS.md)。每个已接入模板以 `CURRENT_TIME` 占位符开头，统一调用入口逐次注入带 UTC+08:00 偏移的北京时间后作为 system 消息发送；业务输入单独作为 user JSON，不参与模板求值。
 

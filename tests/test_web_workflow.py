@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from src.agents import literature as w
 from src.persistence import repository
+from src.infrastructure.diagnostics import diagnostic_scope
 
 
 TASK = {'project_id': 2, 'query': 'topic', 'source': 'web'}
@@ -146,11 +147,15 @@ class WebWorkflowTests(unittest.TestCase):
                 return {'url': arguments['url'], 'title': 'page', 'markdown': 'topic first text' if arguments['offset'] == 0 else 'topic second text', 'offset': arguments['offset'], 'next_offset': 10 if arguments['offset'] == 0 else None, 'retrieved_at': '2026-11-07'}
             return original(name, arguments, context=context)
         with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.search_web', return_value=[result('https://example.com')]), patch.object(w.registry, 'invoke', side_effect=invoke):
-            _, evidence = w.run(TASK, history=[])
+            with self.assertLogs('tufa.agent', level='INFO') as captured, diagnostic_scope(run_id=88):
+                _, evidence = w.run(TASK, history=[])
         self.assertEqual(offsets, [0, 10])
         self.assertEqual(snapshots[0]['next_offset'], 10)
         self.assertEqual({e['text'] for e in evidence}, {'topic first text', 'topic second text'})
         self.assertEqual({e['char_start'] for e in evidence}, {0, 10})
+        read_logs = [line for line in captured.output if 'research_web_page' in line]
+        self.assertTrue(any('run_id=88' in line and 'candidate_id=C1' in line and 'offset=0 limit=1000 outcome=success chars=16 next_offset=10' in line for line in read_logs))
+        self.assertTrue(any('run_id=88' in line and 'candidate_id=C1' in line and 'offset=10 limit=1000 outcome=success' in line for line in read_logs))
 
     def test_page_failure_preserves_empty_or_available_search_snippet(self):
         steps = iter(['search', 'page', 'read', 'finish'])
@@ -176,6 +181,98 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertTrue(any('失败' in r for r in recent))
         self.assertEqual(evidence[0]['source_level'], 'web_snippet')
         self.assertNotIn('private error', content)
+
+    def test_failed_candidate_page_is_remembered_across_delegations_and_snippet_remains_usable(self):
+        from src.integrations.web_page import WebPageError
+        research_payloads, reviews, page_calls = [], [], []
+        def model(name, payload, schema):
+            if name == 'runtime/route':
+                return w.Route(action='web_research', task='topic', directions=['topic']) if not payload['results'] else w.Route(action='report')
+            if name == 'literature/research':
+                research_payloads.append(payload)
+                if payload.get('validation_feedback', {}).get('code') == 'repeated_web_page_failure':
+                    return w.Specialist(action='finish', plan=['改用其他资料'])
+                if payload['recent_result'].startswith('网页正文读取失败'):
+                    return w.Specialist(action='read', candidate_ids=['C1'], plan=['用摘要取证'])
+                if payload['recent_result'].startswith('本次新增证据'):
+                    return w.Specialist(action='finish', plan=['结束'])
+                if payload.get('web_read_failures'):
+                    # Changing the offset must not bypass a candidate-level fetch failure.
+                    return w.Specialist(action='read_web_page', candidate_ids=['C1'], offset=1000, plan=['重试'])
+                if payload['search_status'] == 'not_searched':
+                    return w.Specialist(action='search', query='topic', plan=['检索'])
+                if payload['recent_result'].startswith('检索到'):
+                    return w.Specialist(action='read_web_page', candidate_ids=['C1'], plan=['读取'])
+                return w.Specialist(action='finish', plan=['结束'])
+            if name == 'literature/review':
+                reviews.append(payload)
+                if len(reviews) == 1:
+                    return w.Review(sufficient=False, gaps=['需补充网页正文'], summary='摘要可用', next_steps=[w.NextStep(direction='topic', goal='补读 topic 页面', route='web_research')])
+                return w.Review(sufficient=True, summary='摘要证据充分')
+            if name == 'literature/synthesize':
+                evidence_id = payload['evidence'][0]['id']
+                return w.Draft(sections=[w.Section(heading='结果', paragraphs=[w.Claim(text='topic evidence', citations=[evidence_id])])])
+            if name == 'literature/verify_claim': return w.Verdict(status='supported')
+            raise AssertionError(name)
+
+        original = w.registry.invoke
+        def invoke(name, arguments, *, context):
+            if name == 'search_web': return [result('https://example.com', content='topic evidence')]
+            if name == 'read_web_page':
+                page_calls.append(arguments)
+                raise WebPageError(category='http_status', status=403)
+            return original(name, arguments, context=context)
+
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', side_effect=invoke):
+            with self.assertLogs('tufa.agent', level='INFO') as captured, diagnostic_scope(run_id=77):
+                content, evidence = w.run(TASK, history=[])
+
+        self.assertEqual(page_calls, [{'url': 'https://example.com', 'offset': 0, 'limit': 1000}])
+        self.assertEqual(evidence[0]['source_level'], 'web_snippet')
+        self.assertIn('topic evidence', content)
+        later_payload = next(payload for payload in research_payloads if payload.get('web_read_failures'))
+        self.assertEqual(later_payload['candidates'][0]['summary'], 'topic evidence')
+        self.assertEqual(later_payload['web_read_failures'][0], {
+            'candidate_id': 'C1', 'offset': 0, 'category': 'http_status', 'reason': 'http_status', 'status': 403,
+            'attempts': 1, 'retryable': False,
+        })
+        joined_logs = '\n'.join(captured.output)
+        self.assertIn('run_id=77 candidate_id=C1 offset=0 limit=1000 outcome=failed category=http_status reason=http_status status=403', joined_logs)
+        self.assertIn('run_id=77 candidate_id=C1 offset=1000 limit=1000 outcome=repeated_failure_rejected category=http_status reason=http_status status=403', joined_logs)
+        self.assertNotIn('https://example.com', joined_logs)
+        self.assertNotIn('topic evidence', joined_logs)
+
+    def test_temporary_web_page_failure_retries_same_offset_once_and_empty_success_clears_failure(self):
+        from src.integrations.web_page import WebPageError
+        page = result('https://example.com')
+        calls = []
+        def model(name, payload, schema):
+            if name != 'literature/research': raise AssertionError(name)
+            if payload.get('recent_result', '').startswith('网页正文为空'):
+                return w.Specialist(action='finish', plan=['结束'])
+            if not payload.get('web_read_failures'):
+                return w.Specialist(action='read_web_page', candidate_ids=['C1'], offset=0, plan=['读取'])
+            self.assertEqual(payload['web_read_failures'][0]['category'], 'timeout')
+            self.assertEqual(payload['web_read_failures'][0]['reason'], 'response_timeout')
+            self.assertTrue(payload['web_read_failures'][0]['retryable'])
+            return w.Specialist(action='read_web_page', candidate_ids=['C1'], offset=0, plan=['重试'])
+
+        def invoke(name, arguments, *, context):
+            if name != 'read_web_page': raise AssertionError(name)
+            calls.append(arguments['offset'])
+            if len(calls) == 1: raise WebPageError(category='timeout', reason='response_timeout')
+            return {'url': page['url'], 'title': 'Source', 'markdown': '', 'offset': 0, 'next_offset': None, 'retrieved_at': '2026-11-10'}
+
+        state = {'research': TASK, 'task': 'topic', 'history': [], 'candidates': [page], 'candidate_identities': [], 'evidence': [], 'evidence_pool': [], 'plan': [], 'tool_calls': 0}
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', side_effect=invoke):
+            with self.assertLogs('tufa.agent', level='INFO') as captured, diagnostic_scope(run_id=99):
+                result_state = w._research_graph('web', None).invoke(state)
+        self.assertEqual(calls, [0, 0])
+        self.assertEqual(result_state['web_read_failures'], [])
+        self.assertEqual(result_state['recent_result'], '网页正文为空或已到末尾')
+        joined_logs = '\n'.join(captured.output)
+        self.assertIn('run_id=99 candidate_id=C1 offset=0 limit=1000 outcome=failed category=timeout reason=response_timeout status=-', joined_logs)
+        self.assertIn('run_id=99 candidate_id=C1 offset=0 limit=1000 outcome=empty chars=0 next_offset=-', joined_logs)
 
     def test_empty_search_preserves_candidates_and_reports_current_status(self):
         page = result('https://example.com')
@@ -267,9 +364,13 @@ class WebWorkflowTests(unittest.TestCase):
             if name == 'read_web_page': return {'url': arguments['url'], 'title': 'Official', 'markdown': 'election results', 'offset': 0, 'next_offset': None, 'retrieved_at': '2026-11-07'}
             return original(name, arguments, context=context)
         with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', side_effect=invoke):
-            content, evidence = w.run({**TASK, 'query': '最近的选举结果'}, history=[])
+            with self.assertLogs('tufa.agent', level='INFO') as captured, diagnostic_scope(run_id=55):
+                content, evidence = w.run({**TASK, 'query': '最近的选举结果'}, history=[])
         self.assertIn('election results', content)
         self.assertEqual(evidence[0]['original_url'], 'https://example.org/official')
+        direct_read = next(line for line in captured.output if 'research_web_page' in line)
+        self.assertIn('run_id=55 candidate_id=direct offset=0 limit=1000 outcome=success chars=16 next_offset=-', direct_read)
+        self.assertNotIn('https://example.org/official', direct_read)
 
     def test_blocked_invalid_or_previously_attempted_url_finishes_safely(self):
         for url, prior in [('https://[broken', []), ('HTTPS://EXAMPLE.ORG', ['https://example.org/']), ('https://example.org/?', [])]:

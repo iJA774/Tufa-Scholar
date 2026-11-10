@@ -9,7 +9,7 @@
 | prompt ID | 输入 | 输出结构 |
 |---|---|---|
 | `runtime/route` | question、history、source、effective_source、available_actions、results、evidence、review、delegations_remaining、decisions_remaining、directions、verification_gaps | Route：action、task、answer、directions |
-| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan、review、results、web_blocks、verification_gaps、search_status、search_blocked、direct_url_attempts_remaining、search_backend、fallback_reason、empty_searches、prior_subtask_notes、can_read_direct_url、direct_url_reason、attempted_direct_urls | Specialist：action、query、candidate_ids、url、plan、offset、limit |
+| `literature/research` | role、source、task、tools、candidates、candidate_count、recent_result、evidence、calls_remaining、directions、plan、review、results、web_blocks、web_read_failures、verification_gaps、search_status、search_blocked、direct_url_attempts_remaining、search_backend、fallback_reason、empty_searches、prior_subtask_notes、can_read_direct_url、direct_url_reason、attempted_direct_urls | Specialist：action、query、candidate_ids、url、plan、offset、limit |
 | `literature/review` | question、directions、evidence、results、allowed_routes、attempted_plans、search_blocked、search_backend、fallback_reason、empty_searches、current_task、current_source、prior_subtask_notes | Review：sufficient、gaps、summary、coverage、next_steps、irrelevant_evidence_ids、subtask_findings、subtask_gap |
 | `literature/synthesize` | question、history、directions、evidence、review、verification_gaps | Draft：sections（heading、paragraphs：text、citations）、limitations |
 | `literature/verify_claim` | heading、claim、evidence | Verdict：status、reason、suggestion、research_query、research_route |

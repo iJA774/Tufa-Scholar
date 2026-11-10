@@ -110,6 +110,8 @@ worker 按顺序领取任务；重启时将遗留的运行中任务标记为中�
 
 API 和 worker 分别将诊断日志写入 `TUFA_DATA_DIR/logs/api.log` 与 `worker.log`，单文件达到 5 MiB 后轮转，最多保留 3 个备份；直接启动服务同样生效。日志记录请求路由、状态、耗时、任务阶段和服务调用状态，不记录密钥、请求正文或完整问题。启动器的标准输出日志仍保存在 `.cache/start/`。
 
+在「设置 → 运行日志」点击「清除旧日志」并确认，可清除当前 API、worker 运行日志和轮转备份。服务运行时可执行，后续事件会生成新日志。失败复现材料单独保存在 `TUFA_DATA_DIR/diagnostics/`。
+
 ## 使用与接口
 
 更新依赖后重新启动服务前，在仓库根目录运行 `uv sync --locked`。网页搜索默认使用免密钥 DuckDuckGo；可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia。右上角搜索窗口新增“网页搜索”；提问默认“自动”可由主控选择网页研究；所选搜索受阻或连续两次无候选空结果时，可尝试 DDGS 的 Bing/Yahoo 备用检索，也可明确选择“网页搜索”。论文和网页范围优先对应来源，发现缺口时可互相补充；“仅项目文献”和收藏夹保持隔离。服务配置、环境变量与证据限制见 [网页搜索说明](docs/WEB_SEARCH.md)。
@@ -140,6 +142,7 @@ API 具体字段和交互可在 `/docs` 查看。主要接口：
 | `DELETE /projects/{project_id}` | 删除空间；存在运行中任务时返回 409 |
 | `GET/PUT /settings` | 读取配置状态或保存本机配置；不返回密钥原文 |
 | `POST /settings/models` | 使用草稿地址与密钥查询模型列表，不保存设置或回显密钥 |
+| `DELETE /settings/logs` | 清理当前数据目录的 API、worker 运行日志及轮转备份，返回 `cleared_files` |
 | `GET/POST /projects/{project_id}/conversations` | 列出、创建对话 |
 | `GET/POST /projects/{project_id}/papers` | 列出文献、保存元数据 |
 | `POST /projects/{project_id}/papers/import` | multipart 上传 PDF，可附 `title`、`doi`、`arxiv_id` |
@@ -166,6 +169,12 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 模型结构或决策失败时，诊断材料保存在 `TUFA_DATA_DIR/diagnostics/`，普通日志中的诊断 ID 可用于定位。材料可能包含研究输入和模型原始响应，请按用户数据保管；报告核验的 unsupported 诊断只保存段落坐标和原因，已知密钥和凭据字段会被剔除或脱敏。仓库根目录执行 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 可在当前代码下离线检查，不联网或访问数据库。重放使用当前结构而非历史代码，环境差异和脱敏可能影响结果；网络或 HTTP 故障不能离线复现。
 
 ## 验证
+
+### 网页读取诊断与运行日志清理验收（2026-11-10）
+
+- 仓库根目录使用隔离的 `TEMP`、`TMP`、`TUFA_DATA_DIR` 运行 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`，198 项通过。模拟模型及搜索服务配合实际 API 和 worker，`-m scripts.verify_chat` 与 `-m scripts.verify_web_search` 均成功。HTTP 403 场景只请求一次正文，模型收到候选、偏移和原因，改用搜索摘要取证。日志含实际任务 ID，并通过路径和查询串脱敏检查。
+- `pnpm.cmd check:web` 与 `pnpm.cmd build:web` 通过。浏览器在隔离生产前端检查了设置页、确认框、取消和无日志反馈。取消保留四个合成日志。通过生产前端的 `DELETE /api/settings/logs` 清除四个文件，数据库、私有诊断和无关日志文件仍可读取。另用实际 HTTP 和运行中的 API、worker 验证清理后两个进程都写入新日志，worker 完成新的本地检索任务。验收服务已停止。
+- 通过独立 `ToolRegistry.invoke('read_web_page', ...)` 读取真实 example.com HTML 和 FEC PDF，各验证两段，第二段偏移分别为 64 和 1000。Wikipedia 首页的独立复测观察到 TLS 握手重置，以及另一轮中系统 DNS 返回非公网 IPv6 后的拒绝。真实云端模型和原任务 #6 未重跑。验收日志位于 `.cache/web-reader-failure-20261110/`。
 
 
 ### 科研预算与错误反馈验收（2026-11-10）

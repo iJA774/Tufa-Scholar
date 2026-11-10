@@ -12,7 +12,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.errors import GraphRecursionError
 from src.integrations.model import structured, StructuredOutputError, ModelServiceError
 from src.integrations.web_search import WebSearchError
-from src.infrastructure.diagnostics import record_failure
+from src.integrations.web_page import WebPageError
+from src.infrastructure.diagnostics import record_failure, diagnostic_context
 from src.tools import ToolContext, ToolRegistry
 from src.tools.registry import ToolCallValidationError
 from src.literature.retrieval import rank_candidates
@@ -25,6 +26,10 @@ MAX_TOOL_CALLS = 8
 MAX_SEARCH_RESULTS = 3
 GRAPH_RECURSION_LIMIT = 30
 MAX_DECISIONS = 3
+
+
+def _run_id():
+    return diagnostic_context().get('run_id', '-')
 
 
 def _context(research):
@@ -57,6 +62,7 @@ class State(TypedDict, total=False):
     direct_url_attempts: list
     plan: list
     web_blocks: dict
+    web_read_failures: list
     verification_gaps: list
     verification_attempted: bool
     feedback_pending: bool
@@ -143,7 +149,11 @@ def _web_actionable(s):
     if not s.get('web_search_blocked'):
         return True
     pool = s.get('pools', {}).get('web_research', {})
-    pending = len(pool.get('candidate_identities', [])) > len(pool.get('read_ids', [])) or any(block.get('next_offset') is not None for blocks in pool.get('web_blocks', {}).values() for block in blocks[-1:])
+    failures = {item.get('candidate_id'): item for item in pool.get('web_read_failures', [])}
+    has_page = any(block.get('next_offset') is not None and not (
+        failures.get(key) and not (failures[key].get('retryable') and failures[key].get('attempts', 0) < 2)
+    ) for key, blocks in pool.get('web_blocks', {}).items() for block in blocks[-1:])
+    pending = len(pool.get('candidate_identities', [])) > len(pool.get('read_ids', [])) or has_page
     last = next((item for item in reversed(s.get('results', [])) if item.get('route') == 'web_research'), {})
     return pending or (len(s.get('direct_url_attempts', [])) < 2 and last.get('tool_calls') != 0)
 
@@ -434,6 +444,7 @@ def _research_graph(kind, on_stage):
             'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url'), 'collected': key in s.get('read_ids', []), 'next_offset': (s.get('web_blocks', {}).get(key) or [{}])[-1].get('next_offset')} for key, p in views[:20]],
             'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
+            'web_read_failures': s.get('web_read_failures', []),
             'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'prior_subtask_notes': s.get('subtask_notes', [])[-10:], 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])), 'attempted_direct_urls': s.get('direct_url_attempts', []),
         }
         if s.get('tool_feedback'): payload['validation_feedback'] = s['tool_feedback']
@@ -449,17 +460,38 @@ def _research_graph(kind, on_stage):
             logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
             code = specialist_semantic_error(choice, kind=kind, blocked=bool(s.get('web_search_blocked')),
                 can_direct=can_direct, candidate_ids=valid_ids, direct_url_attempts=s.get('direct_url_attempts', []), candidate_urls={key: item.get('url', '') for key, item in views})
+            if not code and choice.action == 'read_web_page' and choice.candidate_ids:
+                failed_pages = [item for item in s.get('web_read_failures', []) if item.get('candidate_id') == choice.candidate_ids[0]]
+                retry = next((item for item in failed_pages if item.get('offset') == choice.offset), None)
+                if failed_pages and not (retry and retry.get('retryable') and retry.get('attempts', 0) < 2):
+                    code = 'repeated_web_page_failure'
+                    failure = retry or failed_pages[-1]
+                    logger.info('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=repeated_failure_rejected category=%s reason=%s status=%s',
+                                _run_id(), choice.candidate_ids[0], choice.offset, choice.limit,
+                                failure.get('category', 'reader_error'), failure.get('reason', 'reader_error'),
+                                failure.get('status') if failure.get('status') is not None else '-')
             if not code:
                 if choice.action == 'read_web_page' and choice.candidate_ids and choice.url:
                     choice = choice.model_copy(update={'url': '', 'query': ''})
                 break
-            diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
-                response=choice.model_dump(), errors=[code],
-                context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1, 'role': kind, 'search_blocked': bool(s.get('web_search_blocked')), 'can_read_direct_url': can_direct, 'direct_url_attempts': s.get('direct_url_attempts', [])})
-            logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
+            if choice.action == 'read_web_page' and code != 'repeated_web_page_failure':
+                rejected_id = (choice.candidate_ids[0] if choice.candidate_ids and choice.candidate_ids[0] in valid_ids
+                               else 'direct' if not choice.candidate_ids else 'unknown')
+                reason = 'previously_attempted' if code == 'repeated_direct_url' else 'validation_rejected'
+                logger.info('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=rejected category=%s reason=%s status=-',
+                            _run_id(), rejected_id, choice.offset, choice.limit, code, reason)
+            if code != 'repeated_web_page_failure':
+                diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
+                    response=choice.model_dump(), errors=[code],
+                    context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1, 'role': kind, 'search_blocked': bool(s.get('web_search_blocked')), 'can_read_direct_url': can_direct, 'direct_url_attempts': s.get('direct_url_attempts', [])})
+                logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
             if attempt:
-                return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan, 'recent_result': '工具选择无效，已结束本轮'}
-            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'instruction': ('该网址已尝试，请选择其他可信网址或结束' if code == 'repeated_direct_url' else '候选分页只传 candidate_ids，省略 url 和 query' if code == 'conflicting_candidate_url' else ''), 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
+                reason = '网页正文读取已失败且不应重复请求，已结束本轮' if code == 'repeated_web_page_failure' else '工具选择无效，已结束本轮'
+                return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan, 'recent_result': reason}
+            instruction = ('该网址已尝试，请选择其他可信网址或结束' if code == 'repeated_direct_url' else
+                           '候选分页只传 candidate_ids，省略 url 和 query' if code == 'conflicting_candidate_url' else
+                           '该候选正文读取已失败；使用其搜索摘要、其他候选，或对该候选执行证据提取' if code == 'repeated_web_page_failure' else '')
+            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'instruction': instruction, 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
         return {'choice': choice, 'candidate_identities': identities, 'plan': choice.plan}
 
     def invoke_core(s):
@@ -481,9 +513,17 @@ def _research_graph(kind, on_stage):
             attempts = list(s.get('direct_url_attempts', []))
             if choice.url: attempts.append(_direct_url_key(choice.url))
             blocks = {key: list(value) for key, value in s.get('web_blocks', {}).items()}
+            failures = [dict(item) for item in s.get('web_read_failures', [])]
+            candidate_id = choice.candidate_ids[0] if choice.candidate_ids else ''
+            log_candidate_id = candidate_id or 'direct'
+            prior_failure = next((item for item in failures if item.get('candidate_id') == candidate_id and item.get('offset') == choice.offset), None) if candidate_id else None
             try:
                 block = registry.invoke('read_web_page', {'url': candidate['url'], 'offset': choice.offset, 'limit': choice.limit}, context=_context(s['research']))
-                if block.get('markdown', '').strip():
+                if candidate_id:
+                    failures = [item for item in failures if item.get('candidate_id') != candidate_id]
+                markdown = block.get('markdown', '')
+                chars = len(markdown) if isinstance(markdown, str) else 0
+                if isinstance(markdown, str) and markdown.strip():
                     if choice.url:
                         direct_candidate = {'url': block['url'], 'title': block['title'] or choice.url, 'content': '', 'source_level': 'web_content', 'provider': 'web_page', 'retrieved_at': block['retrieved_at']}
                         candidates = list(s.get('candidates', []))
@@ -499,14 +539,37 @@ def _research_graph(kind, on_stage):
                     entries[:] = [item for item in entries if item['offset'] != block['offset']]
                     entries.append(block)
                     result = '网页正文块已读取'
+                    outcome = 'success'
                 else:
                     result = '网页正文为空或已到末尾'
-                update = {'web_blocks': blocks, 'direct_url_attempts': attempts}
-                if block.get('markdown', '').strip() and choice.url:
+                    outcome = 'empty'
+                logger.info('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=%s chars=%d next_offset=%s',
+                            _run_id(), log_candidate_id, choice.offset, choice.limit, outcome, chars,
+                            block.get('next_offset') if block.get('next_offset') is not None else '-')
+                update = {'web_blocks': blocks, 'web_read_failures': failures, 'direct_url_attempts': attempts}
+                if isinstance(markdown, str) and markdown.strip() and choice.url:
                     update.update(candidates=candidates, candidate_identities=identities, executed_queries=list(dict.fromkeys(s.get('executed_queries', []) + [choice.query]))[-7:])
-            except RuntimeError:
-                update = {'warnings': s.get('warnings', []) + ['web_page_read_failed'], 'direct_url_attempts': attempts}
-                result = '网页正文读取失败，可使用搜索摘要或其他候选'
+            except RuntimeError as exc:
+                category = exc.category if isinstance(exc, WebPageError) else 'reader_error'
+                reason = exc.reason if isinstance(exc, WebPageError) else category
+                status = getattr(exc, 'status', None) if isinstance(exc, WebPageError) else None
+                if isinstance(status, bool) or not isinstance(status, int): status = None
+                retryable = category in {'connect_error', 'timeout'} or category == 'http_status' and isinstance(status, int) and status >= 500
+                attempts_used = (prior_failure.get('attempts', 0) if prior_failure else 0) + 1
+                failure = {'candidate_id': candidate_id, 'offset': choice.offset, 'category': category, 'reason': reason, 'status': status,
+                           'attempts': attempts_used, 'retryable': retryable and attempts_used < 2}
+                if candidate_id:
+                    failures = [item for item in failures if item.get('candidate_id') != candidate_id]
+                    failures.append(failure)
+                update = {'web_blocks': blocks, 'web_read_failures': failures,
+                          'warnings': s.get('warnings', []) + ['web_page_read_failed'], 'direct_url_attempts': attempts}
+                position = f'候选 {candidate_id} 的 offset={choice.offset}' if candidate_id else f'直读网页的 offset={choice.offset}'
+                if status is not None: category = f'{category} (HTTP {status})'
+                retry_hint = '可在当前工具预算内重试一次' if failure['retryable'] else '不应再次请求该页'
+                result = f'网页正文读取失败，位置：{position}；原因：{category}；安全原因：{reason}；{retry_hint}。可使用候选摘要或其他候选'
+                logger.warning('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=failed category=%s reason=%s status=%s',
+                               _run_id(), log_candidate_id, choice.offset, choice.limit, failure['category'], reason,
+                               status if status is not None else '-')
         else:
             if on_stage: on_stage('evidence')
             mapping = dict(_candidate_views(s)[0])
@@ -638,7 +701,7 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
             if not before and not prior.get('candidates') and not (research['source'] == 'auto' and effective == 'web'):
                 raise exc.__cause__ from None
             result = {**input_state, 'tool_calls': 1, 'search_status': 'failed', 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
-        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {}), ('read_ids', []), ('executed_queries', [])]}
+        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {}), ('web_read_failures', []), ('read_ids', []), ('executed_queries', [])]}
         facets = result.get('evidence_facets', [])
         excluded = set(s.get('excluded_evidence_ids', []))
         facet_terms = [relevance_terms(f) for f in facets]

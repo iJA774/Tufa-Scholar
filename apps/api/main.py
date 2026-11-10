@@ -21,7 +21,7 @@ from src.persistence import repository as repo
 from src.infrastructure import settings
 from src.integrations.model import discover
 from src.persistence.storage import data_directory, initialize_storage
-from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack
+from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack, clear_application_logs
 
 
 @asynccontextmanager
@@ -56,7 +56,9 @@ async def log_request(request: Request, call_next):
             ids[name] = value
         elif isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 18:
             ids[name] = int(value)
-    logging.getLogger('tufa.api').info('request method=%s path=%s ids=%s status=%s elapsed_ms=%.1f', request.method, path, ids, response.status_code, (time.monotonic()-started)*1000)
+    cleared_logs_request = request.method == 'DELETE' and request.url.path == '/settings/logs'
+    if not (cleared_logs_request and response.status_code < 400):
+        logging.getLogger('tufa.api').info('request method=%s path=%s ids=%s status=%s elapsed_ms=%.1f', request.method, path, ids, response.status_code, (time.monotonic()-started)*1000)
     return response
 
 
@@ -160,6 +162,14 @@ def put_settings(body: SettingsInput):
         return settings.update(body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete('/settings/logs')
+def delete_logs():
+    try:
+        return {'cleared_files': clear_application_logs()}
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(500, '无法清除本地日志') from None
 
 
 @app.post('/settings/models')

@@ -16,6 +16,11 @@ logger = logging.getLogger('tufa.diagnostics')
 _scope = ContextVar('diagnostic_scope', default={})
 
 
+def diagnostic_context():
+    """Return a copy of the current task-scoped diagnostic tags."""
+    return dict(_scope.get())
+
+
 @contextmanager
 def diagnostic_scope(**tags):
     token = _scope.set({**_scope.get(), **tags})

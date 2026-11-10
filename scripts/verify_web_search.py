@@ -76,6 +76,25 @@ class SearchFixture(ModelFixture):
             result = ({'action': 'search', 'query': 'typed-429', 'plan': ['检索']} if not data['recent_result'] else {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['读取']} if data['candidates'] and '检索到' in data['recent_result'] else {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['取证']} if data['candidates'] and '网页正文' in data['recent_result'] else {'action': 'finish', 'plan': ['完成']})
         elif '你是无工具研究审查者' in prompt and 'typed-rate-limit' in data.get('question', ''):
             result = {'sufficient': True, 'gaps': [], 'summary': '已检索', 'coverage': ['政策'], 'next_steps': [], 'subtask_findings': [{'text': '政策资料显示准确率为 92%', 'citations': [data['evidence'][0]['id']]}]}
+        elif '你是研究主控' in prompt and 'web-403-fallback' in data.get('question', ''):
+            result = {'action': 'web_research', 'task': 'web-403-fallback accuracy', 'directions': ['accuracy']} if not data['results'] else {'action': 'review'} if data['review'] is None else {'action': 'report'}
+        elif '你是研究专家' in prompt and 'web-403-fallback' in data.get('task', ''):
+            validation = data.get('validation_feedback', {})
+            if not data['recent_result']:
+                result = {'action': 'search', 'query': 'web-403-fallback', 'plan': ['搜索摘要候选']}
+            elif any(candidate.get('collected') for candidate in data.get('candidates', [])):
+                result = {'action': 'finish', 'plan': ['完成']}
+            elif validation.get('code') == 'repeated_web_page_failure':
+                result = {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['改用搜索摘要取证']}
+            elif data.get('web_read_failures'):
+                # Deliberately repeat the exact candidate and first page. The workflow must reject it locally.
+                result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'offset': 0, 'plan': ['再次读取同一页面']}
+            else:
+                result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'offset': 0, 'plan': ['读取网页']}
+        elif '你是无工具研究审查者' in prompt and 'web-403-fallback' in data.get('question', ''):
+            result = {'sufficient': True, 'gaps': [], 'summary': '搜索摘要提供了准确率资料', 'coverage': ['accuracy'], 'next_steps': [], 'subtask_findings': [{'text': '搜索摘要报告准确率为 92%', 'citations': [data['evidence'][0]['id']]}]}
+        elif '你是研究报告撰写者' in prompt and 'web-403-fallback' in data.get('question', ''):
+            result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '搜索摘要报告准确率为 92%。', 'citations': [data['evidence'][0]['id']]}]}]}
         elif '你是研究主控' in prompt and 'empty-then-fail' in data.get('question', ''):
             result = {'action': 'web_research', 'task': 'empty-then-fail', 'directions': ['研究']} if not data['results'] else {'action': 'report'}
         elif '你是研究专家' in prompt and 'empty-then-fail' in data.get('task', ''):
@@ -108,8 +127,15 @@ class SearchFixture(ModelFixture):
             if query == 'failure' or self.fail_search:
                 self.send_error(503)
                 return
-            data = {'results': [] if query == 'empty' else [
-                {'title': 'Simulated research page', 'url': 'https://example.org/research', 'content': 'Attention fixture paper uses attention to combine representations.' if 'Attention fixture' in query else 'accuracy was 92%'}]}
+            if query == 'empty':
+                results = []
+            elif query == 'web-403-fallback':
+                results = [{'title': 'Synthetic 403 page with an accuracy summary',
+                            'url': 'https://example.org/fixture/403/secret-path?probe=synthetic-query',
+                            'content': 'Synthetic search summary: accuracy was 92%.'}]
+            else:
+                results = [{'title': 'Simulated research page', 'url': 'https://example.org/research', 'content': 'Attention fixture paper uses attention to combine representations.' if 'Attention fixture' in query else 'accuracy was 92%'}]
+            data = {'results': results}
         elif url.path == '/v1/models':
             data = {'data': [{'id': 'fixture'}]}
         else:
@@ -126,21 +152,26 @@ class SearchFixture(ModelFixture):
 def install_page_fixture():
     # The real worker and HTML parser run with an in-process transport fixture.
     import src.integrations.web_page as page
+    denied_path = '/fixture/403/secret-path'
     class FixtureResponse:
-        status = 200
-        def __init__(self, pdf=False):
+        def __init__(self, pdf=False, status=200):
             self.pdf = pdf
+            self.status = status
             self.body = make_pdf() if pdf else ('<html><title>Fixture</title><article><h1>Method</h1><p>政策 Attention fixture paper uses attention to combine representations. accuracy was 92% ' + ' context' * 180 + ' accuracy was 92%</p></article></html>').encode('utf-8')
         def getheader(self, name, default=None): return ('application/pdf' if self.pdf else 'text/html; charset=utf-8') if name == 'Content-Type' else default
         def read(self, size):
             chunk, self.body = self.body[:size], self.body[size:]
             return chunk
     class FixtureConnection:
-        def __init__(self, *args): pass
-        def request(self, method, path, **kwargs): self.path = path
-        def getresponse(self): return FixtureResponse(self.path.endswith('.pdf'))
+        def __init__(self, host='', port=443, address='8.8.8.8'):
+            self.host, self.port, self.address = host, port, address
+        def request(self, method, path, **kwargs):
+            self.path = path
+            parts = urlsplit(path)
+            self.status = 403 if parts.path == denied_path and parts.query == 'probe=synthetic-query' else 200
+        def getresponse(self): return FixtureResponse(self.path.endswith('.pdf'), self.status)
         def close(self): pass
-    page._target = lambda url: (urlsplit(url), urlsplit(url).hostname, 443, '8.8.8.8')
+    page._target = lambda url: (urlsplit(url), urlsplit(url).hostname, 443, ['8.8.8.8'])
     page._PinnedHTTPS = FixtureConnection
     import src.tools.search as search
     def fallback(query, limit=5):
@@ -285,6 +316,35 @@ def main():
                     assert any(s.get('original_url') == 'https://www.fec.gov/resources/cms-content/documents/fec_fixture.pdf' for note in direct_task['subtasks'] for s in note['sources'])
                     assert any(note['status'] in ('findings', 'sources_only') for note in direct_task['subtasks'])
                     assert '92%' in direct_task['result']['content']
+                    ModelFixture.requests.clear()
+                    denied = call('POST', f'/projects/{project}/questions', json={'question': 'web-403-fallback accuracy', 'source': 'web'})
+                    denied_task = wait(denied['run_id'])
+                    assert denied_task['status'] == 'succeeded', denied_task
+                    denied_evidence = denied_task['result']['evidence']
+                    assert denied_evidence and all(item['source_level'] == 'web_snippet' for item in denied_evidence), denied_evidence
+                    synthetic_url = 'https://example.org/fixture/403/secret-path?probe=synthetic-query'
+                    assert any(item.get('original_url') == synthetic_url for item in denied_evidence), denied_evidence
+                    research_payloads = [json.loads(req['messages'][1]['content']) for req in ModelFixture.requests
+                                         if '你是研究专家' in req['messages'][0]['content'] and 'web-403-fallback' in json.loads(req['messages'][1]['content']).get('task', '')]
+                    failure_payload = next(payload for payload in research_payloads if payload.get('web_read_failures'))
+                    failure = failure_payload['web_read_failures'][0]
+                    candidate_id = failure['candidate_id']
+                    assert failure.get('candidate_id') == candidate_id and failure.get('offset') == 0
+                    assert failure.get('category') == 'http_status' and failure.get('status') == 403
+                    assert failure.get('attempts') == 1 and failure.get('retryable') is False
+                    assert failure.get('reason') == 'http_status'
+                    assert failure_payload['candidates'][0]['id'] == candidate_id
+                    retry_payload = next(payload for payload in research_payloads if payload.get('validation_feedback', {}).get('code') == 'repeated_web_page_failure')
+                    assert retry_payload['web_read_failures'][0]['candidate_id'] == candidate_id
+                    assert retry_payload['web_read_failures'][0]['offset'] == 0
+                    log_text = '\n'.join(path.read_text(encoding='utf-8') for path in (Path(directory) / 'logs').glob('*.log'))
+                    failed_reads = [line for line in log_text.splitlines() if 'web_page failed outcome=failed category=http_status' in line and 'status=403' in line]
+                    assert len(failed_reads) == 1, failed_reads
+                    action_failures = [line for line in log_text.splitlines() if 'research_web_page' in line and f"run_id={denied['run_id']}" in line and 'outcome=failed' in line]
+                    assert len(action_failures) == 1, action_failures
+                    assert f'candidate_id={candidate_id}' in action_failures[0] and 'offset=0' in action_failures[0]
+                    assert 'category=http_status' in action_failures[0] and 'reason=http_status' in action_failures[0] and 'status=403' in action_failures[0]
+                    assert '/fixture/403/secret-path' not in log_text and 'probe=synthetic-query' not in log_text
                     SearchFixture.fail_search = True
                     failed = call('POST', f'/projects/{project}/questions', json={'question': 'accuracy failure?', 'source': 'web'})
                     failed_task = wait(failed['run_id'])
