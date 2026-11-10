@@ -101,6 +101,10 @@ def discover(url, key, *, details=False):
         raise RuntimeError('模型服务返回的数据无效，请手动填写模型名称') from None
 
 
+class ModelServiceError(RuntimeError):
+    """Model service HTTP or transport failure."""
+
+
 class StructuredOutputError(RuntimeError):
     """Model response remained invalid after format correction."""
 
@@ -166,11 +170,11 @@ def structured(prompt_id, payload, schema, *, model_options=None):
         except httpx.HTTPStatusError as exc:
             diagnostic_id = record_failure(kind='http_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__, 'status': exc.response.status_code}, context=context, secrets=secrets)
             logger.warning('model_call failed prompt_id=%s attempt=%d elapsed_ms=%d status=%d error_type=%s diagnostic_id=%s', prompt_id, attempt, int((time.monotonic() - start) * 1000), exc.response.status_code, type(exc).__name__, diagnostic_id)
-            raise RuntimeError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
+            raise ModelServiceError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
         except httpx.RequestError as exc:
             diagnostic_id = record_failure(kind='network_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__}, context=context, secrets=secrets)
             logger.warning('model_call failed prompt_id=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s', prompt_id, attempt, int((time.monotonic() - start) * 1000), type(exc).__name__, diagnostic_id)
-            raise RuntimeError('模型服务连接失败或超时，请检查设置') from None
+            raise ModelServiceError('模型服务连接失败或超时，请检查设置') from None
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             errors = _safe_validation_errors(exc, json_schema) if isinstance(exc, ValidationError) else [{'type': 'invalid_response', 'path': []}]
             diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)

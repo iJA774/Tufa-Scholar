@@ -168,6 +168,11 @@ Invoke-RestMethod 'http://127.0.0.1:8000/runs/1' | ConvertTo-Json -Depth 10
 ## 验证
 
 
+### 科研预算与错误反馈验收（2026-11-10）
+
+隔离后端回归 189 项通过，耗时 12.679 秒，日志为 `.cache/deerflow-budget-tests/unittest.log`。实际 API/worker 配合模拟模型和服务，`verify_chat` 与 `verify_web_search` 最终复跑均以退出码 0 完成，日志位于 `.cache/deerflow-budget-acceptance/chat/verify.log` 和 `web/verify.log`；网页入口覆盖无效候选纠正后续读，以及重复无效动作后保留资料的阶段性结果。未调用真实模型或搜索服务。
+
+
 ### 网页动作契约验收（2026-11-09）
 
 隔离后端回归 177 项通过，耗时 14.015 秒，日志为 `.cache/web-action-contract-tests/unittest.log`。实际 API/worker 配合模拟模型和服务运行 `verify_web_search` 与 `verify_chat` 均以退出码 0 完成，日志分别位于 `.cache/web-action-contract-acceptance/web/verify.log` 和 `chat/verify.log`；网页入口覆盖匹配候选 ID 与 URL 同时出现时续读下一块并引用。

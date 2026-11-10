@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from src.literature.evidence import collect_evidence
 from .search import SearchPapersInput
+from .registry import ToolCallValidationError, _safe_errors
 
 
 class Candidate(BaseModel):
@@ -42,19 +43,28 @@ class CollectEvidenceInput(SearchPapersInput):
 
 
 def _collect_evidence(params, context):
-    try:
-        if context.source == 'web':
-            items = [WebCandidate.model_validate(item.model_dump(exclude_unset=True)).model_dump(exclude_unset=True) for item in params.papers]
-            for item in items:
-                if not item['content'].strip():
-                    continue
-                parts = urlsplit(item['url'])
-                if parts.scheme.lower() not in {'http', 'https'} or not parts.hostname or parts.username or parts.password:
-                    raise ValueError
-        else:
-            items = [item.model_dump(exclude_unset=True) for item in params.papers]
-    except (ValidationError, ValueError):
-        raise ValueError('工具参数无效') from None
+    if context.source == 'web':
+        items = []
+        for index, candidate in enumerate(params.papers):
+            try:
+                item = WebCandidate.model_validate(candidate.model_dump(exclude_unset=True)).model_dump(exclude_unset=True)
+            except ValidationError as exc:
+                errors = _safe_errors(exc, WebCandidate.model_json_schema())
+                for error in errors:
+                    error['path'] = ['papers', index, *error['path']]
+                raise ToolCallValidationError('工具参数无效', 'invalid_arguments', errors) from None
+            if item['content'].strip():
+                try:
+                    parts = urlsplit(item['url'])
+                    valid = parts.scheme.lower() in {'http', 'https'} and parts.hostname and not parts.username and not parts.password
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise ToolCallValidationError('工具参数无效', 'invalid_arguments',
+                                                  [{'type': 'value_error', 'path': ['papers', index, 'url']}]) from None
+            items.append(item)
+    else:
+        items = [item.model_dump(exclude_unset=True) for item in params.papers]
     if params.relevance_queries:
         return collect_evidence(context.project_id, context.source, context.paper_ids, params.query, items, relevance_queries=params.relevance_queries)
     return collect_evidence(context.project_id, context.source, context.paper_ids, params.query, items)

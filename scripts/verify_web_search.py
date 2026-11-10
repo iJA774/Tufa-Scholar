@@ -30,14 +30,20 @@ class SearchFixture(ModelFixture):
         prompt = req['messages'][0]['content']
         data = json.loads(req['messages'][1]['content'])
         result = None
-        if '你是研究主控' in prompt and 'pagination-case' in data.get('question', ''):
+        if '你是研究主控' in prompt and 'invalid-partial' in data.get('question', ''):
+            result = {'action': 'web_research', 'task': 'invalid-partial accuracy', 'directions': ['accuracy']} if not data['results'] else {'action': 'report'}
+        elif '你是研究专家' in prompt and 'invalid-partial' in data.get('task', ''):
+            result = ({'action': 'search', 'query': 'invalid-partial accuracy', 'plan': ['搜索']} if not data['recent_result'] else {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['取证']} if '检索到' in data['recent_result'] else {'action': 'read', 'candidate_ids': ['C999'], 'plan': ['取证']})
+        elif '你是无工具研究审查者' in prompt and 'invalid-partial' in data.get('question', ''):
+            result = {'sufficient': False, 'gaps': ['需要核查'], 'summary': '保留资料', 'coverage': [], 'next_steps': []}
+        elif '你是研究主控' in prompt and 'pagination-case' in data.get('question', ''):
             result = {'action': 'web_research', 'task': 'pagination-case accuracy', 'directions': ['accuracy']} if not data['results'] else {'action': 'report'}
         elif '你是研究专家' in prompt and 'pagination-case' in data.get('task', ''):
             blocks = data.get('web_blocks', [])
             if not data['recent_result']:
                 result = {'action': 'search', 'query': 'pagination-case', 'plan': ['搜索']}
             elif not blocks:
-                result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'offset': 0, 'plan': ['读取']}
+                result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id'] if data.get('validation_feedback') else 'C999'], 'offset': 0, 'plan': ['读取']}
             elif blocks[0]['next_offset'] is not None:
                 result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'url': data['candidates'][0]['url'], 'offset': blocks[0]['next_offset'], 'plan': ['继续读取']}
             elif '本次新增证据' not in data['recent_result']:
@@ -258,6 +264,14 @@ def main():
                     assert 'Markdown 字符区间 1000' in paginated_task['result']['content']
                     actions = [json.loads(req['messages'][1]['content']) for req in ModelFixture.requests if '你是研究专家' in req['messages'][0]['content']]
                     assert any(block['offset'] == 0 and block['next_offset'] == 1000 for payload in actions for block in payload.get('web_blocks', []))
+                    assert any(payload.get('validation_feedback', {}).get('code') == 'invalid_candidate_ids' for payload in actions)
+                    ModelFixture.requests.clear()
+                    invalid = call('POST', f'/projects/{project}/questions', json={'question': 'invalid-partial accuracy', 'source': 'web'})
+                    invalid_task = wait(invalid['run_id'])
+                    assert invalid_task['status'] == 'succeeded', invalid_task
+                    assert invalid_task['result']['content'].startswith('# 阶段性研究结果')
+                    assert invalid_task['result']['evidence'], invalid_task
+                    assert not any('你是研究报告撰写者' in req['messages'][0]['content'] for req in ModelFixture.requests)
                     SearchFixture.direct_primary_searches = 0
                     ModelFixture.requests.clear()
                     direct = call('POST', f'/projects/{project}/questions', json={'question': 'direct-case accuracy', 'source': 'auto'})

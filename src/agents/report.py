@@ -6,7 +6,7 @@ from typing import TypedDict, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from langgraph.graph import StateGraph, START, END
 from src.infrastructure.diagnostics import record_failure
-from src.integrations.model import StructuredOutputError
+from src.integrations.model import StructuredOutputError, ModelServiceError
 
 logger = logging.getLogger('tufa.agent')
 
@@ -109,6 +109,10 @@ class ReportState(TypedDict, total=False):
     patched_positions: list
     empty_retried: bool
     draft_format_failed: bool
+    draft_service_failed: bool
+    verification_failed: bool
+    verifier_service_failed: bool
+    revision_failed: bool
 
 
 _UNSAFE = re.compile(r'```|<[^>]+>|https?://|\[[^\]\n]+\]\s*\([^)]*\)|\[(?:[a-zA-Z]+[\w-]*\d+[\w-]*|\d+)\]', re.I)
@@ -138,6 +142,8 @@ def verify(s, model):
     by_id = {e['id']: e for e in s['evidence'] if allowed is None or e.get('paper_id') in allowed}
     previous = {(o['section_index'], o['paragraph_index']): o for o in s.get('outcomes', [])}
     outcomes = []
+    service_failed = s.get('verifier_service_failed', False)
+    verification_failed = s.get('verification_failed', False)
     units = [(si, pi, section.heading, p) for si, section in enumerate(s['draft'].sections) for pi, p in enumerate(section.paragraphs)]
     units += [(-1, pi, '局限', p) for pi, p in enumerate(s['draft'].limitations)]
     for si, pi, heading, paragraph in units:
@@ -155,13 +161,22 @@ def verify(s, model):
         elif si != -1 and _COST.search(text) and not any(_COST_EVIDENCE.search(e.get('text', '')) for e in cited): reason = '缺少成本依据'
         if reason:
             verdict = Verdict(status='unsupported', reason=reason)
+        elif service_failed:
+            outcomes.append({'section_index': si, 'paragraph_index': pi, 'status': 'unavailable'})
+            continue
         else:
-            verdict = model(s, 'literature/verify_claim', {'heading': heading, 'claim': paragraph.text, 'evidence': cited}, Verdict)
+            try:
+                verdict = model(s, 'literature/verify_claim', {'heading': heading, 'claim': paragraph.text, 'evidence': cited}, Verdict)
+            except (StructuredOutputError, ModelServiceError) as exc:
+                verification_failed = True
+                service_failed = isinstance(exc, ModelServiceError)
+                outcomes.append({'section_index': si, 'paragraph_index': pi, 'status': 'unavailable'})
+                continue
         outcomes.append({'section_index': si, 'paragraph_index': pi, **verdict.model_dump()})
     accepted = [(o['section_index'], o['paragraph_index']) for o in outcomes if o['status'] == 'supported']
     feedback = [o for o in outcomes if o['status'] != 'supported']
     gaps = [{'query': o['research_query'], 'route': o['research_route'], 'reason': o['reason']} for o in outcomes if o['status'] == 'missing_evidence']
-    return {'accepted': accepted, 'rejection_feedback': feedback, 'outcomes': outcomes, 'research_gaps': gaps}
+    return {'accepted': accepted, 'rejection_feedback': feedback, 'outcomes': outcomes, 'research_gaps': gaps, 'verification_failed': verification_failed, 'verifier_service_failed': service_failed}
 
 
 def _reference(e):
@@ -236,16 +251,23 @@ def render_partial(state, reason):
     return {'content': '\n\n'.join(lines), 'evidence': kept}
 
 def render(s):
-    if s.get('draft_format_failed'):
-        result = render_partial(s, '报告格式校验失败，本次仅提供已收集资料。')
+    if s.get('draft_format_failed') or s.get('draft_service_failed'):
+        message = '报告格式校验失败，本次仅提供已收集资料。' if s.get('draft_format_failed') else '报告撰写时模型服务不可用，本次仅提供已收集资料。'
+        result = render_partial(s, message)
         return {**result, 'research_gaps': []}
     accepted = set(map(tuple, s.get('accepted', [])))
     if not accepted:
-        result = render_partial(s, '本次没有通过核验的结论。')
+        if s.get('verifier_service_failed'):
+            reason = '结论核验时模型服务不可用，本次仅提供已收集资料。'
+        elif s.get('verification_failed'):
+            reason = '结论核验结果格式无效，本次仅提供已收集资料。'
+        else:
+            reason = '本次没有通过核验的结论。'
+        result = render_partial(s, reason)
         return {**result, 'research_gaps': s.get('research_gaps', [])}
     review = s.get('review_result')
     has_verified = any(position[0] >= 0 for position in s.get('accepted', [])) and bool(s.get('evidence'))
-    partial = (not has_verified or bool(s.get('research_gaps'))
+    partial = (s.get('verification_failed', False) or s.get('revision_failed', False) or not has_verified or bool(s.get('research_gaps'))
                or any(o.get('status') == 'missing_evidence' for o in s.get('outcomes', []))
                or review is None or not review.sufficient or bool(review.gaps))
     lines = ['# 阶段性研究结果' if partial else '# 研究报告']
@@ -275,7 +297,11 @@ def render(s):
     if any(e.get('source_level') == 'web_content' for e in kept): levels.append('网页文本片段')
     if levels:
         lines.append('实际引用的资料：' + '、'.join(levels) + '。')
-    if s.get('rejection_feedback') or not kept:
+    if s.get('verification_failed'):
+        lines.append('部分段落因核验服务不可用或结果格式无效而未展示。')
+    if s.get('revision_failed'):
+        lines.append('部分段落因修订服务不可用或结果格式无效而未展示。')
+    if any(o.get('status') in ('unsupported', 'qualified', 'missing_evidence') for o in s.get('outcomes', [])) or not kept:
         lines.append('证据不足：部分内容未通过核验或没有可用证据，需进一步核查。')
     for status, label in [('unsupported', '不受支持'), ('qualified', '待限定'), ('missing_evidence', '缺少证据')]:
         count = sum(o['status'] == status for o in s.get('outcomes', []))
@@ -329,6 +355,8 @@ def build_report_graph(model, on_stage=None):
             return {'draft': model(s, 'literature/synthesize', payload, Draft), 'empty_retried': s.get('empty_retried', False)}
         except StructuredOutputError:
             return {'draft_format_failed': True, 'research_gaps': []}
+        except ModelServiceError:
+            return {'draft_service_failed': True, 'research_gaps': []}
     def retry_empty(s):
         return {**draft(s), 'empty_retried': True}
     def check(s):
@@ -338,7 +366,10 @@ def build_report_graph(model, on_stage=None):
         if on_stage: on_stage('synthesizing')
         feedback = [o for o in s['outcomes'] if o['status'] == 'qualified']
         payload = {'question': s['research']['query'], 'draft': s['draft'].model_dump(), 'feedback': feedback, 'evidence': s['evidence'], 'verification_gaps': s.get('verification_gaps', [])}
-        patches = model(s, 'literature/revise', payload, PatchSet)
+        try:
+            patches = model(s, 'literature/revise', payload, PatchSet)
+        except (StructuredOutputError, ModelServiceError):
+            return {'revision_failed': True}
         target = {(o['section_index'], o['paragraph_index']) for o in feedback}
         updated = s['draft'].model_copy(deep=True)
         seen = set()
@@ -357,14 +388,14 @@ def build_report_graph(model, on_stage=None):
             logger.info('report_verification diagnostic_id=%s count=%d', diagnostic_id, len(rejected))
         return render(s)
     def after_draft(s):
-        if s.get('draft_format_failed'):
+        if s.get('draft_format_failed') or s.get('draft_service_failed'):
             return 'render'
         if s['evidence'] and not s['draft'].sections and not s['draft'].limitations and not s.get('empty_retried'):
             return 'retry_empty'
         return 'verify'
 
     def after_retry(s):
-        return 'render' if s.get('draft_format_failed') else 'verify'
+        return 'render' if s.get('draft_format_failed') or s.get('draft_service_failed') else 'verify'
 
     graph = StateGraph(ReportState)
     graph.add_node('draft', draft)
@@ -375,7 +406,7 @@ def build_report_graph(model, on_stage=None):
     graph.add_edge(START, 'draft')
     graph.add_conditional_edges('draft', after_draft)
     graph.add_conditional_edges('retry_empty', after_retry)
-    graph.add_conditional_edges('verify', lambda s: 'revise' if any(o['status'] == 'qualified' for o in s['outcomes']) and not s.get('revised') else 'render')
-    graph.add_edge('revise', 'verify')
+    graph.add_conditional_edges('verify', lambda s: 'revise' if any(o['status'] == 'qualified' for o in s['outcomes']) and not s.get('revised') and not s.get('verifier_service_failed') else 'render')
+    graph.add_conditional_edges('revise', lambda s: 'render' if s.get('revision_failed') else 'verify')
     graph.add_edge('render', END)
     return graph.compile()

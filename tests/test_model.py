@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 import httpx
 from pydantic import BaseModel
-from src.integrations.model import structured, StructuredOutputError
+from src.integrations.model import structured, StructuredOutputError, ModelServiceError
 
 
 class Output(BaseModel):
@@ -146,14 +146,14 @@ class ModelTests(unittest.TestCase):
                     structured('runtime/route', {}, Route)
                 self.assertEqual(post.call_count, 2)
             with patch('src.integrations.model.httpx.post', return_value=failure) as post:
-                with self.assertRaisesRegex(RuntimeError, 'HTTP 503') as error:
+                with self.assertRaisesRegex(ModelServiceError, r'模型服务请求失败 \(HTTP 503\)') as error:
                     structured('runtime/route', {}, Route)
                 self.assertNotIsInstance(error.exception, StructuredOutputError)
                 self.assertEqual(post.call_count, 1)
                 self.assertEqual(self.diagnostics_mock.call_args.kwargs['kind'], 'http_error')
                 self.assertNotIn('response', self.diagnostics_mock.call_args.kwargs)
             with patch('src.integrations.model.httpx.post', side_effect=httpx.ConnectError('private body')) as post:
-                with self.assertRaisesRegex(RuntimeError, '连接失败'):
+                with self.assertRaisesRegex(ModelServiceError, '模型服务连接失败或超时，请检查设置'):
                     structured('runtime/route', {}, Route)
                 self.assertEqual(post.call_count, 1)
                 self.assertEqual(self.diagnostics_mock.call_args.kwargs['kind'], 'network_error')

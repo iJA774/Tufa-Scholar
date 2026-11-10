@@ -235,6 +235,77 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'network failure'):
             r.build_report_graph(lambda *args: (_ for _ in ()).throw(RuntimeError('network failure'))).invoke(state)
 
+    def test_verifier_failure_withholds_only_unverified_and_bounds_calls(self):
+        from src.integrations.model import StructuredOutputError, ModelServiceError
+        evidence = [{'id':'a', 'text':'alpha beta gamma', 'title':'paper'}]
+        draft = r.Draft(sections=[r.Section(heading='概述', paragraphs=[r.Claim(text=t, citations=['a']) for t in ('alpha', 'beta', 'gamma')])])
+        for error, expected in [(StructuredOutputError('private'), ['alpha', 'beta', 'gamma']), (ModelServiceError('private'), ['alpha', 'beta'])]:
+            calls = []
+            def model(s, name, payload, schema):
+                if name.endswith('synthesize'): return draft
+                calls.append(payload['claim'])
+                if payload['claim'] == 'beta': raise error
+                return r.Verdict(status='supported')
+            result = r.build_report_graph(model).invoke({'research':{'source':'local','query':'q'}, 'history':[], 'evidence':evidence})
+            self.assertEqual(calls, expected)
+            self.assertIn('alpha', result['content']); self.assertNotIn('beta', result['content'])
+            self.assertEqual('gamma' in result['content'], len(expected) == 3)
+            self.assertIn('阶段性', result['content']); self.assertIn('核验', result['content'])
+            self.assertNotIn('private', result['content']); self.assertEqual(result['research_gaps'], [])
+
+    def test_verifier_format_failure_with_no_accepted_claims_is_not_service_failure(self):
+        from src.integrations.model import StructuredOutputError
+        draft = r.Draft(sections=[r.Section(heading='概述', paragraphs=[r.Claim(text='alpha', citations=['a'])])])
+        def model(s, name, payload, schema):
+            if name.endswith('synthesize'): return draft
+            raise StructuredOutputError('private')
+        result = r.build_report_graph(model).invoke({'research': {'source': 'local', 'query': 'q'}, 'history': [], 'evidence': [{'id': 'a', 'text': 'alpha', 'title': 'paper'}]})
+        self.assertIn('核验结果格式无效', result['content'])
+        self.assertNotIn('模型服务不可用', result['content'])
+        self.assertNotIn('alpha', result['content'])
+
+    def test_qualified_revision_survives_independent_verifier_format_failure(self):
+        from src.integrations.model import StructuredOutputError
+        draft = r.Draft(sections=[r.Section(heading='概述', paragraphs=[r.Claim(text='alpha', citations=['a']), r.Claim(text='beta', citations=['a'])])])
+        checked = []
+        def model(s, name, payload, schema):
+            if name.endswith('synthesize'): return draft
+            if name.endswith('revise'):
+                return r.PatchSet(patches=[r.Patch(section_index=0, paragraph_index=1, text='beta revised', citations=['a'])])
+            checked.append(payload['claim'])
+            if payload['claim'] == 'alpha': raise StructuredOutputError('private')
+            if payload['claim'] == 'beta': return r.Verdict(status='qualified', reason='限定', suggestion='补充限定')
+            return r.Verdict(status='supported')
+        result = r.build_report_graph(model).invoke({'research': {'source': 'local', 'query': 'q'}, 'history': [], 'evidence': [{'id': 'a', 'text': 'alpha beta revised', 'title': 'paper'}]})
+        self.assertEqual(checked, ['alpha', 'beta', 'beta revised'])
+        self.assertIn('beta revised', result['content'])
+        self.assertNotIn('alpha', result['content'])
+        self.assertIn('阶段性', result['content'])
+        self.assertEqual(result['research_gaps'], [])
+
+    def test_writer_and_revision_service_failure_preserve_safe_result(self):
+        from src.integrations.model import StructuredOutputError, ModelServiceError
+        evidence = [{'id':'a', 'text':'alpha beta', 'title':'paper'}]
+        state = {'research':{'source':'local','query':'q'}, 'history':[], 'evidence':evidence}
+        result = r.build_report_graph(lambda *args: (_ for _ in ()).throw(ModelServiceError('private'))).invoke(state)
+        self.assertIn('撰写', result['content']); self.assertEqual(result['evidence'], evidence)
+        self.assertNotIn('private', result['content'])
+        draft = r.Draft(sections=[r.Section(heading='概述', paragraphs=[r.Claim(text=t, citations=['a']) for t in ('alpha','beta')])])
+        for failure in (StructuredOutputError('private'), ModelServiceError('private')):
+            calls = []
+            def model(s, name, payload, schema):
+                calls.append(name)
+                if name.endswith('synthesize'): return draft
+                if name.endswith('revise'): raise failure
+                if payload['claim'] == 'beta': return r.Verdict(status='qualified', reason='需限定', suggestion='修订')
+                return r.Verdict(status='supported')
+            result = r.build_report_graph(model).invoke(state)
+            self.assertEqual(calls.count('literature/verify_claim'), 2)
+            self.assertEqual(calls.count('literature/revise'), 1)
+            self.assertIn('alpha', result['content']); self.assertNotIn('beta', result['content'])
+            self.assertIn('修订', result['content']); self.assertIn('阶段性', result['content'])
+            self.assertNotIn('private', result['content'])
+
     def test_empty_report_and_schema(self):
         with self.assertRaises(ValidationError): r.Draft.model_validate({'claims': []})
         result = r.build_report_graph(lambda s,n,p,t: r.Draft(sections=[])).invoke({'research': {'source': 'web', 'query': 'q'}, 'history': [], 'evidence': []})

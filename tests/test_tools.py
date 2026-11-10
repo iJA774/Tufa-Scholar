@@ -4,6 +4,7 @@ from unittest.mock import patch
 from pydantic import BaseModel
 
 from src.tools import ToolContext, ToolRegistry
+from src.tools.registry import ToolCallValidationError
 
 
 class ResearchToolsTests(unittest.TestCase):
@@ -57,6 +58,38 @@ class ResearchToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError) as error:
             self.registry.invoke('collect_evidence', {'query': 'x', 'papers': [{'title': 'secret'}]}, context=self.web)
         self.assertNotIn('secret', str(error.exception))
+
+    def test_typed_rejections_are_safe_and_do_not_invoke_handler(self):
+        with patch('src.tools.search.search_web') as handler:
+            cases = [('missing-secret', {}, self.web, 'unknown_tool'),
+                     ('search_web', {}, self.local, 'disallowed_tool'),
+                     ('search_web', {'query': 'private-query', 'secret-key': 'https://private.invalid'}, self.web, 'invalid_arguments')]
+            for name, arguments, context, code in cases:
+                with self.subTest(code=code), self.assertRaises(ToolCallValidationError) as raised:
+                    self.registry.invoke(name, arguments, context=context)
+                self.assertEqual(raised.exception.code, code)
+                safe = str(raised.exception) + str(raised.exception.errors)
+                for secret in ('private-query', 'secret-key', 'private.invalid', 'missing-secret'):
+                    self.assertNotIn(secret, safe)
+                if code == 'invalid_arguments':
+                    self.assertEqual(raised.exception.errors, [{'type': 'extra_forbidden', 'path': ['*']}])
+            handler.assert_not_called()
+
+    def test_web_evidence_nested_validation_is_typed_and_safe(self):
+        with patch('src.tools.read_paper.collect_evidence') as handler:
+            cases = [({'title': 'secret-title'}, ['papers', 0, 'url'], 'missing'),
+                     ({'title': 'secret-title', 'url': 'https://user:secret@example.com', 'content': 'text',
+                       'source_level': 'web_content', 'provider': 'source', 'retrieved_at': 'now'},
+                      ['papers', 0, 'url'], 'value_error')]
+            for candidate, path, category in cases:
+                with self.subTest(category=category), self.assertRaises(ToolCallValidationError) as raised:
+                    self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [candidate]}, context=self.web)
+                self.assertEqual(raised.exception.code, 'invalid_arguments')
+                self.assertIn({'type': category, 'path': path}, raised.exception.errors)
+                safe = str(raised.exception) + str(raised.exception.errors)
+                for private in ('secret', 'example.com', 'user:'):
+                    self.assertNotIn(private, safe)
+            handler.assert_not_called()
 
     @patch('src.tools.search.retrieve')
     def test_direct_paper_search(self, retrieve):

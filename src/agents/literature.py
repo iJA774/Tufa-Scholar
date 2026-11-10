@@ -1,6 +1,7 @@
 """Evidence-based chat graph; external text is always passed as data."""
 import re
 import logging
+import json
 from urllib.parse import urlsplit, urlunsplit
 from typing import TypedDict, Literal
 from pydantic import model_validator, field_validator, ValidationError
@@ -8,18 +9,22 @@ from pydantic_core import PydanticCustomError
 from src.literature.retrieval import _candidate_ids
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-from src.integrations.model import structured
+from langgraph.errors import GraphRecursionError
+from src.integrations.model import structured, StructuredOutputError, ModelServiceError
 from src.integrations.web_search import WebSearchError
 from src.infrastructure.diagnostics import record_failure
 from src.tools import ToolContext, ToolRegistry
+from src.tools.registry import ToolCallValidationError
 from src.literature.retrieval import rank_candidates
 from src.literature.keywords import relevance_terms, relevance_score
 
 logger = logging.getLogger('tufa.agent')
 registry = ToolRegistry()
-MAX_DELEGATIONS = 10
+MAX_DELEGATIONS = 3
 MAX_TOOL_CALLS = 8
-MAX_DECISIONS = 16
+MAX_SEARCH_RESULTS = 3
+GRAPH_RECURSION_LIMIT = 30
+MAX_DECISIONS = 3
 
 
 def _context(research):
@@ -29,6 +34,11 @@ def _context(research):
 from src.agents.report import Claim, Draft, Section, Verdict, build_report_graph, render_partial, verify as _report_verify, render as _report_render
 
 class State(TypedDict, total=False):
+    tool_feedback: dict
+    tool_validation_failures: int
+    review_failed: bool
+    retained_verified: dict
+    recursion_exhausted: bool
     research: dict
     effective_source: str
     directions: list
@@ -153,9 +163,9 @@ def search(s):
             if research['source'] == 'web':
                 while True:
                     try:
-                        args = {'query': query, 'limit': 5}
+                        args = {'query': query, 'limit': MAX_SEARCH_RESULTS}
                         if backend == 'alternative': args['backend'] = 'alternative'
-                        results = [item for item in registry.invoke('search_web', args, context=_context(research)) if item.get('url')]
+                        results = [item for item in registry.invoke('search_web', args, context=_context(research)) if item.get('url')][:MAX_SEARCH_RESULTS]
                         failures = 0
                         empties = empties + 1 if not results and not any(query_results.values()) else 0
                         if backend == 'alternative' and results:
@@ -184,7 +194,7 @@ def search(s):
             else:
                 result = registry.invoke('search_papers', {'query': query}, context=_context(research))
                 warnings.extend(result.get('warnings', []))
-                results = result['results']
+                results = result['results'] if research['source'] == 'collection' else result['results'][:MAX_SEARCH_RESULTS]
             succeeded = True
             returned_rows += len(results)
         except RuntimeError:
@@ -426,9 +436,16 @@ def _research_graph(kind, on_stage):
             'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
             'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'prior_subtask_notes': s.get('subtask_notes', [])[-10:], 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])), 'attempted_direct_urls': s.get('direct_url_attempts', []),
         }
+        if s.get('tool_feedback'): payload['validation_feedback'] = s['tool_feedback']
         valid_ids = {key for key, _ in views}
         for attempt in range(2):
-            choice = _model(s, 'literature/research', payload, Specialist)
+            try:
+                choice = _model(s, 'literature/research', payload, Specialist)
+            except StructuredOutputError:
+                return {'choice': Specialist(action='finish', plan=['结束']), 'recent_result': '研究决策格式无效，已结束本轮'}
+            except ModelServiceError:
+                if not (s.get('evidence') or s.get('evidence_pool')): raise
+                return {'choice': Specialist(action='finish', plan=['结束']), 'recent_result': '模型服务不可用，已结束本轮', 'review_failed': True}
             logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
             code = specialist_semantic_error(choice, kind=kind, blocked=bool(s.get('web_search_blocked')),
                 can_direct=can_direct, candidate_ids=valid_ids, direct_url_attempts=s.get('direct_url_attempts', []), candidate_urls={key: item.get('url', '') for key, item in views})
@@ -441,13 +458,11 @@ def _research_graph(kind, on_stage):
                 context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1, 'role': kind, 'search_blocked': bool(s.get('web_search_blocked')), 'can_read_direct_url': can_direct, 'direct_url_attempts': s.get('direct_url_attempts', [])})
             logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
             if attempt:
-                if kind == 'web' and (code == 'conflicting_candidate_url' or ((s.get('web_search_blocked') or can_direct) and (choice.action == 'search' or (choice.action == 'read_web_page' and choice.url)))):
-                    return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan}
-                raise ValueError('精读候选标识无效')
+                return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan, 'recent_result': '工具选择无效，已结束本轮'}
             payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'instruction': ('该网址已尝试，请选择其他可信网址或结束' if code == 'repeated_direct_url' else '候选分页只传 candidate_ids，省略 url 和 query' if code == 'conflicting_candidate_url' else ''), 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
         return {'choice': choice, 'candidate_identities': identities, 'plan': choice.plan}
 
-    def invoke(s):
+    def invoke_core(s):
         choice = s['choice']
         if choice.action == 'search':
             if on_stage: on_stage('searching_web' if kind == 'web' else 'searching')
@@ -496,7 +511,7 @@ def _research_graph(kind, on_stage):
             if on_stage: on_stage('evidence')
             mapping = dict(_candidate_views(s)[0])
             if len(set(choice.candidate_ids)) != len(choice.candidate_ids) or any(i not in mapping for i in choice.candidate_ids):
-                raise ValueError('精读候选标识无效')
+                raise ToolCallValidationError('工具参数无效', 'invalid_arguments', [{'type': 'value_error', 'path': ['candidate_ids']}])
             papers = []
             extras = []
             for candidate_id in choice.candidate_ids:
@@ -514,14 +529,34 @@ def _research_graph(kind, on_stage):
             result = f"本次新增证据：{update['new_evidence']}"
         return {**update, 'tool_calls': s.get('tool_calls', 0) + 1, 'recent_result': result}
 
+    def invoke(s):
+        try:
+            return {**invoke_core(s), 'tool_feedback': {}, 'tool_validation_failures': 0}
+        except ToolCallValidationError as exc:
+            diagnostic_id = record_failure(kind='tool_validation', payload={}, schema={}, errors={'code': exc.code, 'errors': exc.errors}, context={'prompt_id': 'literature/research', 'role': kind, 'action': s['choice'].action})
+            logger.warning('tool_validation role=%s action=%s code=%s errors=%s diagnostic_id=%s', kind, s['choice'].action, exc.code, json.dumps(exc.errors, ensure_ascii=False), diagnostic_id)
+            failures = s.get('tool_validation_failures', 0) + 1
+            return {'tool_calls': s.get('tool_calls', 0) + 1, 'tool_validation_failures': failures,
+                    'tool_feedback': {'code': exc.code, 'errors': exc.errors},
+                    'recent_result': '工具参数无效，已结束本轮' if failures >= 2 else '工具参数无效，请修正'}
+
     graph = StateGraph(State)
     graph.add_node('decide', decide)
     graph.add_node('invoke', invoke)
     graph.add_edge(START, 'decide')
     graph.add_conditional_edges('decide', lambda s: END if s['choice'].action == 'finish' or s.get('tool_calls', 0) >= MAX_TOOL_CALLS else 'invoke')
-    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= MAX_TOOL_CALLS or (s.get('search_status') == 'failed' and not s.get('candidates') and not s.get('web_search_blocked') and not (kind == 'web' and s.get('auto_web') and s.get('web_backend') == 'alternative' and s.get('fallback_reason'))) else 'decide')
+    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= MAX_TOOL_CALLS or s.get('tool_validation_failures', 0) >= 2 or (s.get('search_status') == 'failed' and not s.get('candidates') and not s.get('web_search_blocked') and not (kind == 'web' and s.get('auto_web') and s.get('web_backend') == 'alternative' and s.get('fallback_reason'))) else 'decide')
     return graph.compile()
 
+
+def _stream_bounded(graph, state):
+    latest = dict(state)
+    try:
+        for latest in graph.stream(state, {'recursion_limit': GRAPH_RECURSION_LIMIT}, stream_mode='values'):
+            pass
+    except GraphRecursionError:
+        return {**latest, 'recursion_exhausted': True}
+    return latest
 
 def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
     if research['source'] == 'collection' and not research.get('paper_ids'):
@@ -532,6 +567,8 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
     def supervisor(s):
         if on_stage: on_stage('planning')
         count = s.get('delegations', 0)
+        if s.get('review_failed') or s.get('recursion_exhausted'):
+            return {'route': Route(action='partial'), 'forced_reason': '审查或研究未能完成'}
         reviewed = s.get('review_result')
         exhausted = count >= MAX_DELEGATIONS or s.get('decisions', 0) >= MAX_DECISIONS
         effective = s.get('effective_source')
@@ -569,7 +606,10 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
             'review': reviewed.model_dump() if reviewed else None, 'verification_gaps': s.get('verification_gaps', []), 'delegations_remaining': max(0, MAX_DELEGATIONS-count),
             'decisions_remaining': max(0, MAX_DECISIONS-s.get('decisions', 0))}
         for attempt in range(2):
-            route = _model(s, 'runtime/route', payload, Route)
+            try:
+                route = _model(s, 'runtime/route', payload, Route)
+            except StructuredOutputError:
+                return {'route': Route(action='partial'), 'forced_reason': '主控决策格式无效'}
             logger.info('prompt_id=runtime/route action=%s allowed=%s delegations=%d decisions=%d attempt=%d', route.action, actions, count, s.get('decisions', 0), attempt + 1)
             if route.action in actions:
                 break
@@ -578,7 +618,7 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
                 context={'allowed_actions': actions, 'prompt_id': 'runtime/route', 'attempt': attempt + 1})
             logger.warning('prompt_id=runtime/route diagnostic_id=%s', diagnostic_id)
             if attempt:
-                raise ValueError('主控选择了当前范围或状态不允许的操作')
+                return {'route': Route(action='partial'), 'forced_reason': '主控选择不符合当前范围'}
             payload = {**payload, 'validation_feedback': {'code': 'invalid_action', 'allowed_actions': actions}}
         return {'route': route, 'decisions': s.get('decisions', 0) + 1}
 
@@ -591,9 +631,9 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
         scoped_research = {**research, 'source': effective}
         directions = list(dict.fromkeys(s.get('directions', []) + s['route'].directions))
         input_state = {**s, **prior, 'research': scoped_research, 'directions': directions,
-                       'auto_web': research['source'] == 'auto' and effective == 'web', 'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'executed_queries': list(prior.get('executed_queries', [])), 'plan': []}
+                       'auto_web': research['source'] == 'auto' and effective == 'web', 'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'tool_feedback': {}, 'tool_validation_failures': 0, 'executed_queries': list(prior.get('executed_queries', [])), 'plan': []}
         try:
-            result = (web_graph if action == 'web_research' else paper_graph).invoke(input_state)
+            result = _stream_bounded(web_graph if action == 'web_research' else paper_graph, input_state)
         except ResearchToolFailure as exc:
             if not before and not prior.get('candidates') and not (research['source'] == 'auto' and effective == 'web'):
                 raise exc.__cause__ from None
@@ -613,14 +653,20 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
         continuation = bool((new_keys - old_keys) - set(result.get('read_ids', []))) or any((key, block['offset']) not in old_offsets and block.get('next_offset') is not None for key, blocks in result.get('web_blocks', {}).items() for block in blocks)
         summaries = [{key: p.get(key) for key in ('title', 'doi', 'url', 'original_url', 'source_level')} for p in result.get('candidates', [])[:20]]
         return {'effective_source': effective, 'directions': directions, 'pools': pools, 'attempted_plans': attempted,
-                'delegations': s.get('delegations', 0) + 1, 'review_result': None, 'feedback_pending': False,
+                'delegations': s.get('delegations', 0) + 1, 'review_failed': result.get('review_failed', False), 'recursion_exhausted': result.get('recursion_exhausted', False), 'review_result': None, 'feedback_pending': False,
                 'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
                 'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []), 'web_search_blocked': result.get('web_search_blocked', ''), 'web_failures': result.get('web_failures', 0), 'web_backend': result.get('web_backend', 'primary'), 'web_empty_count': result.get('web_empty_count', 0), 'fallback_reason': result.get('fallback_reason', ''), 'direct_url_attempts': result.get('direct_url_attempts', []),
-                'results': (s.get('results', []) + [{'source': effective, 'route': action, 'continuation_available': continuation, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(relevant_new), 'new_evidence_ids': [e['id'] for e in relevant_new], 'new_candidates': len(new_keys-old_keys), 'unread_candidates': unread, 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
+                'results': (s.get('results', []) + [{'source': effective, 'route': action, 'continuation_available': continuation, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(relevant_new), 'new_evidence_ids': [e['id'] for e in relevant_new], 'new_candidates': len(new_keys-old_keys), 'unread_candidates': unread, 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'step_status': result.get('recent_result', ''), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
 
     def review(s):
         if on_stage: on_stage('assessing')
-        result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'can_read_direct_url': _can_read_direct('web', {**s, 'auto_web': research['source'] == 'auto'}, len(s.get('pools', {}).get('web_research', {}).get('candidates', []))), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'attempted_direct_urls': s.get('direct_url_attempts', []), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
+        try:
+            result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'can_read_direct_url': _can_read_direct('web', {**s, 'auto_web': research['source'] == 'auto'}, len(s.get('pools', {}).get('web_research', {}).get('candidates', []))), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'attempted_direct_urls': s.get('direct_url_attempts', []), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
+        except StructuredOutputError:
+            return {'review_failed': True}
+        except ModelServiceError:
+            if not (s.get('evidence') or s.get('evidence_pool')): raise
+            return {'review_failed': True}
         allowed_ids = {item['id'] for item in s.get('evidence', [])}
         excluded = set(s.get('excluded_evidence_ids', [])) | (set(result.irrelevant_evidence_ids) & allowed_ids)
         working = [item for item in s.get('evidence', []) if item['id'] not in excluded]
@@ -657,11 +703,24 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
                 choices = [recommended] if recommended in permitted else (permitted if recommended is None else [])
                 choices = [action for action in choices if _plan_signature(action, goal) not in attempted]
                 if choices:
-                    return {'verification_gaps': gaps, 'verification_attempted': True, 'feedback_pending': True, 'feedback_actions': choices, 'feedback_goal': goal}
+                    retained = {'content': result['content'], 'evidence': result['evidence']} if result.get('evidence') and any(position[0] >= 0 for position in result.get('accepted', [])) else s.get('retained_verified', {})
+                    return {'verification_gaps': gaps, 'verification_attempted': True, 'feedback_pending': True, 'feedback_actions': choices, 'feedback_goal': goal, 'retained_verified': retained}
+        if not any(position[0] >= 0 for position in result.get('accepted', [])) and s.get('retained_verified'):
+            retained = _retained_partial(s)
+            if retained: return {**retained, 'feedback_pending': False}
         return {'content': result['content'], 'evidence': result['evidence'], 'feedback_pending': False}
 
 
+    def _retained_partial(s):
+        retained = s.get('retained_verified') or {}
+        valid_ids = {item['id'] for item in s.get('evidence', []) + s.get('evidence_pool', [])} - set(s.get('excluded_evidence_ids', []))
+        if not retained.get('evidence') or any(item['id'] not in valid_ids for item in retained['evidence']): return None
+        content = retained['content'].replace('# 研究报告', '# 阶段性研究结果', 1)
+        return {'content': content + '\n\n补充研究未完成，以上已核验内容仍需结合未解决缺口使用。', 'evidence': retained['evidence']}
+
     def partial(s):
+        retained = _retained_partial(s)
+        if retained: return retained
         web_pool = s.get('pools', {}).get('web_research', {})
         if (research['source'] == 'web' and s.get('web_failures', 0) and not s.get('web_search_blocked')
                 and not web_pool.get('query_results') and not web_pool.get('candidates') and not s.get('evidence_pool')):
@@ -677,6 +736,8 @@ def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
     graph.add_edge('answer', END)
     graph.add_edge('partial', END)
     graph.add_conditional_edges('report', lambda s: 'supervisor' if s.get('feedback_pending') else END)
-    result = graph.compile().invoke({'research': research, 'history': [] if research['source'] == 'collection' else list(history),
-        'candidates': [], 'query_results': {}, 'evidence': [], 'evidence_pool': [], 'evidence_facets': [research['query']], 'warnings': []}, {'recursion_limit': 300})
+    result = _stream_bounded(graph.compile(), {'research': research, 'history': [] if research['source'] == 'collection' else list(history),
+        'candidates': [], 'query_results': {}, 'evidence': [], 'evidence_pool': [], 'evidence_facets': [research['query']], 'warnings': []})
+    if result.get('recursion_exhausted'):
+        result = _retained_partial(result) or render_partial(result, '研究流程达到运行上限')
     return result['content'], result.get('evidence', [])

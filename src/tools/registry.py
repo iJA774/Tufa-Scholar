@@ -5,6 +5,36 @@ from typing import Literal
 from pydantic import BaseModel, ValidationError
 
 
+class ToolCallValidationError(ValueError):
+    """Safe, structured rejection before a tool handler is invoked."""
+    def __init__(self, message, code, errors=None):
+        super().__init__(message)
+        self.code = code
+        self.errors = errors or []
+
+
+def _safe_errors(exc, schema):
+    fields = set()
+    def collect(value):
+        if isinstance(value, dict):
+            fields.update(value.get('properties', {}).keys())
+            for child in value.values(): collect(child)
+        elif isinstance(value, list):
+            for child in value: collect(child)
+    collect(schema)
+    allowed = {'missing', 'extra_forbidden', 'string_type', 'string_too_short', 'string_too_long',
+               'list_type', 'too_short', 'too_long', 'int_type', 'int_parsing', 'greater_than_equal',
+               'less_than_equal', 'literal_error', 'model_type', 'value_error', 'bool_type'}
+    errors = []
+    for error in exc.errors(include_input=False, include_context=False, include_url=False):
+        path = [part if type(part) is int or (isinstance(part, str) and part in fields) else '*'
+                for part in error['loc']]
+        if error['type'] == 'extra_forbidden' and path:
+            path[-1] = '*'
+        errors.append({'type': error['type'] if error['type'] in allowed else 'validation_error', 'path': path})
+    return errors
+
+
 @dataclass(frozen=True)
 class ToolContext:
     project_id: int
@@ -39,10 +69,12 @@ class ToolRegistry:
 
     def invoke(self, name, arguments, *, context: ToolContext):
         tool = self._tools.get(name)
-        if tool is None or context.source not in tool[3]:
-            raise ValueError('工具不存在或不适用于当前范围')
+        if tool is None:
+            raise ToolCallValidationError('工具不存在或不适用于当前范围', 'unknown_tool')
+        if context.source not in tool[3]:
+            raise ToolCallValidationError('工具不存在或不适用于当前范围', 'disallowed_tool')
         try:
             params = tool[1].model_validate(arguments)
-        except ValidationError:
-            raise ValueError('工具参数无效') from None
+        except ValidationError as exc:
+            raise ToolCallValidationError('工具参数无效', 'invalid_arguments', _safe_errors(exc, tool[1].model_json_schema())) from None
         return tool[2](params, context)

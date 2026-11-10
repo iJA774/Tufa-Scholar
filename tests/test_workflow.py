@@ -247,19 +247,19 @@ class WorkflowTests(unittest.TestCase):
         pool = [{'id': 'good', 'title': '', 'text': 'attention evidence'}, {'id': 'bad', 'title': '', 'text': 'unrelated subject'}]
         self.assertEqual([e['id'] for e in w._select_evidence(pool, ['attention'])], ['good'])
 
-    def test_fourth_delegation_completes_before_formal_report(self):
+    def test_third_delegation_completes_before_formal_report(self):
         paper = {'id': 3, 'title': 'attention paper', 'abstract': 'attention evidence', 'versions': []}
         reviews, writer = [], []
         def model(name, payload, schema):
             if name == 'runtime/route': return route(action='paper_research', task='initial')
             if name == 'literature/research':
                 if not payload['recent_result']:
-                    if len(payload['results']) >= 3 and payload['candidates']: return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                    if len(payload['results']) >= 2 and payload['candidates']: return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
                     return specialist(action='search', query='attention')
                 return specialist(action='finish')
             if name == 'literature/review':
                 reviews.append(payload)
-                if len(reviews) == 4: return w.Review(sufficient=True, summary='ok')
+                if len(reviews) == 3: return w.Review(sufficient=True, summary='ok')
                 return w.Review(sufficient=False, gaps=['待取证'], summary='不足', next_steps=[w.NextStep(direction='attention', goal=f'补查{len(reviews)}', route='paper_research')])
             if name == 'literature/synthesize':
                 writer.append(payload)
@@ -268,7 +268,7 @@ class WorkflowTests(unittest.TestCase):
             raise AssertionError(name)
         with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]):
             _, evidence = w.run(TASK, history=[])
-        self.assertEqual(len(reviews), 4)
+        self.assertEqual(len(reviews), 3)
         self.assertEqual(len(writer), 1)
         self.assertEqual(len(evidence), 1)
 
@@ -365,19 +365,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(reviews[-1]['results'][-1]['search_status'], 'failed')
         self.assertNotIn('private', content)
 
-    def test_tenth_delegation_can_complete_formal_report(self):
+    def test_final_delegation_can_complete_formal_report(self):
         reviews, writers = [], []
         paper = {'id': 3, 'title': 'attention paper', 'abstract': 'attention evidence', 'versions': []}
         def model(name, payload, schema):
             if name == 'runtime/route': return route(action='paper_research', task='initial')
             if name == 'literature/research':
-                if len(payload['results']) >= 3 and len(reviews) == 9:
+                if len(reviews) == 2:
                     if not payload['recent_result']: return specialist(action='search', query='attention')
                     if payload['recent_result'].startswith('检索'): return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
                 return specialist(action='finish')
             if name == 'literature/review':
                 reviews.append(payload)
-                return w.Review(sufficient=len(reviews) == 10, summary='审查', gaps=[] if len(reviews) == 10 else ['待查'], next_steps=[] if len(reviews) == 10 else [w.NextStep(route='paper_research', direction='研究', goal=f'补查{len(reviews)}')])
+                return w.Review(sufficient=len(reviews) == 3, summary='审查', gaps=[] if len(reviews) == 3 else ['待查'], next_steps=[] if len(reviews) == 3 else [w.NextStep(route='paper_research', direction='研究', goal=f'补查{len(reviews)}')])
             if name == 'literature/synthesize':
                 writers.append(payload)
                 return draft(claims=[w.Claim(text='attention evidence', citations=[payload['evidence'][0]['id']])])
@@ -385,7 +385,7 @@ class WorkflowTests(unittest.TestCase):
             raise AssertionError(name)
         with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]):
             _, evidence = w.run(TASK, history=[])
-        self.assertEqual(len(reviews), 10)
+        self.assertEqual(len(reviews), 3)
         self.assertEqual(len(writers), 1)
         self.assertEqual(len(evidence), 1)
 
@@ -424,6 +424,106 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([item.text for item in review.subtask_findings], ['有效'])
         self.assertFalse(review.sufficient)
 
+    def test_tool_validation_one_correction_and_bounded_retry(self):
+        from src.tools.registry import ToolCallValidationError
+        for corrected in (True, False):
+            with self.subTest(corrected=corrected):
+                payloads = []
+                error = ToolCallValidationError('private', 'invalid_arguments', [{'type': 'missing', 'path': ['query']}])
+                def model(name, payload, schema):
+                    payloads.append(payload)
+                    if payload.get('validation_feedback') and corrected: return specialist(action='finish')
+                    return specialist(action='search', query='attention')
+                with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', side_effect=error) as invoke:
+                    result = w._research_graph('paper', None).invoke({'research': TASK, 'task': 'attention', 'history': [], 'candidates': [], 'evidence': []})
+                self.assertEqual(invoke.call_count, 1 if corrected else 2)
+                self.assertEqual(payloads[1]['validation_feedback']['code'], 'invalid_arguments')
+                self.assertNotIn('private', str(payloads[1]['validation_feedback']))
+                self.assertEqual(result['tool_calls'], 1 if corrected else 2)
+                context = self.record_failure.call_args.kwargs['context']
+                self.assertEqual((context['role'], context['action']), ('paper', 'search'))
+                self.assertNotIn('query', context)
+
+    def test_search_limits_candidates_per_call(self):
+        papers = [{'id': i, 'title': f'paper {i}'} for i in range(6)]
+        with patch.object(w.registry, 'invoke', return_value={'results': papers}):
+            result = w.search({'research': TASK, 'queries': ['attention']})
+        self.assertEqual(len(result['candidates']), 3)
+
+    def test_recursion_boundary_returns_latest_snapshot(self):
+        from langgraph.errors import GraphRecursionError
+        class Graph:
+            def stream(self, state, config, *, stream_mode):
+                self.config = config
+                yield {**state, 'evidence': [{'id': 'saved'}]}
+                raise GraphRecursionError('bounded')
+        graph = Graph()
+        result = w._stream_bounded(graph, {'evidence': []})
+        self.assertEqual(result['evidence'], [{'id': 'saved'}])
+        self.assertTrue(result['recursion_exhausted'])
+        self.assertEqual(graph.config['recursion_limit'], 30)
+
+    def test_review_service_failure_keeps_collected_evidence(self):
+        from src.integrations.model import ModelServiceError
+        paper = {'id': 3, 'title': 'attention', 'abstract': 'attention evidence', 'versions': []}
+        def model(name, payload, schema):
+            if name == 'runtime/route': return route(action='paper_research', task='attention')
+            if name == 'literature/research':
+                if not payload['recent_result']: return specialist(action='search', query='attention')
+                if payload['recent_result'].startswith('检索'): return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                return specialist(action='finish')
+            if name == 'literature/review': raise ModelServiceError('private')
+            raise AssertionError('unexpected writer')
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]):
+            content, evidence = w.run(TASK, history=[])
+        self.assertIn('阶段', content)
+        self.assertNotIn('private', content)
+        self.assertEqual(len(evidence), 1)
+
+    def test_research_format_failure_returns_review_without_tools(self):
+        from src.integrations.model import StructuredOutputError
+        calls = []
+        def model(name, payload, schema):
+            calls.append(name)
+            if name == 'runtime/route': return route(action='paper_research', task='attention')
+            if name == 'literature/research': raise StructuredOutputError('private')
+            if name == 'literature/review': return w.Review(sufficient=False, summary='不足')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke') as invoke:
+            content, _ = w.run(TASK, history=[])
+        self.assertIn('阶段', content)
+        self.assertIn('literature/review', calls)
+        invoke.assert_not_called()
+
+    def test_verified_paragraph_survives_followup_model_service_failure(self):
+        from src.integrations.model import ModelServiceError
+        paper = {'id': 3, 'title': 'attention paper', 'abstract': 'attention evidence', 'versions': []}
+        reviews = []
+        def model(name, payload, schema):
+            if name == 'runtime/route': return route(action='paper_research', task='attention')
+            if name == 'literature/research':
+                if reviews: raise ModelServiceError('private')
+                if not payload['recent_result']: return specialist(action='search', query='attention')
+                if payload['recent_result'].startswith('检索'): return specialist(action='read', candidate_ids=[payload['candidates'][0]['id']])
+                return specialist(action='finish')
+            if name == 'literature/review':
+                reviews.append(payload)
+                return w.Review(sufficient=True, summary='ok')
+            if name == 'literature/synthesize':
+                eid = payload['evidence'][0]['id']
+                return draft(claims=[w.Claim(text='attention evidence', citations=[eid]), w.Claim(text='attention needs followup', citations=[eid])])
+            if name == 'literature/verify_claim':
+                if 'followup' in payload['claim']: return w.Verdict(status='missing_evidence', reason='缺依据', research_query='additional attention', research_route='paper_research')
+                return w.Verdict(status='supported')
+            raise AssertionError(name)
+        with patch.object(w, 'structured', side_effect=model), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(repository, 'project_evidence', return_value=[paper]):
+            content, evidence = w.run(TASK, history=[])
+        self.assertIn('阶段', content)
+        self.assertIn('attention evidence', content)
+        self.assertNotIn('attention needs followup', content)
+        self.assertNotIn('private', content)
+        self.assertEqual(len(evidence), 1)
+
     def test_direct_graph_uses_history_without_tools(self):
         history = [{'role': 'user', 'content': 'prior question'}]
         def model(name, payload, schema):
@@ -459,10 +559,12 @@ class WorkflowTests(unittest.TestCase):
     def test_forged_candidate_never_calls_collect(self):
         def model(name, payload, schema):
             if name == 'runtime/route': return route(action='paper_research', task='attention')
-            return specialist(action='read', candidate_ids=['fake'])
+            if name == 'literature/research': return specialist(action='read', candidate_ids=['fake'])
+            if name == 'literature/review': return w.Review(sufficient=False, summary='不足')
+            raise AssertionError(name)
         with patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke') as invoke:
-            with self.assertRaisesRegex(ValueError, '候选'):
-                w.run(TASK, history=[])
+            content, _ = w.run(TASK, history=[])
+        self.assertIn('阶段', content)
         invoke.assert_not_called()
 
     def test_rejected_claim_can_be_revised_using_original_evidence(self):
@@ -566,8 +668,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in invoke.call_args_list], ['search_papers'] * 8)
         self.assertIn('证据不足', content)
 
-    def test_delegation_budget_stops_after_ten_with_new_evidence(self):
-        papers = [{'id': i, 'title': f'paper {i}', 'abstract': f'attention evidence {i}', 'versions': []} for i in range(1, 11)]
+    def test_delegation_budget_stops_after_three_with_new_evidence(self):
+        papers = [{'id': i, 'title': f'paper {i}', 'abstract': f'attention evidence {i}', 'versions': []} for i in range(1, 4)]
         tasks, remaining = [], []
         def model(name, payload, schema):
             if name == 'runtime/route':
@@ -587,8 +689,8 @@ class WorkflowTests(unittest.TestCase):
             raise AssertionError(name)
         with patch.object(repository, 'project_evidence', return_value=papers), patch('src.tools.search.retrieve', side_effect=[{'results': [p]} for p in papers]), patch.object(w, 'structured', side_effect=model):
             content, _ = w.run(TASK, history=[])
-        self.assertEqual(len(tasks), 10)
-        self.assertEqual(remaining[-1], 10)  # Budget exhaustion routes without another model call.
+        self.assertEqual(len(tasks), 3)
+        self.assertEqual(remaining[-1], 3)  # Budget exhaustion routes without another model call.
         self.assertIn('证据不足', content)
 
     def test_forbidden_route_never_invokes_tools(self):
@@ -597,8 +699,8 @@ class WorkflowTests(unittest.TestCase):
                 research = {**TASK, 'source': source, 'paper_ids': [3]}
                 choice = route(action=action, task='task', answer='answer')
                 with patch.object(w, 'structured', return_value=choice), patch.object(w.registry, 'invoke') as invoke:
-                    with self.assertRaisesRegex(ValueError, '不允许'):
-                        w.run(research, history=[])
+                    content, _ = w.run(research, history=[])
+                    self.assertIn('阶段', content)
                 invoke.assert_not_called()
 
     def test_no_progress_forces_review_and_report_without_another_route(self):
@@ -658,9 +760,7 @@ class WorkflowTests(unittest.TestCase):
                     if name in ('literature/synthesize', 'literature/revise'): return draft()
                     raise AssertionError(name)
                 with patch.object(repository, 'project_evidence', return_value=[paper]), patch('src.tools.search.retrieve', return_value={'results': [paper]}), patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke', wraps=w.registry.invoke) as invoke:
-                    if corrected: w.run(TASK, history=[])
-                    else:
-                        with self.assertRaisesRegex(ValueError, '候选'): w.run(TASK, history=[])
+                    w.run(TASK, history=[])
                 self.assertEqual(len(attempts), 2)
                 self.assertEqual(attempts[1]['validation_feedback']['code'], 'invalid_candidate_ids')
                 records = [c.kwargs for c in self.record_failure.call_args_list if c.kwargs['kind'] == 'semantic_candidates']

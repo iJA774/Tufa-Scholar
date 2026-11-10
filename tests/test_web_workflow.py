@@ -195,9 +195,12 @@ class WebWorkflowTests(unittest.TestCase):
     def test_paper_role_cannot_read_web_page(self):
         def model(name, payload, schema):
             if name == 'runtime/route': return w.Route(action='paper_research', task='topic', directions=['topic'])
-            return w.Specialist(action='read_web_page', candidate_ids=['C1'], plan=['read'])
+            if name == 'literature/research': return w.Specialist(action='read_web_page', candidate_ids=['C1'], plan=['read'])
+            if name == 'literature/review': return w.Review(sufficient=False, summary='不足')
+            raise AssertionError(name)
         with patch.object(w, 'record_failure', return_value='test'), patch.object(w, 'structured', side_effect=model), patch.object(w.registry, 'invoke') as invoke:
-            with self.assertRaises(ValueError): w.run({**TASK, 'source': 'local'}, history=[])
+            content, _ = w.run({**TASK, 'source': 'local'}, history=[])
+            self.assertIn('阶段', content)
         invoke.assert_not_called()
 
     def test_auto_web_empty_then_failure_and_total_failure_can_switch_to_paper(self):
@@ -410,8 +413,8 @@ class WebWorkflowTests(unittest.TestCase):
 
     def test_web_direct_is_rejected_before_tool_call(self):
         with patch.object(w, 'record_failure', return_value='diag-test'), patch.object(w, 'structured', return_value=w.Route(action='direct', answer='answer')), patch.object(w.registry, 'invoke') as invoke:
-            with self.assertRaises(ValueError):
-                w.run(TASK, history=[])
+            content, _ = w.run(TASK, history=[])
+            self.assertIn('阶段', content)
         invoke.assert_not_called()
 
 
