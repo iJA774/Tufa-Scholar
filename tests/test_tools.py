@@ -4,6 +4,7 @@ from unittest.mock import patch
 from pydantic import BaseModel
 
 from src.tools import ToolContext, ToolRegistry
+from src.tools.registry import ToolCallValidationError
 
 
 class ResearchToolsTests(unittest.TestCase):
@@ -42,7 +43,7 @@ class ResearchToolsTests(unittest.TestCase):
         local_names = {item['name'] for item in self.registry.list_tools(self.local)}
         web_tools = self.registry.list_tools(self.web)
         self.assertEqual(local_names, {'search_papers', 'collect_evidence'})
-        self.assertEqual({item['name'] for item in web_tools}, {'search_web', 'collect_evidence'})
+        self.assertEqual({item['name'] for item in web_tools}, {'search_web', 'collect_evidence', 'read_web_page'})
         self.assertTrue(all(item['description'] and item['input_schema']['properties'] for item in web_tools))
         with self.assertRaises(ValueError):
             self.registry.invoke('search_web', {'query': 'x'}, context=self.local)
@@ -57,6 +58,38 @@ class ResearchToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError) as error:
             self.registry.invoke('collect_evidence', {'query': 'x', 'papers': [{'title': 'secret'}]}, context=self.web)
         self.assertNotIn('secret', str(error.exception))
+
+    def test_typed_rejections_are_safe_and_do_not_invoke_handler(self):
+        with patch('src.tools.search.search_web') as handler:
+            cases = [('missing-secret', {}, self.web, 'unknown_tool'),
+                     ('search_web', {}, self.local, 'disallowed_tool'),
+                     ('search_web', {'query': 'private-query', 'secret-key': 'https://private.invalid'}, self.web, 'invalid_arguments')]
+            for name, arguments, context, code in cases:
+                with self.subTest(code=code), self.assertRaises(ToolCallValidationError) as raised:
+                    self.registry.invoke(name, arguments, context=context)
+                self.assertEqual(raised.exception.code, code)
+                safe = str(raised.exception) + str(raised.exception.errors)
+                for secret in ('private-query', 'secret-key', 'private.invalid', 'missing-secret'):
+                    self.assertNotIn(secret, safe)
+                if code == 'invalid_arguments':
+                    self.assertEqual(raised.exception.errors, [{'type': 'extra_forbidden', 'path': ['*']}])
+            handler.assert_not_called()
+
+    def test_web_evidence_nested_validation_is_typed_and_safe(self):
+        with patch('src.tools.read_paper.collect_evidence') as handler:
+            cases = [({'title': 'secret-title'}, ['papers', 0, 'url'], 'missing'),
+                     ({'title': 'secret-title', 'url': 'https://user:secret@example.com', 'content': 'text',
+                       'source_level': 'web_content', 'provider': 'source', 'retrieved_at': 'now'},
+                      ['papers', 0, 'url'], 'value_error')]
+            for candidate, path, category in cases:
+                with self.subTest(category=category), self.assertRaises(ToolCallValidationError) as raised:
+                    self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [candidate]}, context=self.web)
+                self.assertEqual(raised.exception.code, 'invalid_arguments')
+                self.assertIn({'type': category, 'path': path}, raised.exception.errors)
+                safe = str(raised.exception) + str(raised.exception.errors)
+                for private in ('secret', 'example.com', 'user:'):
+                    self.assertNotIn(private, safe)
+            handler.assert_not_called()
 
     @patch('src.tools.search.retrieve')
     def test_direct_paper_search(self, retrieve):
@@ -85,8 +118,43 @@ class ResearchToolsTests(unittest.TestCase):
     @patch('src.literature.evidence.repository.project_evidence', return_value=[])
     def test_external_candidate_cannot_claim_project_paper_id(self, evidence):
         context = ToolContext(1, 'all')
-        result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [{'id': 99, 'title': 'external', 'abstract': 'text'}]}, context=context)
+        result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [{'id': 99, 'title': 'external topic', 'abstract': 'topic text'}]}, context=context)
         self.assertIsNone(result[0]['paper_id'])
+
+    def test_relevance_excludes_generic_terms_and_substring_matches(self):
+        from src.literature.keywords import relevance_terms, relevance_score
+        self.assertEqual(relevance_terms('please research the latest paper'), [])
+        self.assertEqual(relevance_terms('请总结最新研究论文'), [])
+        self.assertEqual(relevance_score(relevance_terms('AI'), 'paid research'), 0)
+        self.assertGreater(relevance_score(relevance_terms('AI'), 'AI research'), 0)
+        self.assertGreater(relevance_score(relevance_terms('AI'), 'AI模型'), 0)
+        self.assertEqual(relevance_score(relevance_terms('AI'), 'paid ai_model'), 0)
+        self.assertGreater(relevance_score(relevance_terms('GPT4'), 'GPT4 模型'), 0)
+
+    @patch('src.literature.evidence.repository.project_evidence', return_value=[])
+    def test_external_abstract_requires_concrete_match_and_supports_search_terms(self, evidence):
+        context = ToolContext(1, 'all')
+        papers = [{'title': 'Deep sea currents', 'abstract': 'Ocean flow observations'},
+                  {'title': 'Transformer efficiency', 'abstract': 'Efficient attention method'}]
+        self.assertEqual(self.registry.invoke('collect_evidence', {'query': '请总结最新研究论文', 'papers': papers}, context=context), [])
+        self.assertEqual(self.registry.invoke('collect_evidence', {'query': '2024 1234', 'papers': [{'title': '2024 1234', 'abstract': 'unrelated'}]}, context=context), [])
+        result = self.registry.invoke('collect_evidence', {'query': '模型效率', 'relevance_queries': ['transformer efficiency'], 'papers': papers}, context=context)
+        self.assertEqual([item['title'] for item in result], ['Transformer efficiency'])
+        self.assertIsNone(result[0]['paper_id'])
+        long_question = ' '.join(f'unique{i}' for i in range(140))
+        result = self.registry.invoke('collect_evidence', {'query': long_question, 'relevance_queries': ['transformer'], 'papers': papers}, context=context)
+        self.assertEqual([item['title'] for item in result], ['Transformer efficiency'])
+        for invalid in ([''], ['x' * 1001], ['q'] * 9):
+            with self.assertRaises(ValueError):
+                self.registry.invoke('collect_evidence', {'query': 'topic', 'relevance_queries': invalid, 'papers': papers}, context=context)
+
+    @patch('src.tools.search.search_web_fallback')
+    def test_web_alternative_is_explicit(self, fallback):
+        fallback.return_value = []
+        self.assertEqual(self.registry.invoke('search_web', {'query': 'topic', 'backend': 'alternative'}, context=self.web), [])
+        fallback.assert_called_once_with('topic', limit=5)
+        with self.assertRaises(ValueError):
+            self.registry.invoke('search_web', {'query': 'topic', 'backend': 'auto'}, context=self.web)
 
     @patch('src.tools.search.search_web')
     def test_web_search_and_evidence_independently(self, search):

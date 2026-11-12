@@ -11,6 +11,27 @@ from src.persistence import repository
 from src.tools import ToolContext, ToolRegistry
 from src.persistence.storage import initialize_storage
 from src.infrastructure.logging_setup import configure_logging, safe_stack
+from src.infrastructure.diagnostics import diagnostic_scope
+
+
+def _local_papers(project_id, source, paper_ids):
+    papers = repository.list_papers(project_id)
+    if source == 'collection':
+        wanted = set(paper_ids or [])
+        by_id = {paper['id']: paper for paper in papers if paper['id'] in wanted}
+        papers = [by_id[paper_id] for paper_id in paper_ids or [] if paper_id in by_id]
+    else:
+        papers = papers[-40:]
+    filenames = []
+    for paper in papers:
+        versions = paper.get('versions') or []
+        if versions:
+            filename = versions[-1].get('filename')
+            if filename:
+                filenames.append(filename)
+    return list(dict.fromkeys(filenames))
+
+
 def run_once():
     task = repository.claim_task()
     if task is None:
@@ -24,11 +45,14 @@ def run_once():
             research = {key: task.get(key) for key in (
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'
             )}
+            research['local_papers'] = _local_papers(task['project_id'], task['source'], task.get('paper_ids') or [])
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
-            content, evidence = run(
-                research, history=history,
-                on_stage=lambda stage: repository.update_stage(task['id'], stage),
-            )
+            with diagnostic_scope(run_id=task['id'], project_id=task['project_id']):
+                content, evidence = run(
+                    research, history=history,
+                    on_stage=lambda stage: repository.update_stage(task['id'], stage),
+                    on_subtask=lambda note: repository.record_subtask(task['id'], note),
+                )
             repository.finish_chat_task(task['id'], content, evidence)
         else:
             result = ToolRegistry().invoke('search_papers', {'query': task['query']}, context=ToolContext(task['project_id'], task['source']))

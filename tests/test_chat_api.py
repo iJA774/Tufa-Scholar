@@ -38,11 +38,24 @@ class ChatApiTests(unittest.TestCase):
     def test_retry_preserves_one_user_message(self):
         c=self.client; p=c.post('/projects',json={'name':'retry'}).json()['id']
         run=c.post(f'/projects/{p}/questions',json={'question':'问题'}).json()
+        self.assertEqual(repo.get_task(run['run_id'])['source'], 'auto')
         repo.claim_task(); repo.fail_task(run['run_id'],'failure')
         retry=c.post(f"/runs/{run['run_id']}/retry").json()
+        self.assertEqual(retry['source'], 'auto')
         self.assertEqual(retry['kind'],'chat'); self.assertEqual(repo.claim_task()['id'],retry['id'])
         repo.finish_chat_task(retry['id'],'回答',[])
         self.assertEqual([m['role'] for m in c.get(f"/conversations/{run['conversation_id']}/messages").json()],['user','assistant'])
+
+    def test_auto_does_not_relax_collection_or_search_scope(self):
+        c = self.client
+        project = c.post('/projects', json={'name': 'scope'}).json()['id']
+        collection = c.post(f'/projects/{project}/collections', json={'name': 'selected'}).json()['id']
+        self.assertEqual(c.post(f'/projects/{project}/questions', json={'question': 'q', 'source': 'collection'}).status_code, 422)
+        self.assertEqual(c.post(f'/projects/{project}/questions', json={'question': 'q', 'collection_id': collection}).status_code, 422)
+        self.assertEqual(c.get(f'/projects/{project}/paper-search', params={'q': 'topic', 'source': 'auto'}).status_code, 422)
+        selected = c.post(f'/projects/{project}/questions', json={'question': 'q', 'source': 'collection', 'collection_id': collection})
+        self.assertEqual(selected.status_code, 201)
+        self.assertEqual(repo.get_task(selected.json()['run_id'])['source'], 'collection')
 
     def test_retry_keeps_original_history_boundary(self):
         c = self.client

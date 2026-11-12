@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 import os
 import tempfile
 import unittest
@@ -6,15 +7,32 @@ from pathlib import Path
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from apps.api.main import app
-from src.infrastructure.logging_setup import configure_logging
+from src.infrastructure.logging_setup import clear_application_logs, configure_logging
 from src.persistence.storage import initialize_storage
 from apps.worker.__main__ import run_once
+
+
+def _log_after_clear(data_dir, ready, proceed):
+    os.environ['TUFA_DATA_DIR'] = data_dir
+    configure_logging('worker', max_bytes=100, backup_count=2)
+    logging.getLogger('tufa.worker').info('worker before clear')
+    ready.set()
+    if not proceed.wait(10):
+        raise RuntimeError('test coordination timed out')
+    for index in range(10):
+        logging.getLogger('tufa.worker').info('worker after clear event=%d with safe rotation data', index)
+    from src.infrastructure.logging_setup import close_logging
+    close_logging()
 
 
 class LoggingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.env = patch.dict(os.environ, {'TUFA_DATA_DIR':self.tmp.name,'OPENAI_API_KEY':'env-secret-abc'}, clear=True)
+        isolated_env = {'TUFA_DATA_DIR':self.tmp.name, 'OPENAI_API_KEY':'env-secret-abc'}
+        for name in ('SystemRoot', 'WINDIR', 'PATH', 'TEMP', 'TMP'):
+            if name in os.environ:
+                isolated_env[name] = os.environ[name]
+        self.env = patch.dict(os.environ, isolated_env, clear=True)
         self.env.start(); initialize_storage()
     def tearDown(self):
         for name in ('src.integrations','src.literature.retrieval'):
@@ -62,5 +80,66 @@ class LoggingTests(unittest.TestCase):
         configure_logging('worker',max_bytes=100,backup_count=2)
         for _ in range(20): logging.getLogger('tufa.worker').info('event safe data for rotation')
         self.assertTrue((Path(self.tmp.name)/'logs/worker.log.1').exists())
+
+    def test_clear_logs_api_contract_scope_and_idempotency(self):
+        logs = Path(self.tmp.name) / 'logs'
+        logs.mkdir()
+        for name in ('api.log', 'api.log.1', 'api.log.12', 'worker.log', 'worker.log.2'):
+            (logs / name).write_text('old log data', encoding='utf-8')
+        for name in ('other.log', 'api.log.old', '.tufa-logs.lock'):
+            (logs / name).write_text('keep', encoding='utf-8')
+        diagnostics = logs / 'diagnostics'
+        diagnostics.mkdir()
+        (diagnostics / 'private.json').write_text('keep diagnostics', encoding='utf-8')
+        database = Path(self.tmp.name) / 'research.db'
+        database_before = database.read_bytes()
+
+        with TestClient(app) as client:
+            response = client.delete('/settings/logs?path=outside')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {'cleared_files': 5})
+            self.assertEqual(client.delete('/settings/logs').json(), {'cleared_files': 0})
+
+        self.assertFalse(any((logs / name).exists() for name in ('api.log', 'api.log.1', 'api.log.12', 'worker.log', 'worker.log.2')))
+        self.assertEqual((logs / 'other.log').read_text(encoding='utf-8'), 'keep')
+        self.assertEqual((logs / 'api.log.old').read_text(encoding='utf-8'), 'keep')
+        self.assertEqual((diagnostics / 'private.json').read_text(encoding='utf-8'), 'keep diagnostics')
+        self.assertEqual(database.read_bytes(), database_before)
+
+    def test_clear_missing_logs_is_idempotent(self):
+        self.assertFalse((Path(self.tmp.name) / 'logs').exists())
+        self.assertEqual(clear_application_logs(), 0)
+        self.assertFalse((Path(self.tmp.name) / 'logs').exists())
+
+    def test_clear_failure_returns_safe_response(self):
+        with TestClient(app) as client, patch('apps.api.main.clear_application_logs', side_effect=OSError('E:\\private\\secret.log')):
+            response = client.delete('/settings/logs')
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {'detail': '无法清除本地日志'})
+        self.assertNotIn('secret.log', response.text)
+
+    def test_active_writer_can_write_after_cross_process_clear(self):
+        context = multiprocessing.get_context('spawn')
+        ready, proceed = context.Event(), context.Event()
+        configure_logging('api')
+        logging.getLogger('tufa.api').info('api before clear')
+        process = context.Process(target=_log_after_clear, args=(self.tmp.name, ready, proceed))
+        process.start()
+        try:
+            self.assertTrue(ready.wait(15), 'worker did not start logging')
+            removed = clear_application_logs()
+            self.assertEqual(removed, 2)
+            self.assertFalse((Path(self.tmp.name) / 'logs' / 'api.log').exists())
+        finally:
+            proceed.set()
+            process.join(15)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        self.assertEqual(process.exitcode, 0)
+        worker_log = (Path(self.tmp.name) / 'logs' / 'worker.log').read_text(encoding='utf-8')
+        rotated_log = (Path(self.tmp.name) / 'logs' / 'worker.log.1').read_text(encoding='utf-8')
+        self.assertIn('worker after clear', worker_log + rotated_log)
+        self.assertNotIn('worker before clear', worker_log)
 
 if __name__=='__main__': unittest.main()

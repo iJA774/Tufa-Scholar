@@ -1,5 +1,7 @@
 """Direct, bounded adapters for the configured web search provider."""
 from datetime import datetime, timezone
+import logging
+import time
 from html import unescape
 import re
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -7,10 +9,14 @@ from xml.etree import ElementTree
 
 import httpx
 from ddgs import DDGS
-from ddgs.exceptions import DDGSException
+from ddgs.engines import ENGINES
+from ddgs.engines.duckduckgo import Duckduckgo
+from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
 from src.infrastructure.settings import web_search_config
 
+logger = logging.getLogger(__name__)
+_ENGINES = frozenset({'duckduckgo', 'tavily', 'infoquest', 'brave_search', 'serper', 'arxiv', 'searx', 'wikipedia'})
 _TIMEOUT = 20
 _MAX_CONTENT = 4000
 _HEADERS = {"Accept": "application/json", "User-Agent": "Tufa-Scholar/0.1"}
@@ -66,7 +72,7 @@ def _normalise(items, provider, limit, level="web_snippet"):
         if not isinstance(item, dict):
             raise ValueError("invalid response")
         url = _url(item.get("url") or item.get("href") or item.get("link"))
-        title = _text(item.get("title"))
+        title = _text(item.get("title")) or (urlsplit(url).hostname if url else "")
         if not url or not title or url in seen:
             continue
         seen.add(url)
@@ -118,37 +124,71 @@ def _arxiv(response):
     return items
 
 
+class WebSearchError(RuntimeError):
+    """A safe provider failure with machine-readable details."""
+
+    def __init__(self, message: str, category: str, status: int | None = None):
+        super().__init__(message)
+        self.category = category
+        self.status = status
+
+
+def _status_category(status):
+    return "rate_limit" if status == 429 else "auth" if status in (401, 403) else "http_status"
+
+
 class _ConfigError(Exception):
     pass
 
 
+class _DuckduckgoStatus(Exception):
+    def __init__(self, category, status):
+        self.category = category
+        self.status = status
+
+
+class _Duckduckgo(Duckduckgo):
+    def request(self, *args, **kwargs):
+        response = self.http_client.request(*args, **kwargs)
+        status = response.status_code
+        if status != 200:
+            raise _DuckduckgoStatus('challenge' if status == 202 else _status_category(status), status)
+        body = response.text
+        if 'anomaly-modal' in body.lower():
+            raise _DuckduckgoStatus('challenge', status)
+        return body
+
+
 def search_web(query: str, limit: int = 5) -> list[dict]:
     """Search one configured provider; failures never expose upstream bodies or credentials."""
+    started = time.monotonic()
+    def failure(engine, category, status=None):
+        logger.warning('web_search engine=%s outcome=failed category=%s elapsed_ms=%d status=%s', engine, category, int((time.monotonic() - started) * 1000), status if status is not None else '-')
+
     if not isinstance(query, str) or not query.strip():
+        failure('unknown', 'invalid_input')
         raise ValueError("搜索内容不能为空")
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        failure('unknown', 'invalid_input')
         raise ValueError("搜索数量必须是正整数")
     limit = min(limit, 20)
     try:
         config = web_search_config()
     except Exception:
-        raise RuntimeError("网络搜索配置无效") from None
+        failure('unknown', 'configuration')
+        raise WebSearchError("网络搜索配置无效", "configuration") from None
     engine = config.get("engine") or "duckduckgo"
     key = config.get("api_key") or ""
-    if engine not in {"duckduckgo", "tavily", "infoquest", "brave_search", "serper", "arxiv", "searx", "wikipedia"}:
-        raise RuntimeError("不支持的网络搜索服务")
+    if not isinstance(engine, str) or engine not in _ENGINES:
+        failure('unknown', 'configuration')
+        raise WebSearchError("不支持的网络搜索服务", "configuration")
     if engine in {"tavily", "infoquest", "brave_search", "serper"} and not key:
-        raise RuntimeError("网络搜索服务缺少 API 密钥")
+        failure(engine, 'missing_key')
+        raise WebSearchError("网络搜索服务缺少 API 密钥", "missing_key")
     try:
         if engine == "duckduckgo":
-            try:
-                items = DDGS(timeout=_TIMEOUT).text(query, max_results=limit, backend="duckduckgo")
-            except DDGSException as exc:
-                # ddgs emits this sentinel only when no backend exception was reported.
-                if exc.args == ("No results found.",):
-                    items = []
-                else:
-                    raise
+            found = _Duckduckgo(timeout=_TIMEOUT).search(query) or []
+            items = [{'title': item.title, 'href': item.href, 'body': item.body} for item in found]
         elif engine == "tavily":
             data = _request("POST", "https://api.tavily.com/search", headers={"Authorization": f"Bearer {key}"},
                             json={"query": query, "max_results": limit, "include_raw_content": True}).json()
@@ -195,8 +235,80 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
                     if not isinstance(page, dict):
                         raise ValueError("invalid response")
                     item["extract"] = page.get("extract")
-        return _normalise(items, engine, limit, "abstract" if engine == "arxiv" else "web_snippet")
+        results = _normalise(items, engine, limit, "abstract" if engine == "arxiv" else "web_snippet")
+        logger.info('web_search engine=%s outcome=%s result_count=%d elapsed_ms=%d', engine, 'success' if results else 'empty', len(results), int((time.monotonic() - started) * 1000))
+        return results
     except _ConfigError as exc:
-        raise RuntimeError(str(exc)) from None
-    except Exception:
-        raise RuntimeError("网络搜索失败；请检查服务配置、网络或稍后重试") from None
+        failure(engine, 'configuration')
+        raise WebSearchError(str(exc), 'configuration') from None
+    except Exception as exc:
+        status = None
+        if isinstance(exc, _DuckduckgoStatus):
+            category, status = exc.category, exc.status
+        elif isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            category = _status_category(status)
+        elif isinstance(exc, RatelimitException):
+            category = 'rate_limit'
+        else:
+            # Inspect typed causes only, never upstream error text.
+            cause = exc
+            seen = set()
+            chain = []
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                chain.append(cause)
+                cause = cause.__cause__
+            if any(isinstance(e, (httpx.TimeoutException, TimeoutException, TimeoutError)) for e in chain):
+                category = 'timeout'
+            elif any(isinstance(e, (httpx.RequestError)) for e in chain):
+                category = 'network'
+            elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError, ElementTree.ParseError)):
+                category = 'invalid_response'
+            else:
+                category = 'provider_error'
+        failure(engine, category, status)
+        raise WebSearchError("网络搜索失败；请检查服务配置、网络或稍后重试", category, status) from None
+
+
+def search_web_fallback(query: str, limit: int = 5) -> list[dict]:
+    """Explicit credential-free alternative; never includes the primary DDG backend."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("搜索内容不能为空")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("搜索数量必须是正整数")
+    started = time.monotonic()
+    # DDGS logs raw upstream exceptions at INFO, which can contain query/URL.
+    ddgs_logger = logging.getLogger('ddgs.ddgs')
+    class _SuppressDetails(logging.Filter):
+        def filter(self, record):
+            return False
+    suppress = _SuppressDetails()
+    ddgs_logger.addFilter(suppress)
+    try:
+        try:
+            backends = ('bing', 'yahoo')
+            if not all(name in ENGINES['text'] for name in backends):
+                raise RuntimeError('alternative backends unavailable')
+            items = DDGS(timeout=_TIMEOUT).text(query, max_results=min(limit, 20), backend=','.join(backends))
+        except DDGSException as exc:
+            if type(exc) is DDGSException and str(exc) == 'No results found.':
+                items = []
+            else:
+                raise
+        results = _normalise(items, 'ddgs_fallback', min(limit, 20))
+    except Exception as exc:
+        if isinstance(exc, TimeoutException):
+            category = 'timeout'
+        elif isinstance(exc, RatelimitException):
+            category = 'rate_limit'
+        elif isinstance(exc, (ValueError, KeyError, IndexError, TypeError)):
+            category = 'invalid_response'
+        else:
+            category = 'provider_error'
+        logger.warning('web_search engine=ddgs_fallback outcome=failed category=%s elapsed_ms=%d status=-', category, int((time.monotonic() - started) * 1000))
+        raise WebSearchError("网络搜索失败；请检查服务配置、网络或稍后重试", category) from None
+    finally:
+        ddgs_logger.removeFilter(suppress)
+    logger.info('web_search engine=ddgs_fallback outcome=%s result_count=%d elapsed_ms=%d', 'success' if results else 'empty', len(results), int((time.monotonic() - started) * 1000))
+    return results

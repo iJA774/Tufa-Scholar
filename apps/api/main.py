@@ -21,7 +21,7 @@ from src.persistence import repository as repo
 from src.infrastructure import settings
 from src.integrations.model import discover
 from src.persistence.storage import data_directory, initialize_storage
-from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack
+from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack, clear_application_logs
 
 
 @asynccontextmanager
@@ -56,7 +56,9 @@ async def log_request(request: Request, call_next):
             ids[name] = value
         elif isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 18:
             ids[name] = int(value)
-    logging.getLogger('tufa.api').info('request method=%s path=%s ids=%s status=%s elapsed_ms=%.1f', request.method, path, ids, response.status_code, (time.monotonic()-started)*1000)
+    cleared_logs_request = request.method == 'DELETE' and request.url.path == '/settings/logs'
+    if not (cleared_logs_request and response.status_code < 400):
+        logging.getLogger('tufa.api').info('request method=%s path=%s ids=%s status=%s elapsed_ms=%.1f', request.method, path, ids, response.status_code, (time.monotonic()-started)*1000)
     return response
 
 
@@ -125,7 +127,7 @@ class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
-    source: Literal['all', 'local', 'openalex', 'collection', 'web'] = 'local'
+    source: Literal['auto', 'all', 'local', 'openalex', 'collection', 'web'] = 'auto'
     conversation_id: int | None = None
     collection_id: int | None = None
 
@@ -160,6 +162,14 @@ def put_settings(body: SettingsInput):
         return settings.update(body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete('/settings/logs')
+def delete_logs():
+    try:
+        return {'cleared_files': clear_application_logs()}
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(500, '无法清除本地日志') from None
 
 
 @app.post('/settings/models')
@@ -351,7 +361,7 @@ def report_csv(report_id: int):
     if report is None:
         raise HTTPException(404, '报告不存在')
     output = io.StringIO(newline='')
-    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url','provider','retrieved_at','published_at']
+    fields = ['id','paper_id','title','source_level','version_id','page','text','original_url','provider','retrieved_at','published_at','char_start','char_end']
     writer = csv.DictWriter(output, fieldnames=fields, extrasaction='ignore')
     writer.writeheader()
     writer.writerows(report['evidence'])

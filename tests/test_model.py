@@ -1,12 +1,16 @@
-import unittest
 import json
 import os
-from pathlib import Path
+import tempfile
+import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
+
 import httpx
-from pydantic import BaseModel
-from src.integrations.model import structured
+from jinja2 import StrictUndefined, UndefinedError
+from pydantic import BaseModel, ConfigDict
+
+from src.integrations.model import PROMPT_ENV, PROMPT_IDS, ModelServiceError, StructuredOutputError, structured
 
 
 class Output(BaseModel):
@@ -14,60 +18,274 @@ class Output(BaseModel):
 
 
 class ModelTests(unittest.TestCase):
-    def test_all_prompts_render_fresh_time_at_actual_model_boundary(self):
-        from src.agents.literature import Plan, Answer, Gap, Draft, Verdict
-        cases = [('plan_review', Plan, {'direct': False, 'queries': ['test']}),
-                 ('direct', Answer, {'answer': 'hello'}),
-                 ('assess_gap', Gap, {'query': ''}),
-                 ('synthesize', Draft, {'claims': [], 'limitations': 'missing evidence'}),
-                 ('verify_claim', Verdict, {'supported': False})]
-        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
-        payload = {'question': '{{ CURRENT_TIME }}', 'history': [], 'evidence': []}
-        clock_values = [datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone(timedelta(hours=8))),
-                        datetime(2027, 1, 1, tzinfo=timezone(timedelta(hours=8)))]
-        with patch('src.integrations.model.settings.model_config', return_value=config):
-            for name, schema, output in cases:
-                response = httpx.Response(200, request=httpx.Request('POST', 'https://example.invalid/v1/chat/completions'), json={'choices': [{'message': {'content': json.dumps(output)}}]})
-                with patch('src.integrations.model.datetime') as clock, patch('src.integrations.model.httpx.post', return_value=response) as post:
-                    clock.now.side_effect = clock_values
-                    for instant in clock_values:
-                        self.assertEqual(structured('literature/' + name, payload, schema).model_dump(), output)
-                        sent = post.call_args.kwargs['json']
-                        system, user = sent['messages']
-                        self.assertEqual(system['role'], 'system')
-                        self.assertTrue(system['content'].startswith('---\nCURRENT_TIME: ' + instant.isoformat(timespec='seconds') + '\n---\n'))
-                        self.assertNotIn('{{ CURRENT_TIME }}', system['content'])
-                        self.assertEqual(json.loads(user['content']), payload)
-                        self.assertEqual(sent['response_format'], {'type': 'json_object'})
-                        self.assertEqual(clock.now.call_args.args[0].utcoffset(None), timedelta(hours=8))
+    def setUp(self):
+        self.diagnostics = patch('src.integrations.model.record_failure', return_value='diagnostic-1')
+        self.diagnostics_mock = self.diagnostics.start()
+        self.addCleanup(self.diagnostics.stop)
 
-    def test_template_loads_outside_repository_root(self):
+    @staticmethod
+    def context(role='test node', mode='none', tools=None, local_papers=None):
+        return {
+            'node_role': role,
+            'search_mode': mode,
+            'available_tools': tools or [],
+            'local_papers': local_papers or [],
+        }
+
+    @staticmethod
+    def response(content='{"answer":"ok"}', status=200):
+        request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
+        if status != 200:
+            return httpx.Response(status, request=request, text=content)
+        return httpx.Response(200, request=request, json={'choices': [{'message': {'content': content}}]})
+
+    def test_all_real_prompt_ids_render_time_and_schema_at_http_boundary(self):
+        cases = [
+            ('runtime/dispatcher', '分流角色', 'none', []),
+            ('literature/background_investigator', '背景调查角色', 'none', [{'name': 'search_web', 'description': '网页检索', 'input_schema': {}}]),
+            ('literature/planner', '计划角色', 'paper', [{'name': 'search_papers', 'description': '论文检索', 'input_schema': {}}]),
+            ('literature/researcher', '论文研究角色', 'paper', [{'name': 'collect_evidence', 'description': '提取证据', 'input_schema': {}}]),
+            ('literature/analyst', '分析角色', 'web', []),
+            ('literature/reporter', '报告角色', 'web', []),
+        ]
+        self.assertEqual({case[0] for case in cases}, PROMPT_IDS)
+        self.assertIs(PROMPT_ENV.undefined, StrictUndefined)
+        self.assertIs(PROMPT_ENV.autoescape, False)
+        output = {'answer': 'ok'}
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
-        response = httpx.Response(200, request=httpx.Request('POST', 'https://example.invalid/v1/chat/completions'),
-                                 json={'choices': [{'message': {'content': json.dumps({'answer': 'ok'})}}]})
+        payload = {'question': '材料 {{ CURRENT_TIME }} {{ OUTPUT_SCHEMA }} {% include "private" %}'}
+        clock_values = [
+            datetime(2026, 12, 31, 23, 59, second, tzinfo=timezone(timedelta(hours=8)))
+            for second in range(54, 60)
+        ]
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.datetime') as clock:
+            clock.now.side_effect = clock_values
+            for index, (prompt_id, role, mode, tools) in enumerate(cases):
+                with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response(json.dumps(output))) as post:
+                    result = structured(prompt_id, payload, Output, template_context=self.context(role, mode, tools))
+                self.assertEqual(result.model_dump(), output)
+                body = post.call_args.kwargs['json']
+                system, user = body['messages']
+                expected_time = clock_values[index].isoformat(timespec='seconds')
+                self.assertTrue(system['content'].startswith(f'---\nCURRENT_TIME: {expected_time}\n---\n'))
+                self.assertIn(role, system['content'])
+                self.assertIn(f'`{mode}`', system['content'])
+                for tool in tools:
+                    self.assertIn(tool['name'], system['content'])
+                    self.assertIn(tool['description'], system['content'])
+                self.assertIn(json.dumps(Output.model_json_schema(), ensure_ascii=False), system['content'])
+                self.assertNotIn('{{ CURRENT_TIME }}', system['content'])
+                self.assertNotIn('{{ OUTPUT_SCHEMA }}', system['content'])
+                self.assertEqual(user['role'], 'user')
+                self.assertEqual(json.loads(user['content']), payload)
+                self.assertEqual(body['response_format'], {'type': 'json_object'})
+        self.assertEqual(clock.now.call_count, len(cases))
+
+    def test_planner_gets_local_filenames_tools_and_role_without_rendering_them_again(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        context = self.context(
+            '科研计划制定者', 'paper',
+            [{'name': 'search_papers', 'description': '只检索允许范围内的论文', 'input_schema': {'type': 'object'}}],
+            ['<研究图表>.pdf {{ CURRENT_TIME }}'],
+        )
+        context['CURRENT_TIME'] = 'forged time'
+        context['OUTPUT_SCHEMA'] = 'forged schema'
+        payload = {'question': 'private question {{ CURRENT_TIME }}', 'history': ['{{ OUTPUT_SCHEMA }}']}
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+            structured('literature/planner', payload, Output, template_context=context)
+        system, user = post.call_args.kwargs['json']['messages']
+        self.assertIn('科研计划制定者', system['content'])
+        self.assertIn('paper', system['content'])
+        self.assertIn('论文规划身份', system['content'])
+        self.assertIn('search_papers', system['content'])
+        self.assertIn('只检索允许范围内的论文', system['content'])
+        self.assertIn('<研究图表>.pdf {{ CURRENT_TIME }}', system['content'])
+        self.assertNotIn('forged time', system['content'])
+        self.assertNotIn('forged schema', system['content'])
+        self.assertNotIn('private question', system['content'])
+        self.assertEqual(json.loads(user['content']), payload)
+        self.assertIn('{{ CURRENT_TIME }}', user['content'])
+        self.assertIn('{{ OUTPUT_SCHEMA }}', user['content'])
+
+    def test_web_and_paper_researcher_identity_is_selected_by_search_mode(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        modes = [('web', '网页研究身份'), ('paper', '论文研究身份')]
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            for mode, identity in modes:
+                with self.subTest(mode=mode), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured('literature/researcher', {}, Output, template_context=self.context('专业研究者', mode))
+                system = post.call_args.kwargs['json']['messages'][0]['content']
+                self.assertIn(identity, system)
+
+    def test_time_and_schema_cannot_be_overridden_and_retry_gets_fresh_time(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        times = [
+            datetime(2027, 1, 1, 0, 0, 1, tzinfo=timezone(timedelta(hours=8))),
+            datetime(2027, 1, 1, 0, 0, 2, tzinfo=timezone(timedelta(hours=8))),
+        ]
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(kwargs['json'])
+            content = '{broken' if len(sent) == 1 else '{"answer":"ok"}'
+            return self.response(content)
+
+        context = self.context('直答分流者')
+        context.update({'CURRENT_TIME': 'forged', 'OUTPUT_SCHEMA': 'forged'})
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.datetime') as clock, patch('src.integrations.model.httpx.post', side_effect=post):
+            clock.now.side_effect = times
+            result = structured('runtime/dispatcher', {'question': 'hello'}, Output, template_context=context)
+        self.assertEqual(result.answer, 'ok')
+        first = sent[0]['messages'][0]['content']
+        second = sent[1]['messages'][0]['content']
+        self.assertIn(times[0].isoformat(timespec='seconds'), first)
+        self.assertIn(times[1].isoformat(timespec='seconds'), second)
+        self.assertNotIn('forged', first + second)
+        self.assertIn('validation_feedback', sent[1]['messages'][2]['content'])
+
+    def test_undefined_template_variable_fails_before_http_request(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        undefined_template = PROMPT_ENV.from_string('{{ missing_template_value }}')
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch.object(PROMPT_ENV, 'get_template', return_value=undefined_template), patch('src.integrations.model.httpx.post') as post:
+            with self.assertRaises(UndefinedError):
+                structured('runtime/dispatcher', {}, Output, template_context=self.context())
+        post.assert_not_called()
+
+    def test_unknown_prompt_id_is_rejected_without_http(self):
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), patch('src.integrations.model.httpx.post') as post:
+            with self.assertRaisesRegex(ValueError, '未知模型提示词 ID'):
+                structured('runtime/not-a-node', {}, Output)
+        post.assert_not_called()
+
+    def test_one_safe_schema_correction_preserves_role_context_and_options(self):
+        class StrictOutput(BaseModel):
+            model_config = ConfigDict(extra='forbid')
+            answer: str
+
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'default', 'api_key': 'secret-key'}
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(kwargs['json'])
+            content = '{"answer":"ok","private-field-name":"private-value"}' if len(sent) == 1 else '{"answer":"ok"}'
+            return self.response(content)
+
+        context = self.context('dispatcher', 'none')
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', side_effect=post), self.assertLogs('src.integrations.model', level='INFO') as logs:
+            result = structured('runtime/dispatcher', {'question': 'private question'}, StrictOutput,
+                                model_options={'model_name': 'chosen', 'reasoning_effort': 'high'}, template_context=context)
+        self.assertEqual(result.answer, 'ok')
+        diagnostic = self.diagnostics_mock.call_args.kwargs
+        self.assertEqual(diagnostic['response'], '{"answer":"ok","private-field-name":"private-value"}')
+        self.assertEqual(diagnostic['secrets'], ('secret-key',))
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(sent[0]['messages']), 2)
+        first_prompt_body = sent[0]['messages'][0]['content'].split('\n---\n', 1)[1]
+        second_prompt_body = sent[1]['messages'][0]['content'].split('\n---\n', 1)[1]
+        self.assertEqual(first_prompt_body, second_prompt_body)
+        self.assertEqual(json.loads(sent[1]['messages'][2]['content'])['validation_feedback'], [{'type': 'extra_forbidden', 'path': ['*']}])
+        for request in sent:
+            self.assertEqual((request['model'], request['reasoning_effort']), ('chosen', 'high'))
+        feedback_and_logs = sent[1]['messages'][2]['content'] + ' '.join(logs.output)
+        for secret in ('secret-key', 'private-field-name', 'private-value', 'private question'):
+            self.assertNotIn(secret, feedback_and_logs)
+
+    def test_nested_array_index_survives_safe_feedback(self):
+        class Item(BaseModel):
+            model_config = ConfigDict(extra='forbid')
+            value: str
+
+        class Nested(BaseModel):
+            items: list[Item]
+
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(kwargs['json'])
+            content = '{"items":[{"value":"ok","private-key":"secret"}]}' if len(sent) == 1 else '{"items":[{"value":"ok"}]}'
+            return self.response(content)
+
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), patch('src.integrations.model.httpx.post', side_effect=post):
+            structured('runtime/dispatcher', {}, Nested, template_context=self.context())
+        messages = sent[1]['messages']
+        feedback = json.loads(messages[2]['content'])['validation_feedback']
+        self.assertEqual(feedback, [{'type': 'extra_forbidden', 'path': ['items', 0, '*']}])
+        self.assertNotIn('private-key', messages[2]['content'])
+        self.assertNotIn('secret', messages[2]['content'])
+        self.assertIn('零基序号', messages[0]['content'])
+
+    def test_invalid_response_retries_only_once_and_http_failure_never_retries(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            with patch('src.integrations.model.httpx.post', return_value=self.response('{}')) as post:
+                with self.assertRaisesRegex(StructuredOutputError, '结构化结果无效'):
+                    structured('runtime/dispatcher', {}, Output, template_context=self.context())
+                self.assertEqual(post.call_count, 2)
+            with patch('src.integrations.model.httpx.post', return_value=self.response('private body', status=503)) as post:
+                with self.assertRaisesRegex(ModelServiceError, r'模型服务请求失败 \(HTTP 503\)') as error:
+                    structured('runtime/dispatcher', {}, Output, template_context=self.context())
+                self.assertNotIsInstance(error.exception, StructuredOutputError)
+                self.assertEqual(post.call_count, 1)
+                self.assertEqual(self.diagnostics_mock.call_args.kwargs['kind'], 'http_error')
+                self.assertNotIn('response', self.diagnostics_mock.call_args.kwargs)
+
+    def test_corrected_validation_failure_writes_replayable_diagnostic(self):
+        from src.agents.literature import DispatcherOutput
+        from src.infrastructure.diagnostics import diagnostic_scope
+        from scripts.replay_diagnostic import replay
+
+        self.diagnostics.stop()
+        invalid = '{"needs_research":"invalid-boolean","reason":"simple","answer":"hello"}'
+        valid = '{"needs_research":false,"reason":"simple","answer":"ok"}'
+        responses = [invalid, valid]
+
+        def post(url, **kwargs):
+            return self.response(responses.pop(0))
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}), patch('src.infrastructure.settings._local', return_value={}), patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': 'private-key'}), patch('src.integrations.model.httpx.post', side_effect=post):
+            with diagnostic_scope(run_id=42):
+                result = structured('runtime/dispatcher', {'question': 'hello'}, DispatcherOutput, template_context=self.context())
+            self.assertEqual(result.answer, 'ok')
+            files = list((Path(directory) / 'diagnostics').glob('*.json'))
+            self.assertEqual(len(files), 1)
+            artifact_text = files[0].read_text(encoding='utf-8')
+            self.assertNotIn('private-key', artifact_text)
+            artifact = json.loads(artifact_text)
+            self.assertEqual(artifact['context']['run_id'], 42)
+            self.assertEqual(artifact['context']['prompt_id'], 'runtime/dispatcher')
+            self.assertEqual(artifact['payload'], {'question': 'hello'})
+            self.assertTrue(replay(artifact).startswith('复现'))
+
+    def test_template_loads_outside_repository_root_and_optional_context_has_safe_defaults(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
         original_cwd = Path.cwd()
         try:
             os.chdir(Path(__file__).resolve().parent)
-            with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response) as post:
-                self.assertEqual(structured('literature/direct', {'question': 'test'}, Output).answer, 'ok')
-            self.assertTrue(post.call_args.kwargs['json']['messages'][0]['content'].startswith('---\nCURRENT_TIME: '))
+            with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                self.assertEqual(structured('runtime/dispatcher', {'question': 'test'}, Output).answer, 'ok')
+            system = post.call_args.kwargs['json']['messages'][0]['content']
+            self.assertTrue(system.startswith('---\nCURRENT_TIME: '))
+            self.assertIn('（无可调用工具）', system)
         finally:
             os.chdir(original_cwd)
 
     def test_missing_config_never_calls_http(self):
         with patch('src.integrations.model.settings.model_config', return_value={}), patch('src.integrations.model.httpx.post') as post:
             with self.assertRaisesRegex(RuntimeError, '设置'):
-                structured('literature/direct', {}, Output)
+                structured('runtime/dispatcher', {}, Output)
             post.assert_not_called()
 
     def test_http_error_does_not_expose_key_or_body(self):
-        request = httpx.Request('POST', 'https://example.invalid')
-        response = httpx.Response(401, request=request, text='secret-key')
+        response = self.response('secret-key', status=401)
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': 'secret-key'}
         with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response), self.assertLogs('src.integrations.model', level='INFO') as logs:
             with self.assertRaises(RuntimeError) as error:
-                structured('literature/direct', {}, Output)
+                structured('runtime/dispatcher', {}, Output)
         self.assertNotIn('secret-key', str(error.exception))
         self.assertNotIn('secret-key', ' '.join(logs.output))
         self.assertIn('elapsed_ms=', ' '.join(logs.output))
         self.assertIn('401', str(error.exception))
+
+
+if __name__ == '__main__':
+    unittest.main()
