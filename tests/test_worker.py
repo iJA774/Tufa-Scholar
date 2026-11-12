@@ -12,6 +12,31 @@ from src.persistence.storage import initialize_storage
 
 
 class WorkerTests(unittest.TestCase):
+    def test_local_paper_context_contains_only_latest_filenames_in_scope(self):
+        from apps.worker.__main__ import _local_papers
+
+        rows = [
+            {'id': 1, 'title': 'private title one', 'versions': [
+                {'filename': 'old.pdf'}, {'filename': 'latest.pdf'},
+            ]},
+            {'id': 2, 'title': 'private title two', 'versions': [
+                {'filename': 'shared.pdf'},
+            ]},
+            {'id': 3, 'title': 'no file', 'versions': []},
+            {'id': 4, 'title': 'outside snapshot', 'versions': [
+                {'filename': 'outside.pdf'},
+            ]},
+        ]
+        with patch.object(repository, 'list_papers', return_value=rows):
+            project_names = _local_papers(7, 'local', [])
+            collection_names = _local_papers(7, 'collection', [2, 1, 4, 3])
+
+        self.assertEqual(project_names, ['latest.pdf', 'shared.pdf', 'outside.pdf'])
+        self.assertEqual(collection_names, ['shared.pdf', 'latest.pdf', 'outside.pdf'])
+        self.assertNotIn('private title one', str(collection_names))
+        self.assertNotIn('old.pdf', str(project_names))
+        self.assertNotIn('no file', str(collection_names))
+
     def test_chat_history_is_loaded_and_stage_callback_persists(self):
         from apps.worker.__main__ import run_once
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
@@ -20,18 +45,18 @@ class WorkerTests(unittest.TestCase):
             first = repository.create_question(project, None, 'first question', 'local')
             observed = []
             def agent(research, *, history, on_stage, on_subtask):
-                on_stage('planning')
-                on_subtask({'index': 1, 'source': 'local', 'task': 'topic', 'status': 'no_evidence', 'findings': [], 'sources': []})
-                on_subtask({'index': 1, 'source': 'local', 'task': 'duplicate', 'status': 'no_evidence', 'findings': [], 'sources': []})
+                on_stage('dispatcher')
+                on_subtask({'index': 1, 'source': 'paper', 'task': 'topic', 'status': 'no_evidence', 'findings': [], 'gap': '缺少材料', 'sources': []})
+                on_subtask({'index': 1, 'source': 'paper', 'task': 'duplicate', 'status': 'no_evidence', 'findings': [], 'gap': '缺少材料', 'sources': []})
                 observed.append((research, history, repository.get_task(current['run_id'])['stage']))
                 return 'answer', []
             current = first
             with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', wraps=repository.task_history) as load:
                 self.assertTrue(run_once())
                 self.assertEqual(load.call_count, 1)
-            self.assertEqual(observed[0][2], 'planning')
+            self.assertEqual(observed[0][2], 'dispatcher')
             self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
-            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'})
+            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'local_papers'})
             self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
             self.assertEqual([n['task'] for n in repository.get_task(first['run_id'])['subtasks']], ['topic'])
             from fastapi.testclient import TestClient
@@ -43,7 +68,7 @@ class WorkerTests(unittest.TestCase):
             with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', side_effect=AssertionError('collection loaded history')) as load:
                 self.assertTrue(run_once())
                 load.assert_not_called()
-            self.assertEqual(observed[1][1:], ([], 'planning'))
+            self.assertEqual(observed[1][1:], ([], 'dispatcher'))
             self.assertEqual(observed[1][0]['paper_ids'], [])
             self.assertEqual(repository.get_task(current['run_id'])['status'], 'succeeded')
 

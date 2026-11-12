@@ -7,7 +7,7 @@ import { useRunPolling } from "../hooks/useRunPolling";
 import { api, json, messageOf } from "./api";
 import type { Collection, Conversation, Message, Paper, Run, Subtask } from "./types";
 const statusText: Record<string, string> = { queued: "等待处理", pending: "等待处理", running: "正在处理", succeeded: "回答完成", success: "回答完成", completed: "回答完成", failed: "任务失败", interrupted: "任务已中断" };
-const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", searching_web: "搜索网页", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "回答完成", done: "回答完成", retrieving: "检索文献", generating: "生成回答", synthesizing: "整理证据", planning: "规划问题", evidence: "提取证据", assessing: "检查证据缺口", verifying: "核验结论", answering: "生成回答" };
+const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", searching_web: "搜索网页", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "回答完成", done: "回答完成", retrieving: "检索文献", generating: "生成回答", synthesizing: "整理证据", planning: "规划问题", evidence: "提取证据", assessing: "检查证据缺口", verifying: "核验结论", answering: "生成回答", dispatcher: "判断是否需要研究", background_investigator: "检索背景资料", planner: "制定研究计划", supervisor: "统筹研究步骤", researcher: "搜索与整理证据", analyst: "分析研究证据", coder: "代码节点", reporter: "整理最终报告" };
 function safeSourceUrl(value?: string | null) {
   try { const url = new URL(value || ""); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined; } catch { return undefined; }
 }

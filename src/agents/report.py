@@ -1,412 +1,136 @@
-"""Bounded, evidence-verified research report graph."""
+"""Deterministic citation and measurement checks used by the reporter node."""
+
 import re
-import logging
 from decimal import Decimal
-from typing import TypedDict, Literal
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from langgraph.graph import StateGraph, START, END
-from src.infrastructure.diagnostics import record_failure
-from src.integrations.model import StructuredOutputError, ModelServiceError
-
-logger = logging.getLogger('tufa.agent')
+from urllib.parse import urlsplit, urlunsplit
 
 
-class Claim(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    text: str = Field(min_length=1, max_length=1500)
-    citations: list[str] = Field(max_length=12)
+_UNSAFE = re.compile(
+    r"```|<[^>]+>|https?://|\[[^\]\n]+\]\s*\([^)]*\)|"
+    r"\[(?:[a-zA-Z]+[\w-]*\d+[\w-]*|\d+)\]",
+    re.I,
+)
+_COST = re.compile(r"成本|费用|cost|expense", re.I)
+_COST_EVIDENCE = re.compile(r"成本|费用|cost|expense|\$|美元", re.I)
+_COST_GAP = re.compile(
+    r"(?:(?:现有材料|本次资料|当前材料|相关研究|证据|资料|数据)?\s*"
+    r"(?:没有|缺少|缺乏|尚无|未(?:能)?(?:提供|发现|找到|报告|测量|披露)|无法评估)\s*"
+    r"(?:关于)?\s*(?:相关)?(?:成本|费用)\s*(?:相关)?"
+    r"(?:证据|数据|信息|记录|报告|指标|比较|评估)"
+    r"|(?:成本|费用)\s*(?:相关)?(?:证据|数据|信息|记录|报告|指标|比较|评估)\s*"
+    r"(?:缺失|缺少|不足|未提供|未报告|未发现)"
+    r"|(?:no|lack(?:s|ing)?|without|unavailable|not\s+(?:reported|provided|measured))\s+"
+    r"(?:any\s+)?(?:cost|expense)\s+(?:data|evidence|information|results|measurements)"
+    r"|(?:cost|expense)\s+(?:data|evidence|information|results|measurements)\s+"
+    r"(?:is|are)?\s*(?:missing|unavailable|not\s+(?:reported|provided|measured)))",
+    re.I,
+)
+_NUM = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_MEASURE = re.compile(
+    r"(?<![A-Za-z0-9_.,])(?:百分之\s*(" + _NUM + r")|(" + _NUM
+    + r")\s*(milliseconds?|seconds?|percent|gib|mib|ms|gb|mb|kg|km|毫秒|秒|%))"
+    r"(?![A-Za-z0-9_])",
+    re.I,
+)
 
 
-class Section(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    heading: str = Field(min_length=1, max_length=150)
-    paragraphs: list[Claim] = Field(min_length=1, max_length=3)
-
-
-class Draft(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    sections: list[Section] = Field(max_length=6)
-    limitations: list[Claim] = Field(default_factory=list, max_length=3)
-
-    @model_validator(mode='before')
-    @classmethod
-    def recover_known_shape(cls, value):
-        if not isinstance(value, dict): return value
-        value = dict(value)
-        value.pop('verification_gaps', None)
-        if 'heading' in value and 'paragraphs' in value and isinstance(value.get('sections'), list):
-            try:
-                candidate = Section.model_validate({'heading': value['heading'], 'paragraphs': value['paragraphs']})
-            except ValidationError:
-                return value
-            sections = list(value['sections'])
-            duplicate = False
-            for item in sections:
-                try:
-                    if Section.model_validate(item) == candidate:
-                        duplicate = True
-                        break
-                except ValidationError:
-                    pass
-            if not duplicate: sections.append(candidate.model_dump())
-            value['sections'] = sections
-            value.pop('heading'); value.pop('paragraphs')
-        return value
-
-    @model_validator(mode='after')
-    def bounded_paragraphs(self):
-        if sum(len(section.paragraphs) for section in self.sections) + len(self.limitations) > 12:
-            raise ValueError('报告段落数量超限')
-        return self
-
-
-class Verdict(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    status: Literal['supported', 'qualified', 'missing_evidence', 'unsupported']
-    reason: str = Field(default='', max_length=1000)
-    suggestion: str = Field(default='', max_length=1000)
-    research_query: str = Field(default='', max_length=1000)
-    research_route: Literal['paper_research', 'web_research'] | None = None
-
-    @model_validator(mode='after')
-    def validate_details(self):
-        if self.status != 'supported' and not self.reason.strip(): raise ValueError('缺少原因')
-        if self.status == 'qualified' and not self.suggestion.strip(): raise ValueError('缺少修订建议')
-        if self.status == 'missing_evidence' and not self.research_query.strip(): raise ValueError('缺少补研查询')
-        return self
-
-
-class Patch(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    section_index: int
-    paragraph_index: int
-    text: str = Field(min_length=1, max_length=1500)
-    citations: list[str] = Field(min_length=1, max_length=12)
-
-
-class PatchSet(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    patches: list[Patch] = Field(max_length=12)
-
-
-class ReportState(TypedDict, total=False):
-    research: dict
-    history: list
-    evidence: list
-    review_result: object
-    forced_reason: str
-    directions: list
-    warnings: list
-    draft: Draft
-    accepted: list
-    rejection_feedback: list
-    revised: bool
-    content: str
-    research_gaps: list
-    subtask_notes: list
-    verification_gaps: list
-    outcomes: list
-    patched_positions: list
-    empty_retried: bool
-    draft_format_failed: bool
-    draft_service_failed: bool
-    verification_failed: bool
-    verifier_service_failed: bool
-    revision_failed: bool
-
-
-_UNSAFE = re.compile(r'```|<[^>]+>|https?://|\[[^\]\n]+\]\s*\([^)]*\)|\[(?:[a-zA-Z]+[\w-]*\d+[\w-]*|\d+)\]', re.I)
-_COST = re.compile(r'成本|费用|cost|expense', re.I)
-_COST_EVIDENCE = re.compile(r'成本|费用|cost|expense|\$|美元', re.I)
-_NUM = r'[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
-_MEASURE = re.compile(r'(?<![A-Za-z0-9_.,])(?:百分之\s*(' + _NUM + r')|(' + _NUM + r')\s*(milliseconds?|seconds?|percent|gib|mib|ms|gb|mb|kg|km|毫秒|秒|%))(?![A-Za-z0-9_])', re.I)
-
-
-def _measurements(text):
+def measurements(text):
+    """Return normalized numeric measurements in a claim or evidence snippet."""
     result = set()
-    for prefix, number, unit in _MEASURE.findall(text):
+    for prefix, number, unit in _MEASURE.findall(text or ""):
         unit = unit.casefold()
-        value = Decimal((prefix or number).replace(',', ''))
-        if prefix or unit in ('%', 'percent'):
-            unit = '%'
-        elif unit in ('milliseconds', 'millisecond', '毫秒', 'ms'):
-            value /= Decimal(1000); unit = 'second'
-        elif unit in ('seconds', 'second', '秒'):
-            unit = 'second'
+        value = Decimal((prefix or number).replace(",", ""))
+        if prefix or unit in ("%", "percent"):
+            unit = "%"
+        elif unit in ("milliseconds", "millisecond", "毫秒", "ms"):
+            value /= Decimal(1000)
+            unit = "second"
+        elif unit in ("seconds", "second", "秒"):
+            unit = "second"
         result.add((value, unit))
     return result
 
 
-def verify(s, model):
-    allowed = set(s['research'].get('paper_ids') or []) if s['research']['source'] == 'collection' else None
-    by_id = {e['id']: e for e in s['evidence'] if allowed is None or e.get('paper_id') in allowed}
-    previous = {(o['section_index'], o['paragraph_index']): o for o in s.get('outcomes', [])}
-    outcomes = []
-    service_failed = s.get('verifier_service_failed', False)
-    verification_failed = s.get('verification_failed', False)
-    units = [(si, pi, section.heading, p) for si, section in enumerate(s['draft'].sections) for pi, p in enumerate(section.paragraphs)]
-    units += [(-1, pi, '局限', p) for pi, p in enumerate(s['draft'].limitations)]
-    for si, pi, heading, paragraph in units:
-        prior = previous.get((si, pi))
-        if s.get('revised') and prior and (prior['status'] != 'qualified' or (si, pi) not in set(map(tuple, s.get('patched_positions', [])))):
-            outcomes.append(prior); continue
-        cited = [by_id[i] for i in paragraph.citations if i in by_id]
-        text = heading + '\n' + paragraph.text
-        measurements = _measurements(text)
-        source_measurements = set().union(*(_measurements(e.get('text', '')) for e in cited)) if cited else set()
-        reason = ''
-        if _UNSAFE.search(text): reason = '格式或引用不安全'
-        elif not paragraph.citations: reason = '段落缺少证据引用'
-        elif len(cited) != len(paragraph.citations) or not measurements.issubset(source_measurements): reason = '引用或测量值依据不匹配'
-        elif si != -1 and _COST.search(text) and not any(_COST_EVIDENCE.search(e.get('text', '')) for e in cited): reason = '缺少成本依据'
-        if reason:
-            verdict = Verdict(status='unsupported', reason=reason)
-        elif service_failed:
-            outcomes.append({'section_index': si, 'paragraph_index': pi, 'status': 'unavailable'})
-            continue
-        else:
-            try:
-                verdict = model(s, 'literature/verify_claim', {'heading': heading, 'claim': paragraph.text, 'evidence': cited}, Verdict)
-            except (StructuredOutputError, ModelServiceError) as exc:
-                verification_failed = True
-                service_failed = isinstance(exc, ModelServiceError)
-                outcomes.append({'section_index': si, 'paragraph_index': pi, 'status': 'unavailable'})
-                continue
-        outcomes.append({'section_index': si, 'paragraph_index': pi, **verdict.model_dump()})
-    accepted = [(o['section_index'], o['paragraph_index']) for o in outcomes if o['status'] == 'supported']
-    feedback = [o for o in outcomes if o['status'] != 'supported']
-    gaps = [{'query': o['research_query'], 'route': o['research_route'], 'reason': o['reason']} for o in outcomes if o['status'] == 'missing_evidence']
-    return {'accepted': accepted, 'rejection_feedback': feedback, 'outcomes': outcomes, 'research_gaps': gaps, 'verification_failed': verification_failed, 'verifier_service_failed': service_failed}
+def unsafe_text(text):
+    """Reject raw links, HTML, code blocks, and embedded citation syntax."""
+    return bool(_UNSAFE.search(text or ""))
 
 
-def _reference(e):
-    level = e.get('source_level', '')
-    if level in ('web_snippet', 'web_content'):
-        label = {'web_snippet': '搜索摘要', 'web_content': '网页文本'}.get(level, level)
-        anchor = f" · Markdown 字符区间 {e['char_start']}–{e['char_end']}（从 0 开始）" if e.get('char_start') is not None and e.get('char_end') is not None else ''
-        return f"[{e['id']}] {e.get('title', '')} · {label} · {e.get('provider', '')} · {e.get('original_url', '')} · 获取于 {e.get('retrieved_at', '')}" + anchor
-    if e.get('version_id'):
-        return f"[{e['id']}] {e.get('title', '')} · 原文版本 {e['version_id']}，第 {e.get('page', '')} 页"
-    return f"[{e['id']}] {e.get('title', '')} · 论文摘要" + (f" · {e['original_url']}" if e.get('original_url') else '')
+def validate_claim(text, citations, evidence_by_id, allowed_paper_ids=None, *, allow_uncited=False, is_limitation=False):
+    """Check citation existence/scope and numeric or cost support for one claim.
+
+    Returns ``(cited_evidence, reason)``. The semantic fit of prose remains the
+    analyst's responsibility; this function enforces objective data boundaries.
+    """
+    if unsafe_text(text):
+        return [], "格式或引用不安全"
+    if len(citations) != len(set(citations)):
+        return [], "引用重复"
+    if not citations:
+        if not allow_uncited:
+            return [], "段落缺少证据引用"
+        if measurements(text):
+            return [], "无引用段落包含数值"
+        if _COST.search(_COST_GAP.sub("", text)):
+            return [], "无引用段落包含成本结论"
+        return [], ""
+    if any(not isinstance(item, str) or item not in evidence_by_id for item in citations):
+        return [], "引用不存在"
+    cited = [evidence_by_id[item] for item in citations]
+    if allowed_paper_ids is not None and any(
+        item.get("paper_id") not in allowed_paper_ids for item in cited
+    ):
+        return [], "引用超出收藏夹快照范围"
+    required = measurements(text)
+    supported = set().union(*(measurements(item.get("text", "")) for item in cited))
+    if not required.issubset(supported):
+        return [], "引用或测量值依据不匹配"
+    cost_is_supported = any(_COST_EVIDENCE.search(item.get("text", "")) for item in cited)
+    remaining_cost_claim = _COST.search(_COST_GAP.sub("", text))
+    cost_is_reported_gap = is_limitation and bool(_COST_GAP.search(text)) and not remaining_cost_claim
+    if remaining_cost_claim and not cost_is_supported and not cost_is_reported_gap:
+        return [], "缺少成本依据"
+    return cited, ""
 
 
-
-def _safe_direction(value):
-    value = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', str(value))
-    value = re.sub(r'https?://\S+|<[^>]*>', '', value)
-    value = re.sub(r'[`*_#\[\]\r\n]+', ' ', value)
-    return ' '.join(value.split())[:150]
-
+def _safe_title(value):
+    title = value if isinstance(value, str) else ""
+    if re.match(r"^(?:[a-z]:[\\/]|[/\\]{2}|/)", title, re.I):
+        return ""
+    return title
 
 
-def _search_block_notice(warnings):
-    reasons = {
-        'challenge': '当前网页搜索服务要求验证，已暂停本次任务的重复搜索。',
-        'rate_limit': '当前网页搜索服务触发限流，已暂停本次任务的重复搜索。',
-        'auth': '当前网页搜索服务认证失败，已暂停本次任务的重复搜索。',
-        'configuration': '当前网页搜索服务配置不可用，已暂停本次任务的重复搜索。',
-        'missing_key': '当前网页搜索服务缺少密钥，已暂停本次任务的重复搜索。',
-        'timeout': '当前网页搜索服务多次超时，已暂停本次任务的重复搜索。',
-        'network': '当前网页搜索服务多次连接失败，已暂停本次任务的重复搜索。',
-        'provider_error': '当前网页搜索服务多次出错，已暂停本次任务的重复搜索。',
-        'http_status': '当前网页搜索服务多次返回错误，已暂停本次任务的重复搜索。',
-        'invalid_response': '当前网页搜索服务多次返回无效响应，已暂停本次任务的重复搜索。',
-    }
-    for warning in reversed(warnings):
-        if warning.startswith('web_search_blocked:'):
-            return reasons.get(warning.partition(':')[2], '当前网页搜索服务暂不可用，已暂停本次任务的重复搜索。')
-    return ''
-
-def render_partial(state, reason):
-    """Render collected sources and coverage without presenting unverified conclusions."""
-    research = state['research']
-    allowed = set(research.get('paper_ids') or []) if research['source'] == 'collection' else None
-    kept = [e for e in state.get('evidence', []) if allowed is None or e.get('paper_id') in allowed]
-    notice = _search_block_notice(state.get('warnings', []))
-    reason = _safe_direction(reason)
-    if notice and reason == '网页搜索服务暂不可用，已暂停重复请求':
-        reason = notice
-    lines = ['# 阶段性研究结果', reason, '审查未完成或证据不足，尚未生成核验结论。']
-    if notice and reason != notice: lines.append(notice)
-    review = state.get('review_result')
-    pending = list(getattr(review, 'gaps', [])) if review else list(state.get('directions', []))
-    pending += [gap.get('query', '') for gap in state.get('research_gaps', []) if gap.get('query')]
-    if review and not getattr(review, 'sufficient', False):
-        pending += [step.direction for step in getattr(review, 'next_steps', [])]
-    for label, values in [('已核查方向', getattr(review, 'coverage', []) if review else []),
-                          ('未覆盖方向', list(dict.fromkeys(pending)))]:
-        for value in values[:5]:
-            clean = _safe_direction(value)
-            if clean: lines.append(label + '：' + clean + '。')
-    for warning, text in [('web_search_failed', '当前网页搜索服务部分或全部请求失败，结果不完整，请稍后重试。'),
-                          ('web_page_read_failed', '网页正文读取部分失败，结果可能不完整。'),
-                          ('paper_search_failed', '论文外部检索部分失败，结果可能不完整。')]:
-        if warning in state.get('warnings', []) and not (warning == 'web_search_failed' and notice): lines.append(text)
-    if research['source'] == 'web' and not kept and not state.get('warnings'):
-        lines.append('本次网页检索未找到可用文本证据。')
-    if kept:
-        lines.append('## 已收集资料\n' + '\n'.join(_reference(e) for e in kept))
-    else:
-        lines.append('本次没有可列出的资料。')
-    return {'content': '\n\n'.join(lines), 'evidence': kept}
-
-def render(s):
-    if s.get('draft_format_failed') or s.get('draft_service_failed'):
-        message = '报告格式校验失败，本次仅提供已收集资料。' if s.get('draft_format_failed') else '报告撰写时模型服务不可用，本次仅提供已收集资料。'
-        result = render_partial(s, message)
-        return {**result, 'research_gaps': []}
-    accepted = set(map(tuple, s.get('accepted', [])))
-    if not accepted:
-        if s.get('verifier_service_failed'):
-            reason = '结论核验时模型服务不可用，本次仅提供已收集资料。'
-        elif s.get('verification_failed'):
-            reason = '结论核验结果格式无效，本次仅提供已收集资料。'
-        else:
-            reason = '本次没有通过核验的结论。'
-        result = render_partial(s, reason)
-        return {**result, 'research_gaps': s.get('research_gaps', [])}
-    review = s.get('review_result')
-    has_verified = any(position[0] >= 0 for position in s.get('accepted', [])) and bool(s.get('evidence'))
-    partial = (s.get('verification_failed', False) or s.get('revision_failed', False) or not has_verified or bool(s.get('research_gaps'))
-               or any(o.get('status') == 'missing_evidence' for o in s.get('outcomes', []))
-               or review is None or not review.sufficient or bool(review.gaps))
-    lines = ['# 阶段性研究结果' if partial else '# 研究报告']
-    used = set()
-    for si, section in enumerate(s['draft'].sections):
-        paragraphs = [p for pi, p in enumerate(section.paragraphs) if (si, pi) in accepted]
-        if not paragraphs: continue
-        lines.append('## ' + section.heading)
-        for p in paragraphs:
-            used.update(p.citations)
-            lines.append(p.text + ' ' + ' '.join(f'[{i}]' for i in p.citations))
-    limitations = [p for pi, p in enumerate(s['draft'].limitations) if (-1, pi) in accepted]
-    if limitations:
-        lines.append('## 局限')
-        for p in limitations:
-            used.update(p.citations)
-            lines.append(p.text + ' ' + ' '.join(f'[{i}]' for i in p.citations))
-    allowed = set(s['research'].get('paper_ids') or []) if s['research']['source'] == 'collection' else None
-    kept = [e for e in s['evidence'] if (e['id'] in used or not has_verified) and (allowed is None or e.get('paper_id') in allowed)]
-    lines.append('## 范围与待核查' if partial else '## 证据范围')
-    scope = {'auto': '自动选择来源', 'all': '项目与外部论文', 'local': '项目论文', 'openalex': '外部论文', 'collection': '指定收藏夹', 'web': '网页'}.get(s['research']['source'], '所选来源')
-    lines.append('首选来源：' + scope + '。')
-    levels = []
-    if any(e.get('version_id') for e in kept): levels.append('论文原文页面片段')
-    if any(e.get('source_level') == 'abstract' or (not e.get('version_id') and e.get('source_level') not in ('web_snippet', 'web_content')) for e in kept): levels.append('论文摘要')
-    if any(e.get('source_level') == 'web_snippet' for e in kept): levels.append('网页搜索摘要')
-    if any(e.get('source_level') == 'web_content' for e in kept): levels.append('网页文本片段')
-    if levels:
-        lines.append('实际引用的资料：' + '、'.join(levels) + '。')
-    if s.get('verification_failed'):
-        lines.append('部分段落因核验服务不可用或结果格式无效而未展示。')
-    if s.get('revision_failed'):
-        lines.append('部分段落因修订服务不可用或结果格式无效而未展示。')
-    if any(o.get('status') in ('unsupported', 'qualified', 'missing_evidence') for o in s.get('outcomes', [])) or not kept:
-        lines.append('证据不足：部分内容未通过核验或没有可用证据，需进一步核查。')
-    for status, label in [('unsupported', '不受支持'), ('qualified', '待限定'), ('missing_evidence', '缺少证据')]:
-        count = sum(o['status'] == status for o in s.get('outcomes', []))
-        if count: lines.append(f'已省略{count}段（{label}）。')
-    review = s.get('review_result')
-    if s.get('forced_reason') and (not review or not review.sufficient):
-        lines.append('研究在预算或流程边界处结束，结论仍需进一步核查。')
-    warnings = s.get('warnings', [])
-    notice = _search_block_notice(warnings)
-    if notice:
-        lines.append(notice)
-    elif 'web_search_failed' in warnings:
-        lines.append('当前网页搜索服务部分请求失败，结果不完整，请稍后重试。')
-    if 'web_page_read_failed' in warnings:
-        lines.append('网页正文读取部分失败，结果可能不完整。')
-    if any(w not in ('web_search_failed', 'web_page_read_failed') and not w.startswith('web_search_blocked:') for w in warnings):
-        lines.append('论文外部检索部分失败，结果可能不完整。')
-    if s['research']['source'] == 'web' and not s['evidence'] and not warnings:
-        lines.append('本次网页检索未找到可用文本证据。')
-    gaps = getattr(review, 'gaps', []) if review else []
-    if review and not review.sufficient:
-        lines.append('现有证据尚不足以全面回答问题。')
-    steps = getattr(review, 'next_steps', []) if review else []
-    directions = [g['query'] for g in s.get('research_gaps', []) if g.get('query')] + (([step.direction for step in steps] or gaps) if review and (not review.sufficient or gaps) else [])
-    for direction in directions[:3]:
-        clean = _safe_direction(direction)
-        if clean:
-            lines.append('待查方向：' + clean + '。')
-    lines.append('材料可能包含原文片段、论文摘要或网页片段；摘要和片段不代表完整原文。')
-    if kept:
-        lines.append('## 参考证据\n' + '\n'.join(_reference(e) for e in kept))
-    return {'content': '\n\n'.join(lines), 'evidence': kept}
+def _safe_http_url(value):
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+        if parts.scheme.casefold() not in ("http", "https") or not parts.hostname:
+            return ""
+        host = parts.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if parts.port:
+            host += f":{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, parts.query, ""))
+    except ValueError:
+        return ""
 
 
-def build_report_graph(model, on_stage=None):
-    def draft(s):
-        if on_stage: on_stage('synthesizing')
-        review = s.get('review_result')
-        evidence_ids = {entry['id'] for entry in s['evidence']}
-        notes = [{**note,
-                  'findings': [finding for finding in note['findings'] if all(c in evidence_ids for c in finding['citations'])],
-                  'sources': [source for source in note['sources'] if source['id'] in evidence_ids]}
-                 for note in s.get('subtask_notes', [])[-10:]]
-        review_data = review.model_dump() if review else None
-        if review_data:
-            review_data['subtask_findings'] = [finding for finding in review_data.get('subtask_findings', []) if all(c in evidence_ids for c in finding['citations'])]
-        payload = {'question': s['research']['query'], 'history': s.get('history', []), 'subtask_notes': notes,
-                   'directions': s.get('directions', []), 'verification_gaps': s.get('verification_gaps', []),
-                   'evidence': s['evidence'], 'review': review_data}
-        try:
-            return {'draft': model(s, 'literature/synthesize', payload, Draft), 'empty_retried': s.get('empty_retried', False)}
-        except StructuredOutputError:
-            return {'draft_format_failed': True, 'research_gaps': []}
-        except ModelServiceError:
-            return {'draft_service_failed': True, 'research_gaps': []}
-    def retry_empty(s):
-        return {**draft(s), 'empty_retried': True}
-    def check(s):
-        if on_stage: on_stage('verifying')
-        return verify(s, model)
-    def revise(s):
-        if on_stage: on_stage('synthesizing')
-        feedback = [o for o in s['outcomes'] if o['status'] == 'qualified']
-        payload = {'question': s['research']['query'], 'draft': s['draft'].model_dump(), 'feedback': feedback, 'evidence': s['evidence'], 'verification_gaps': s.get('verification_gaps', [])}
-        try:
-            patches = model(s, 'literature/revise', payload, PatchSet)
-        except (StructuredOutputError, ModelServiceError):
-            return {'revision_failed': True}
-        target = {(o['section_index'], o['paragraph_index']) for o in feedback}
-        updated = s['draft'].model_copy(deep=True)
-        seen = set()
-        for patch in patches.patches:
-            position = (patch.section_index, patch.paragraph_index)
-            if position not in target or position in seen: continue
-            seen.add(position)
-            claim = Claim(text=patch.text, citations=patch.citations)
-            if patch.section_index == -1: updated.limitations[patch.paragraph_index] = claim
-            else: updated.sections[patch.section_index].paragraphs[patch.paragraph_index] = claim
-        return {'draft': updated, 'revised': True, 'patched_positions': list(seen)}
-    def finalize(s):
-        rejected = [{'section_index': o['section_index'], 'paragraph_index': o['paragraph_index'], 'reason': o['reason']} for o in s.get('outcomes', []) if o['status'] == 'unsupported']
-        if rejected:
-            diagnostic_id = record_failure(kind='report_verification', payload={'rejected': rejected}, schema=Verdict.model_json_schema())
-            logger.info('report_verification diagnostic_id=%s count=%d', diagnostic_id, len(rejected))
-        return render(s)
-    def after_draft(s):
-        if s.get('draft_format_failed') or s.get('draft_service_failed'):
-            return 'render'
-        if s['evidence'] and not s['draft'].sections and not s['draft'].limitations and not s.get('empty_retried'):
-            return 'retry_empty'
-        return 'verify'
-
-    def after_retry(s):
-        return 'render' if s.get('draft_format_failed') or s.get('draft_service_failed') else 'verify'
-
-    graph = StateGraph(ReportState)
-    graph.add_node('draft', draft)
-    graph.add_node('retry_empty', retry_empty)
-    graph.add_node('verify', check)
-    graph.add_node('revise', revise)
-    graph.add_node('render', finalize)
-    graph.add_edge(START, 'draft')
-    graph.add_conditional_edges('draft', after_draft)
-    graph.add_conditional_edges('retry_empty', after_retry)
-    graph.add_conditional_edges('verify', lambda s: 'revise' if any(o['status'] == 'qualified' for o in s['outcomes']) and not s.get('revised') and not s.get('verifier_service_failed') else 'render')
-    graph.add_conditional_edges('revise', lambda s: 'render' if s.get('revision_failed') else 'verify')
-    graph.add_edge('render', END)
-    return graph.compile()
+def reference(evidence):
+    """Render a compact reference line without exposing local filesystem paths."""
+    level = evidence.get("source_level", "")
+    if level in ("web_snippet", "web_content"):
+        label = {"web_snippet": "搜索摘要", "web_content": "网页文本"}.get(level, level)
+        anchor = ""
+        if evidence.get("char_start") is not None and evidence.get("char_end") is not None:
+            anchor = f" · Markdown 字符区间 {evidence['char_start']}–{evidence['char_end']}（从 0 开始）"
+        return (
+            f"[{evidence['id']}] {_safe_title(evidence.get('title', ''))} · {label} · "
+            f"{evidence.get('provider', '')} · {_safe_http_url(evidence.get('original_url', ''))} · "
+            f"获取于 {evidence.get('retrieved_at', '')}{anchor}"
+        )
+    if evidence.get("version_id"):
+        return f"[{evidence['id']}] {_safe_title(evidence.get('title', ''))} · 原文版本 {evidence['version_id']}，第 {evidence.get('page', '')} 页"
+    url = _safe_http_url(evidence.get("original_url", ""))
+    return f"[{evidence['id']}] {_safe_title(evidence.get('title', ''))} · 论文摘要" + (f" · {url}" if url else "")

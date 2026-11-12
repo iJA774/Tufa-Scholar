@@ -1,180 +1,183 @@
-"""Isolated HTTP acceptance using a simulated OpenAI-compatible model, not a real model."""
-import io, json, os, socket, subprocess, sys, tempfile, threading, time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+"""Verify chat through the real API and worker with a local model fixture only."""
+
+import io
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
+
 import httpx
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-ROOT = Path(__file__).resolve().parents[1]
+from scripts.verification_support import ROOT, api_commands, assert_isolated_services, free_port, start_fixture_server, stop_processes
 
-class ModelFixture(BaseHTTPRequestHandler):
-    requests = []
-    def log_message(self, *args): pass
-    def do_POST(self):
-        req = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        ModelFixture.requests.append(req)
-        prompt = req['messages'][0]['content']
-        data = json.loads(req['messages'][1]['content'])
-        if '你是研究主控' in prompt:
-            if not data['results']:
-                action = 'web_research' if data['source'] == 'web' or (data['source'] == 'auto' and '国际大事' in data['question']) else 'paper_research'
-                result = {'action': action, 'task': 'attention' if 'cross-source' in data['question'] else 'accuracy', 'directions': ['accuracy']}
-            elif 'cross-source' in data['question'] and len(data['results']) == 1:
-                result = {'action': 'web_research', 'task': 'Attention fixture paper method details', 'directions': ['method details']}
-            elif data['review'] is None:
-                result = {'action': 'review'}
-            else:
-                result = {'action': 'report'}
-        elif '你是研究专家' in prompt:
-            if not data['recent_result']:
-                result = {'action': 'search', 'query': data['task'], 'plan': ['search and read']}
-            elif data['candidates'] and '检索到' in data['recent_result'] and data['role'] == 'web':
-                result = {'action': 'read_web_page', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['search and read']}
-            elif data['candidates'] and ('检索到' in data['recent_result'] or '网页正文' in data['recent_result']):
-                result = {'action': 'read', 'candidate_ids': [data['candidates'][0]['id']], 'plan': ['search and read']}
-            else:
-                result = {'action': 'finish', 'plan': ['search and read']}
-        elif '你是无工具研究审查者' in prompt:
-            result = {'sufficient': True, 'gaps': [], 'summary': '已审查', 'coverage': ['accuracy'], 'next_steps': []}
-            if 'cross-source' in data['question'] and len(data['results']) == 1:
-                result = {'sufficient': False, 'gaps': ['method details'], 'summary': '需补充方法', 'coverage': ['paper'], 'next_steps': [{'direction': 'method', 'goal': 'Attention fixture paper method details', 'route': 'web_research'}]}
-        elif '你是研究报告撰写者' in prompt:
-            evidence = data['evidence']
-            result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '准确率为 92%', 'citations': [evidence[0]['id']]}, {'text': '成本降低 30%', 'citations': [evidence[0]['id']]}]}] if evidence else []}
-            if data['question'] == 'accuracy invalid draft':
-                result = {'unexpected': 'invalid'}
-            if data['question'] == 'accuracy and cost?':
-                result['verification_gaps'] = [{'query': 'ECHO_ONLY_PROBE', 'route': 'web_research'}]
-                result['heading'] = '补充分析'
-                result['paragraphs'] = [{'text': '补充分析的准确率为 92%', 'citations': [evidence[0]['id']]}]
-                result['limitations'] = [{'text': 'UNSUPPORTED_LIMITATION_PROBE', 'citations': []}]
-            if 'cross-source' in data['question'] and len(evidence) >= 2:
-                paper = next(e for e in evidence if e['source_level'] == 'abstract')
-                web = next(e for e in evidence if e['source_level'] == 'web_content')
-                result = {'sections': [{'heading': '概述', 'paragraphs': [{'text': '论文摘要介绍了模拟研究。', 'citations': [paper['id']]}]}, {'heading': '主题分析', 'paragraphs': [{'text': '网页补充了注意力方法细节。', 'citations': [web['id']]}]}, {'heading': '综合判断', 'paragraphs': [{'text': '论文与网页共同提供研究背景和方法线索。', 'citations': [paper['id'], web['id']]}]}], 'limitations': [{'text': '论文仅提供摘要，仍需核查原文。', 'citations': [paper['id']]}]}
-        elif '你是报告修订者' in prompt:
-            result = {'patches': []}
-        elif '你是严谨的报告核验者' in prompt:
-            result = {'status': 'supported'}
-        else:
-            self.send_error(500); return
-        raw = json.dumps({'choices':[{'message':{'content':json.dumps(result,ensure_ascii=False)}}]}).encode()
-        self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
 
 def make_pdf():
-    writer=PdfWriter(); page=writer.add_blank_page(width=300,height=200)
-    font=DictionaryObject({NameObject('/Type'):NameObject('/Font'),NameObject('/Subtype'):NameObject('/Type1'),NameObject('/BaseFont'):NameObject('/Helvetica')})
-    page[NameObject('/Resources')]=DictionaryObject({NameObject('/Font'):DictionaryObject({NameObject('/F1'):writer._add_object(font)})})
-    stream=DecodedStreamObject(); stream.set_data(b'BT /F1 12 Tf 20 100 Td (accuracy was 92%) Tj ET')
-    page[NameObject('/Contents')]=writer._add_object(stream)
-    out=io.BytesIO(); writer.write(out); return out.getvalue()
+    """Return a tiny extractable PDF for API/worker evidence acceptance."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=200)
+    font = DictionaryObject({
+        NameObject('/Type'): NameObject('/Font'),
+        NameObject('/Subtype'): NameObject('/Type1'),
+        NameObject('/BaseFont'): NameObject('/Helvetica'),
+    })
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): writer._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(b'BT /F1 12 Tf 20 100 Td (accuracy was 92%) Tj ET')
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(('127.0.0.1',0)); return sock.getsockname()[1]
 
 def main():
-    server=ThreadingHTTPServer(('127.0.0.1',0),ModelFixture)
-    threading.Thread(target=server.serve_forever,daemon=True).start()
-    processes=[]
-    temporary = tempfile.TemporaryDirectory(prefix='tufa-chat-')
-    directory = temporary.name
+    temporary = tempfile.TemporaryDirectory(prefix='tufa-chat-verify-')
+    fixture = None
+    fixture_thread = None
+    processes = []
+    sink = None
+    stopped = True
     try:
-        env=os.environ.copy()
-        for key in ('OPENAI_API_KEY','OPENAI_BASE_URL','OPENAI_MODEL','OPENALEX_API_KEY'): env.pop(key,None)
-        env['TUFA_DATA_DIR']=directory
-        port=int(os.environ.get('TUFA_VERIFY_API_PORT','0')) or free_port(); base=f'http://127.0.0.1:{port}'
-        with open(os.devnull,'wb') as sink:
-            api_app = 'scripts.fixture_api:app' if '--paper-fixture' in sys.argv else 'apps.api.main:app'
-            for args in ([sys.executable,'-m','uvicorn',api_app,'--host','127.0.0.1','--port',str(port)], [sys.executable,'-m','apps.worker']):
-                processes.append(subprocess.Popen(args,cwd=ROOT,env=env,stdout=sink,stderr=sink))
-            with httpx.Client(base_url=base,timeout=10,trust_env=False) as c:
-                for _ in range(100):
-                    try:
-                        if c.get('/health').status_code == 200: break
-                    except httpx.RequestError: pass
-                    time.sleep(.2)
-                else: raise AssertionError('API failed to start')
-                def call(method,path,**kw):
-                    r=c.request(method,path,**kw); r.raise_for_status(); return r.json()
-                def wait(run_id):
-                    for _ in range(150):
-                        t=call('GET',f'/runs/{run_id}')
-                        if t['status'] in ('succeeded','failed','interrupted'): return t
-                        time.sleep(.2)
-                    raise AssertionError('worker timed out')
-                p=call('POST','/projects',json={'name':'fixture'})['id']
-                if '--paper-fixture' in sys.argv:
-                    found=call('GET',f'/projects/{p}/paper-search',params={'q':'attention','source':'openalex'})
-                    assert found['results'][0]['doi']=='https://doi.org/10.1234/ATTENTION'
-                    print('Simulated external paper search verified', flush=True)
-                pdf=make_pdf()
-                paper=call('POST',f'/projects/{p}/papers/import',data={'title':'accuracy research'},files={'file':('fixture.pdf',pdf,'application/pdf')})
-                q=call('POST',f'/projects/{p}/questions',json={'question':'accuracy and cost?', 'source':'local'})
-                failed=wait(q['run_id']); assert failed['status']=='failed' and '配置' in failed['error'], failed
-                call('PUT','/settings',json={'openai_base_url':f'http://127.0.0.1:{server.server_port}/v1','openai_model':'fixture'})
-                retry=call('POST',f"/runs/{q['run_id']}/retry")
-                completed=wait(retry['id']); assert completed['status']=='succeeded',completed
-                result=completed['result']; assert '证据不足' in result['content'] and '成本降低 30%' not in result['content']
-                assert 'ECHO_ONLY_PROBE' not in result['content'] and 'verification_gaps' not in result['content']
-                assert '## 概述' in result['content'] and '## 补充分析' in result['content']
-                assert '补充分析的准确率为 92%' in result['content']
-                assert 'UNSUPPORTED_LIMITATION_PROBE' not in result['content']
-                synth_requests = [req for req in ModelFixture.requests if '你是研究报告撰写者' in req['messages'][0]['content'] and json.loads(req['messages'][1]['content'])['question'] == 'accuracy and cost?']
-                assert len(synth_requests) == 1, synth_requests
-                synth_index = ModelFixture.requests.index(synth_requests[0])
-                assert not any('你是研究专家' in req['messages'][0]['content'] for req in ModelFixture.requests[synth_index + 1:])
-                evidence=result['evidence']; assert len(evidence)==1 and evidence[0]['page']==1 and evidence[0]['version_id']==paper['versions'][0]['id']
-                assert c.get(paper['versions'][0]['file_url']).content==pdf
-                report=result['report_id']; assert '92%' in c.get(f'/reports/{report}/markdown').text
-                assert 'accuracy was 92%' in c.get(f'/reports/{report}/evidence.csv').text
-                assert len(call('GET',f"/conversations/{q['conversation_id']}/messages"))==2
-                assert call('GET',f'/projects/{p}/search',params={'q':'accuracy'})['papers']
-                ModelFixture.requests.clear()
-                malformed=call('POST',f'/projects/{p}/questions',json={'question':'accuracy invalid draft', 'source':'local'})
-                malformed_task=wait(malformed['run_id'])
-                assert malformed_task['status']=='succeeded', malformed_task
-                malformed_result=malformed_task['result']
-                assert '尚未生成核验结论' in malformed_result['content']
-                assert malformed_result['evidence'] and malformed_result['evidence'][0]['page']==1
-                malformed_synth=[req for req in ModelFixture.requests if '你是研究报告撰写者' in req['messages'][0]['content']]
-                assert len(malformed_synth)==2, malformed_synth
-                first_index=ModelFixture.requests.index(malformed_synth[0])
-                assert not any('你是研究专家' in req['messages'][0]['content'] or '你是严谨的报告核验者' in req['messages'][0]['content'] for req in ModelFixture.requests[first_index+1:])
-                outside=call('POST',f'/projects/{p}/papers',json={'title':'OUTSIDE_SECRET','abstract':'OUTSIDE_SECRET content'})
-                prior=call('POST',f'/projects/{p}/questions',json={'question':'OUTSIDE_SECRET','conversation_id':q['conversation_id'],'source':'local'})
-                assert wait(prior['run_id'])['status']=='succeeded'
-                collection=call('POST',f'/projects/{p}/collections',json={'name':'fixture collection'})['id']
-                path=f'/projects/{p}/collections/{collection}/papers'
-                call('POST',path,json={'paper_id':paper['id']})
-                ModelFixture.requests.clear()
-                selected=call('POST',f'/projects/{p}/questions',json={'question':'accuracy','source':'collection','collection_id':collection,'conversation_id':q['conversation_id']})
-                call('POST',path,json={'paper_id':outside['id']})
-                assert c.delete(path+'/'+str(paper['id'])).status_code==204
-                selected_task=wait(selected['run_id'])
-                assert selected_task['paper_ids']==[paper['id']], selected_task
-                assert selected_task['status']=='succeeded', selected_task
-                assert all(e['paper_id']==paper['id'] for e in selected_task['result']['evidence'])
-                assert selected_task['result']['evidence'], selected_task
-                assert 'OUTSIDE_SECRET' not in json.dumps(ModelFixture.requests,ensure_ascii=False)
-                print('Collection snapshot and model isolation checks passed', flush=True)
-                print('Simulated model: API, worker, evidence, retry and report checks passed', flush=True)
-                if '--serve' in sys.argv:
-                    print(f'API: {base}  isolated data: {directory}', flush=True)
-                    print('Simulated model is active; Ctrl+C stops the fixture.', flush=True)
-                    if '--paper-fixture' in sys.argv: print('Simulated external paper search is active.', flush=True)
-                    try:
-                        while True: time.sleep(1)
-                    except KeyboardInterrupt: pass
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-        for process in processes:
-            try: process.wait(timeout=10)
-            except subprocess.TimeoutExpired: process.kill(); process.wait()
-        server.shutdown(); server.server_close()
-        temporary.cleanup()
+        fixture, fixture_thread = start_fixture_server()
+        sink = open(os.devnull, 'wb')
+        port = int(os.environ.get('TUFA_VERIFY_API_PORT', '0')) or free_port()
+        base = f'http://127.0.0.1:{port}'
+        env = os.environ.copy()
+        for key in (
+            'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENALEX_API_KEY',
+            'SEARCH_API', 'SEARX_HOST', 'TAVILY_API_KEY', 'INFOQUEST_API_KEY',
+            'BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY',
+        ):
+            env.pop(key, None)
+        env['TUFA_DATA_DIR'] = temporary.name
+        for command in api_commands(port):
+            processes.append(subprocess.Popen(command, cwd=ROOT, env=env, stdout=sink, stderr=sink))
 
-if __name__=='__main__': main()
+        with httpx.Client(base_url=base, timeout=20, trust_env=False) as client:
+            for _ in range(100):
+                try:
+                    health = client.get('/health')
+                    if health.status_code == 200:
+                        assert_isolated_services(client, processes, temporary.name)
+                        break
+                except httpx.RequestError:
+                    pass
+                time.sleep(0.2)
+            else:
+                raise AssertionError('Local API failed to start')
+
+            def call(method, path, **kwargs):
+                response = client.request(method, path, **kwargs)
+                response.raise_for_status()
+                return response.json()
+
+            def wait(run_id):
+                for _ in range(300):
+                    task = call('GET', f'/runs/{run_id}')
+                    if task['status'] in {'succeeded', 'failed', 'interrupted'}:
+                        return task
+                    time.sleep(0.2)
+                raise AssertionError(f'Worker timed out for run {run_id}')
+
+            def stages(run_id):
+                log_path = Path(temporary.name) / 'logs' / 'worker.log'
+                if not log_path.exists():
+                    return []
+                pattern = re.compile(rf'task_stage run_id={run_id} stage=([a-z_]+)')
+                return [match.group(1) for match in pattern.finditer(log_path.read_text(encoding='utf-8', errors='replace'))]
+
+            project = call('POST', '/projects', json={'name': 'Isolated chat acceptance'})['id']
+            pdf = make_pdf()
+            imported = call(
+                'POST', f'/projects/{project}/papers/import',
+                data={'title': 'Accuracy fixture study'},
+                files={'file': ('accuracy-fixture.pdf', pdf, 'application/pdf')},
+            )
+
+            # Exercise the real failed-task/retry path before configuring a model.
+            pending = call('POST', f'/projects/{project}/questions', json={
+                'question': 'accuracy', 'source': 'local', 'model_name': 'fixture-selected',
+            })
+            failed = wait(pending['run_id'])
+            assert failed['status'] == 'failed' and '配置模型' in failed.get('error', ''), failed
+
+            call('PUT', '/settings', json={
+                'openai_base_url': f'http://127.0.0.1:{fixture.server_port}/v1',
+                'openai_model': 'fixture-default',
+            })
+            retry = call('POST', f"/runs/{pending['run_id']}/retry")
+            completed = wait(retry['id'])
+            assert completed['status'] == 'succeeded', completed
+            result = completed['result']
+            assert '92%' in result['content']
+            assert result['evidence'] and result['evidence'][0]['page'] == 1
+            assert result['evidence'][0]['version_id'] == imported['versions'][0]['id']
+            assert completed['stage'] == 'completed'
+            assert stages(retry['id'])[-1:] == ['reporter'], stages(retry['id'])
+            assert 'accuracy-fixture.pdf' in str([
+                item['messages'][0]['content'] for item in fixture.model_requests
+                if '运行节点标识：planner' in item['messages'][0]['content']
+            ])
+            assert all(item['model'] == 'fixture-selected' for item in fixture.model_requests)
+            assert client.get(imported['versions'][0]['file_url']).content == pdf
+            report_id = result['report_id']
+            assert '92%' in client.get(f'/reports/{report_id}/markdown').text
+            csv_text = client.get(f'/reports/{report_id}/evidence.csv').text
+            assert 'accuracy was 92%' in csv_text
+
+            # A direct response runs only the dispatcher and does not search.
+            before = len(fixture.model_requests)
+            direct = call('POST', f'/projects/{project}/questions', json={'question': 'direct: define accuracy', 'source': 'auto'})
+            direct_task = wait(direct['run_id'])
+            direct_requests = fixture.model_requests[before:]
+            assert direct_task['status'] == 'succeeded', direct_task
+            assert direct_task['stage'] == 'completed'
+            assert direct_task['result']['evidence'] == []
+            roles = [
+                line.split('运行节点标识：', 1)[1].splitlines()[0].strip()
+                for item in direct_requests
+                for line in item['messages'][0]['content'].splitlines()
+                if '运行节点标识：' in line
+            ]
+            assert roles == ['dispatcher'], roles
+            assert stages(direct['run_id']) == ['dispatcher'], stages(direct['run_id'])
+
+            # A blank collection still finishes with an explicit evidence gap.
+            empty_project = call('POST', '/projects', json={'name': 'Empty collection acceptance'})['id']
+            collection = call('POST', f'/projects/{empty_project}/collections', json={'name': 'empty'})['id']
+            empty = call('POST', f'/projects/{empty_project}/questions', json={
+                'question': 'no-evidence', 'source': 'collection', 'collection_id': collection,
+            })
+            empty_task = wait(empty['run_id'])
+            assert empty_task['status'] == 'succeeded', empty_task
+            assert empty_task['result']['evidence'] == []
+            assert '没有可核查证据' in empty_task['result']['content'] or '证据不足' in empty_task['result']['content']
+            assert empty_task['stage'] == 'completed'
+            assert stages(empty['run_id'])[-1:] == ['reporter'], stages(empty['run_id'])
+
+            messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
+            assert len(messages) == 2
+            print('Simulated model: API, worker, failed-task retry, direct answer, PDF evidence, report and empty collection passed.')
+            print('Cloud model and real-provider quality were not exercised.')
+    finally:
+        try:
+            stopped = stop_processes(processes)
+        finally:
+            if fixture is not None:
+                fixture.shutdown()
+                fixture.server_close()
+            if fixture_thread is not None:
+                fixture_thread.join(timeout=5)
+            if sink is not None:
+                sink.close()
+            temporary.cleanup()
+        if not stopped or (fixture_thread is not None and fixture_thread.is_alive()):
+            raise RuntimeError('Acceptance subprocess or fixture HTTP server did not stop cleanly')
+
+
+if __name__ == '__main__':
+    main()

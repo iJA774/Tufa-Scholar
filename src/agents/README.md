@@ -1,33 +1,56 @@
 # 科研 Agent
 
-`literature.py` 保存科研问答的 LangGraph 图及结构化模型输出：主控动态选择直接回答、研究委派、审查或报告；论文和网页研究各有独立子图，报告子图负责综合、核验及至多一次局部修订，缺证据可反馈主控补研。入口为 `run(research, *, history, on_stage=None)`，返回回答正文与证据。
+`literature.py` 用一张 LangGraph 表达单图八节点科研问答。入口 `run(research, *, history, on_stage=None, on_subtask=None)` 返回最终 Markdown 和最终引用证据；节点不读取任务行、不查询对话历史、不写任务状态。worker 负责准备输入、持久化阶段和保存结果。
 
-`research` 包含 `query`、`project_id`、`source`，`auto` 由主控自主选择直接回答、论文或网页，审查缺口后可在论文与网页之间切换，可带 `paper_ids`、`model_name` 与 `reasoning_effort`；`history` 是调用方准备的对话消息列表。Agent 不需要任务 ID，不直接导入仓储或修改任务状态。可选 `on_subtask(note)` 每次审查后报告初步发现、来源及缺口，由调用方保存。可选 `on_stage(stage)` 在节点执行前接收阶段名；worker 负责读历史、提供回调、领取任务及原子提交结果。
+## 节点与流程
 
-```python
-from src.agents.literature import run
-
-content, evidence = run(
-    {"query": "attention", "project_id": 1, "source": "local"},
-    history=[],
-    on_stage=print,
-)
+```mermaid
+flowchart TD
+    S([开始]) --> D[dispatcher]
+    D -- 无需深研 --> E([结束并直接返回答案])
+    D -- 需要深研或 collection --> B[background_investigator]
+    B --> P[planner]
+    P -- 选择报告或研究满两轮 --> R[reporter]
+    P -- 继续研究 --> U[supervisor]
+    U -- 顺序分派 --> X[researcher]
+    X --> U
+    U -- researcher完成后 --> A[analyst]
+    A --> U
+    U -- analyst完成后 --> C[coder 占位节点]
+    C --> U
+    U -- coder完成后 --> P
+    R --> E2([结束并返回最终报告])
 ```
 
-调用示例需已有项目与有效模型配置，省略回调同样可以执行。阶段包括 `planning`、`answering`（一般回答）、`searching`（论文）、`searching_web`（网页）、`evidence`、`assessing`、`synthesizing` 与 `verifying`；研究、审查与主控可以循环。阶段持久化错误由外层任务运行器处理，不在图节点中吞掉。
+dispatcher 判断是否需要深度研究。简单请求由 dispatcher 直接回答并结束；collection 由代码强制进入研究流程，模型故障也按有限研究路径继续。其他来源遵守提交时的范围约束。
 
-检索与取证按名称调用 [工具目录](../tools/README.md)，实际算法与限制见 [文献业务](../literature/README.md)。状态中的 `candidates` 保留本次运行的完整去重候选池，精读只允许模型从当前候选中按稳定 ID 选择最多六篇。按不同查询排名进行 RRF 排序，稳定处理平局；补检新论文可以替换低排名旧论文，同一查询重复执行不会重复加分。该排序不是模型语义重排。
+background_investigator 根据问题和可用来源选择背景方向，最多生成并执行三条真实搜索查询，再筛选检索到的候选并总结背景与缺口。搜索结果为空或失败时如实报告，不伪造候选或背景。planner 首轮规划必须启动研究；每次 researcher/analyst 往返后，planner 可沿原方向补查、切换到允许的 web 或 paper 来源，或交给 reporter。每次研究最多八个工具动作；搜索失败时可在预算内用改写查询重试。最多研究两轮，第二轮结束后始终进入 reporter。
 
-最多委派三次研究，每次至多调用八次工具，主控最多决策三次。模型可多次搜索、精读或结束；每次网页或论文发现搜索最多向研究模型提供三条候选，论文后端可先排名更大的原始候选池；显式收藏夹保留完整提交快照和已有展示、精读限制；每次精读用委派子问题取证，按来源、定位和内容去重后加入 `evidence_pool`。旧论文退出精读集合时，其证据仍留在池中。同一材料重新入选不计作新增，单轮无新增不封锁来源；审查提出的同来源同目标计划通常只执行一次，首次发现未读新候选或网页续页时最多再执行一轮。
+supervisor 不调用模型，只依据完成节点将控制顺序交给 researcher、analyst、coder，再回到 planner。coder 是无模型的占位节点，不执行代码或伪装成提示词节点。reporter 汇总原问题、背景、研究初稿、审查和累计证据，不论证据是否完整都生成终稿；确定性校验失败或模型服务不可用时保留通过检查的内容并说明缺口。dispatcher 的直接回答不会进入 reporter。
 
-图状态中的 `evidence` 是本轮给缺口评估和综合使用的工作集，最多 18 条，正文合计最多 21,600 字符。筛选先为原问题和各轮子问题保留最相关的可用证据，再按关键词匹配填充剩余位置。不同片段的引用 ID 在运行中保持唯一。原始问题一直保存在 `research.query`。工作集仅填入词面相关性得分为正的证据；原问题、方向和搜索查询别名共同参与匹配，支持跨语言查询，审查还可剔除不相关证据。这是词面匹配和模型审查，不是语义检索。正式报告仅保存被通过核验结论引用的证据；阶段性结果可导出相关范围内已收集的资料。
+## 模型节点、模板与输入
 
-收藏夹任务传递提交时保存的项目、来源和论文快照，不读取其他对话历史；网页范围强制进入研究子图，不走无证据的一般回答；子图可直接结束并返回证据不足。模型节点的输入输出与 `src/prompts/` 模板契约见 [提示词规范](../../docs/PROMPTS.md)。
+| 节点 | prompt ID | 责任与工具范围 |
+|---|---|---|
+| dispatcher | `runtime/dispatcher` | 判断是否深研；直接回答简单问题，不调用工具 |
+| background_investigator | `literature/background_investigator` | 实搜并筛选背景；工具目录按允许来源提供 |
+| planner | `literature/planner` | 拆解问题、给出一轮计划并选择 web/paper；无工具 |
+| researcher | `literature/researcher` | 在当前来源范围内自主搜索、读取、取证并提交本轮初稿；最多八个工具动作 |
+| analyst | `literature/analyst` | 深入审查问题覆盖、初稿与证据缺口；无工具 |
+| reporter | `literature/reporter` | 综合至多两轮初稿与证据，始终生成最终报告；无工具 |
 
-主控不调用检索工具，研究结果返回主控；正常报告前必须完成审查；图上限或模型服务故障阻碍审查时保留已收集证据并阶段性收束。审查不足且无可执行计划或预算已耗尽时，不调用 Writer，返回阶段性资料及未覆盖方向；核验后仍有缺口或无通过结论也标为阶段性；最后一轮审查充分仍可生成正式报告。模拟 HTTP 与实际 API/worker 验收入口见 [根 README](../../README.md#验证)。
+supervisor 和 coder 是确定性节点，不设置虚构 prompt ID。模型调用位于 `src/integrations/model.py`。Jinja2 仅渲染受信的六个 system 模板，使用 `StrictUndefined` 且关闭 autoescape；每次 HTTP 请求（包括格式纠错重试）注入当前北京时间和代码生成的 Pydantic `OUTPUT_SCHEMA`。工作流另提供 `node_role`、`search_mode`、节点权限过滤后的 `available_tools` 与本地文献文件名 `local_papers`。`CURRENT_TIME` 和 `OUTPUT_SCHEMA` 不能由上下文覆盖。问题、历史、网页、论文、候选、初稿和审查意见单独作为 user JSON 数据发送，不能进行二次模板求值；文件名也只是待处理数据。更多规则见 [提示词说明](../../docs/PROMPTS.md) 与 [模板维护规则](../prompts/AGENTS.md)。
 
-网页专家可分页读取公网网页正文，取证保留 Markdown 字符范围。报告核验的 unsupported 坐标和原因写入私有诊断，普通日志仅记录诊断 ID 和数量。
+每次模型 payload 只包含有界上下文：论文和网页候选分池，通常各最多 20 条（analyst 候选窗口最多 12 条），候选摘要或正文片段最多 1,600 字符；工作证据最多 18 条、正文合计最多 21,600 字符。planner 可看到项目文献文件名清单以判断现有范围，但文件名不代表已读取原文。工具目录由代码按节点和来源过滤；图层将候选 ID 映射为 registry 的真实参数，不能由模型构造项目范围或网页 URL。
 
-搜索服务验证、限流、认证或配置失败时，本任务暂停后续搜索；暂时性错误连续两次也暂停，成功空结果重置计数。仅 `auto` 可在受阻或连续两次无候选空结果时使用 DDGS 的 Bing/Yahoo 备用检索；显式范围不切换。仍可读取已有候选，或经受限网页读取尝试最多两个不同的已知公开官方 URL，再正常取证。
+## 候选与证据
 
-无效动作或工具参数在执行前拦截并向研究节点反馈安全错误代码和允许字段，有限纠错后仍失败则审查或阶段性收束。网页搜索和读取错误也交给专家调整或切换；报告阶段类型化故障保留已核验段落与资料，不输出未核验结论。
+论文与网页候选分别维护。跨查询按候选身份去重，使用不同查询的检索排名进行 RRF 合并；相同查询不会重复加权。候选 ID 由来源身份生成，缺乏稳定标识时才使用标题回退。每次取证最多处理六条候选，取证上限不截断进入候选池的搜索结果。
+
+取证结果按来源、版本、页码或网页字符范围及文本去重，累计证据池跨研究轮保留。重复证据 ID 在单次运行中会被规范成唯一 ID；后续节点只引用输入证据中的 ID。页面与摘要的来源层级保持区分。reporter 的最终证据只包含通过代码引用、来源范围和数值检查的报告段落所使用的证据。
+
+## 调用与验收
+
+`research` 至少包含 `query`、`project_id`、`source`，可带 `paper_ids`、`model_name` 和 `reasoning_effort`；`history` 由调用方传入。collection 任务忽略外部 history，工具上下文使用任务提交时的论文快照。阶段回调按节点名通知；`on_subtask` 在 analyst 审查后交付本轮 findings、来源和 gap，调用方可选择保存。
+
+检索、项目范围和证据定位分别见 [工具目录](../tools/README.md) 与 [文献业务](../literature/README.md)。模块回归与模拟 API/worker 实际入口见 [测试规则](../../tests/AGENTS.md) 和 [根 README 验收记录](../../README.md#验证)。模拟 HTTP 只能验证协议、提示词渲染和结构校验，不能证明真实模型回答质量。

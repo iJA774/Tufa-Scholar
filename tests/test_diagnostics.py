@@ -1,68 +1,67 @@
 import json
-import tempfile
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.infrastructure.diagnostics import diagnostic_scope, record_failure
 from scripts.replay_diagnostic import replay
+from src.infrastructure.diagnostics import diagnostic_scope, record_failure
 
 
 class DiagnosticsTest(unittest.TestCase):
-    def test_record_redact_scope_and_replay(self):
-        with tempfile.TemporaryDirectory() as tmp, patch('src.infrastructure.diagnostics.data_directory', return_value=Path(tmp)), patch('src.infrastructure.settings._local', return_value={'openai_api_key': 'private-value'}):
+    def test_record_redacts_private_values_and_keeps_task_scope(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            'src.infrastructure.diagnostics.data_directory', return_value=Path(tmp)
+        ), patch('src.infrastructure.settings._local', return_value={'openai_api_key': 'private-value'}):
             with diagnostic_scope(run_id=42):
-                ident = record_failure(kind='model_validation', payload={'api_key': 'hidden', 'nested': ['private-value'], 'private-value': 'x'}, schema={}, response='{"action":"bad", "authorization":"hidden"}', context={'prompt_id': 'runtime/route'})
-            text = (Path(tmp) / 'diagnostics' / (ident + '.json')).read_text(encoding='utf-8')
+                ident = record_failure(
+                    kind='model_validation',
+                    payload={'api_key': 'hidden', 'nested': ['private-value'], 'private-value': 'x'},
+                    schema={},
+                    response='{"needs_research":"bad", "authorization":"hidden"}',
+                    context={'prompt_id': 'runtime/dispatcher'},
+                )
+            path = Path(tmp) / 'diagnostics' / (ident + '.json')
+            text = path.read_text(encoding='utf-8')
             self.assertNotIn('private-value', text)
             self.assertNotIn('hidden', text)
             artifact = json.loads(text)
             self.assertEqual(artifact['context']['run_id'], 42)
             self.assertTrue(artifact['redacted'])
             self.assertIn('python', artifact['environment'])
-            result = subprocess.run([sys.executable, '-B', '-c', "import socket, sqlite3, runpy; socket.socket.connect = sqlite3.connect = lambda *a, **k: (_ for _ in ()).throw(AssertionError('forbidden')); runpy.run_module('scripts.replay_diagnostic', run_name='__main__')", str(Path(tmp) / 'diagnostics' / (ident + '.json'))], capture_output=True, text=True, encoding='utf-8', env={**__import__('os').environ, 'TUFA_DATA_DIR': str(Path(tmp) / 'must-not-exist'), 'PYTHONIOENCODING': 'utf-8'})
+            self.assertIn('复现', replay(artifact))
+
+            env = {**os.environ, 'TUFA_DATA_DIR': str(Path(tmp) / 'must-not-exist'), 'PYTHONIOENCODING': 'utf-8'}
+            result = subprocess.run(
+                [sys.executable, '-B', '-c',
+                 "import socket, sqlite3, runpy; socket.socket.connect = sqlite3.connect = lambda *a, **k: (_ for _ in ()).throw(AssertionError('forbidden')); runpy.run_module('scripts.replay_diagnostic', run_name='__main__')",
+                 str(path)],
+                capture_output=True, text=True, encoding='utf-8', env=env,
+            )
             self.assertEqual(result.returncode, 0)
             self.assertIn('复现', result.stdout)
             self.assertFalse((Path(tmp) / 'must-not-exist').exists())
-            self.assertTrue(replay(artifact).startswith('复现'))
-            artifact['response'] = '{"action":"review"}'
-            self.assertEqual(replay(artifact), '未复现')
-            second = record_failure(kind='network_error', payload={}, schema={})
-            self.assertNotIn('run_id', json.loads((Path(tmp) / 'diagnostics' / (second + '.json')).read_text(encoding='utf-8'))['context'])
 
-    def test_direct_url_replay_uses_semantic_context(self):
-        artifact = {'kind': 'semantic_candidates', 'response': {'action': 'read_web_page', 'url': 'https://fec.gov/results', 'query': 'election', 'candidate_ids': [], 'plan': ['read']},
-                    'payload': {'role': 'web', 'fallback_reason': 'network', 'candidate_count': 0, 'direct_url_attempts_remaining': 2}, 'context': {'candidate_ids': []}}
-        self.assertEqual(replay(artifact), '未复现')
-        artifact['response']['url'] = 'https://[broken'
-        self.assertEqual(replay(artifact), '复现：invalid_direct_url')
-        artifact['payload'].pop('direct_url_attempts_remaining')
-        self.assertIn('无法离线复现', replay(artifact))
+    def test_replay_uses_only_current_prompt_schemas(self):
+        base = {'kind': 'model_validation', 'context': {'prompt_id': 'runtime/dispatcher'}}
+        self.assertTrue(replay({**base, 'response': '{}'}).startswith('复现：'))
+        valid = {'needs_research': False, 'reason': '简单问题', 'answer': '你好'}
+        self.assertEqual(replay({**base, 'response': valid}), '未复现')
 
-    def test_legacy_model_validation_mixed_candidate_replays_semantically(self):
-        url = 'https://www.fec.gov/resources/cms-content/documents/2026pdates.pdf'
-        response = {'action': 'read_web_page', 'candidate_ids': ['C1'], 'url': url, 'query': '', 'offset': 3000, 'plan': ['read']}
-        artifact = {'kind': 'model_validation', 'response': json.dumps(response), 'payload': {'role': 'web', 'candidates': [{'id': 'C1', 'url': url}]}, 'context': {'prompt_id': 'literature/research'}}
-        self.assertEqual(replay(artifact), '未复现')
-        artifact['payload']['candidates'][0]['url'] = 'https://example.org/other'
-        self.assertEqual(replay(artifact), '复现：conflicting_candidate_url')
-        artifact['payload']['candidates'] = []
-        self.assertNotEqual(replay(artifact), '未复现')
-
-    def test_semantic_replay(self):
+        old = {**base, 'context': {'prompt_id': 'runtime/route'}, 'response': {'action': 'direct'}}
+        self.assertEqual(replay(old), '无法离线复现：未知提示词')
+        trace = {'kind': 'workflow_trace', 'context': {'node': 'supervisor'}, 'response': {}}
+        self.assertEqual(replay(trace), '只能诊断，无法离线复现')
         self.assertEqual(replay([]), '诊断格式无效')
         self.assertEqual(replay({'context': []}), '诊断格式无效')
-        route = {'kind': 'semantic_route', 'response': {'action': 'direct'}, 'context': {'allowed_actions': ['review']}}
-        self.assertEqual(replay(route), '复现')
-        route['response']['action'] = 'review'
-        self.assertEqual(replay(route), '未复现')
-        candidates = {'kind': 'semantic_candidates', 'response': {'candidate_ids': ['C1', 'C1']}, 'context': {'candidate_ids': ['C1']}}
-        self.assertEqual(replay(candidates), '复现')
-        candidates['response']['candidate_ids'] = ['C1']
-        self.assertEqual(replay(candidates), '未复现')
 
     def test_write_failure_is_safe(self):
         with patch('src.infrastructure.diagnostics.data_directory', side_effect=OSError('sensitive')):
             self.assertEqual(record_failure(kind='network_error', payload={}, schema={}), '')
+
+
+if __name__ == '__main__':
+    unittest.main()

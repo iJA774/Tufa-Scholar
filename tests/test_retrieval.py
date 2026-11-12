@@ -7,7 +7,7 @@ from unittest.mock import patch
 import httpx
 
 from src.integrations.openalex import search_works
-from src.literature.retrieval import retrieve
+from src.literature.retrieval import rank_candidates, retrieve, retrieve_collection
 from src.persistence.storage import initialize_storage
 
 
@@ -67,6 +67,40 @@ class RetrievalTests(unittest.TestCase):
             self.assertEqual(result['warnings'], ['OpenAlex unavailable'])
             with self.assertRaises(RuntimeError):
                 retrieve(1, 'attention', 'openalex')
+
+    def test_candidate_rank_fusion_merges_ids_and_uses_one_vote_per_query(self):
+        query_results = {
+            'same query': [
+                {'paper': {'id': 1, 'doi': '10.1234/shared', 'title': 'Shared'}, 'rank': 1},
+                {'paper': {'id': 2, 'doi': 'https://doi.org/10.1234/SHARED', 'title': 'Alias'}, 'rank': 2},
+                {'paper': {'id': 3, 'doi': '10.1234/other', 'title': 'Other'}, 'rank': 3},
+            ],
+            'second query': [
+                {'paper': {'id': 4, 'doi': '10.1234/shared', 'title': 'Shared'}, 'rank': 2},
+            ],
+        }
+        ranked = rank_candidates(query_results, 'all')
+        self.assertEqual(len(ranked), 2)
+        self.assertEqual(ranked[0]['doi'], '10.1234/shared')
+        self.assertEqual({item['title'] for item in ranked}, {'Shared', 'Other'})
+
+    def test_candidate_identity_respects_source_and_keeps_full_pool(self):
+        papers = [
+            {'id': i, 'title': f'paper {i}', 'doi': f'10.1234/{i}', 'abstract': f'evidence {i}'}
+            for i in range(1, 9)
+        ]
+        with patch('src.literature.retrieval.repository.project_evidence', return_value=papers), patch(
+            'src.literature.retrieval.repository.local_search', return_value=papers
+        ):
+            result = retrieve_collection(1, 'topic', list(range(1, 9)))
+        self.assertEqual(len(result['results']), 8)
+        self.assertEqual({paper['id'] for paper in result['results']}, set(range(1, 9)))
+
+        web_rows = {
+            'first': [{'paper': {'url': 'https://example.org/a', 'title': 'One'}, 'rank': 1}],
+            'second': [{'paper': {'url': 'https://example.org/b', 'title': 'Two'}, 'rank': 1}],
+        }
+        self.assertEqual(len(rank_candidates(web_rows, 'web')), 2)
 
 
 if __name__ == '__main__':

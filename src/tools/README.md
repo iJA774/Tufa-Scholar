@@ -36,19 +36,19 @@ evidence = registry.invoke(
 
 收藏夹上下文示例：`ToolContext(project_id=1, source="collection", paper_ids=(3, 7))`。调用方使用任务提交时保存的论文 ID 快照，不在执行时重新读取收藏夹当前成员。冻结的上下文复制论文 ID 序列，避免后续修改原列表改变范围。
 
-`search_papers` 的收藏夹结果保留完整快照与项目交集，六篇上限仅属于取证调用。Agent 在独立候选池中融合跨轮排名，研究子图再选择最多六篇传给 `collect_evidence`，不会在搜索结果入池前截断。
+`search_papers` 的收藏夹结果保留完整快照与项目交集，六篇上限仅属于取证调用。科研图在独立候选池中融合跨轮排名，再由 researcher 选择最多六篇传给 `collect_evidence`，不会在搜索结果入池前截断。
 
 目录只列出当前来源可用的工具，执行时再次检查。`project_id`、`source`、`paper_ids` 不属于工具参数，传入会被拒绝。未知工具、不适用的工具及无效参数抛出安全的 `ValueError`；外部服务失败保留集成层的安全错误，混合论文检索保留本地结果及 `warnings`。
 
 ## 能力边界
 
-工具上下文由应用构造，是内部调用契约。本轮未增加面向 HTTP 的任意工具执行接口。
+工具上下文由调用方构造，是内部调用契约。工具目录不提供面向 HTTP 的任意工具执行接口。
 
 本地与收藏夹取证从项目仓储读取正文路径、版本与元数据，传入候选不能指定任意本机文件。收藏夹候选还必须属于快照。外部论文摘要和网页片段保留各自来源层级，网页不自动进入论文库。外部论文摘要须与 `query` 或 `relevance_queries` 的具体词有词面重合才会生成证据；后者可传原问题和实际执行的检索词，跨语言需提供对应语言检索词。纯数字不作为主题词，带字母的技术缩写和编号可参与匹配；此检查不是语义召回，项目论文与网页取证窗口不受该门槛影响。
 
 每次取证最多处理六条候选。论文从最新有可用文本的版本读取缓存页文本，按查询选出每篇最多六个片段，每段最多 1200 字符，并保留原文版本与页码。摘要和网页片段也最多 1200 字符。页文本和取证边界见 [文献业务说明](../literature/README.md)。
 
-工具只执行一次操作。LangGraph 的研究子图在来源允许的工具内自主选择操作，负责有限补研；报告子图负责综合和核验，worker 与仓储负责阶段及结果保存。工具不自动扫描文件或加载第三方插件。
+每次 `registry.invoke()` 只执行一次目录工具操作。科研图的 researcher 节点按当前来源使用允许工具，代码限制动作数并处理候选池、搜索重试与证据累积；reporter 汇总研究结果。图层可以将已有候选 ID 映射为 `collect_evidence` 的论文对象，或将已知候选映射成 `read_web_page` 的 URL，但这不改变通用 registry 的真实参数契约。worker 与仓储负责任务阶段和结果保存。工具不自动扫描文件或加载第三方插件。
 
 ## 扩展
 
@@ -71,7 +71,7 @@ registry.register(
 registry.invoke("text_length", {"text": "科研"}, context=context)
 ```
 
-重复名称被拒绝。`registry.py` 显式接入 `search.py` 与 `read_paper.py` 的注册函数；两者分别适配检索和取证，实际算法位于 `src/literature/retrieval.py`、`src/literature/evidence.py`。新工具应声明实际适用来源，并在执行中遵守上下文。提示词位于 `src/prompts/`，模型综合和报告核验位于 `src/agents/literature.py`，不塞入注册器。
+重复名称被拒绝。`registry.py` 显式接入 `search.py`、`read_paper.py` 和 `read_web_page.py` 的注册函数；它们适配检索、取证与网页读取，实际算法位于 `src/literature/` 和 `src/integrations/`。新工具应声明实际适用来源，并在执行中遵守上下文。提示词位于 `src/prompts/`，工作流模型编排及报告的确定性引用核验位于 `src/agents/literature.py`，不塞入注册器。
 
 从仓库根目录运行 `uv run --locked python -m unittest tests.test_tools -v` 验证工具入口。跨层回归及实际 API/worker 验收命令见 [根 README](../../README.md#验证)。
 

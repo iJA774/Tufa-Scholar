@@ -1,806 +1,1417 @@
-"""Evidence-based chat graph; external text is always passed as data."""
-import re
-import logging
+"""Two-round evidence workflow expressed as a single LangGraph state graph."""
+
+from __future__ import annotations
+
+import hashlib
 import json
+import logging
+import re
+from typing import Literal, TypedDict
 from urllib.parse import urlsplit, urlunsplit
-from typing import TypedDict, Literal
-from pydantic import model_validator, field_validator, ValidationError
-from pydantic_core import PydanticCustomError
-from src.literature.retrieval import _candidate_ids
-from pydantic import BaseModel, Field
-from langgraph.graph import StateGraph, START, END
-from langgraph.errors import GraphRecursionError
-from src.integrations.model import structured, StructuredOutputError, ModelServiceError
-from src.integrations.web_search import WebSearchError
+
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from src.agents.report import reference, validate_claim
 from src.integrations.web_page import WebPageError
-from src.infrastructure.diagnostics import record_failure, diagnostic_context
+from src.integrations.web_search import WebSearchError
+from src.integrations.model import ModelServiceError, StructuredOutputError, structured
+from src.literature.keywords import relevance_score, relevance_terms
+from src.literature.retrieval import _candidate_ids, rank_candidates
 from src.tools import ToolContext, ToolRegistry
 from src.tools.registry import ToolCallValidationError
-from src.literature.retrieval import rank_candidates
-from src.literature.keywords import relevance_terms, relevance_score
 
-logger = logging.getLogger('tufa.agent')
+logger = logging.getLogger("tufa.agent")
 registry = ToolRegistry()
-MAX_DELEGATIONS = 3
-MAX_TOOL_CALLS = 8
-MAX_SEARCH_RESULTS = 3
-GRAPH_RECURSION_LIMIT = 30
-MAX_DECISIONS = 3
+
+MAX_ROUNDS = 2
+MAX_RESEARCH_ACTIONS = 8
+MAX_BACKGROUND_SEARCHES = 3
+MAX_CANDIDATE_CONTEXT = 20
+MAX_EVIDENCE_CONTEXT = 18
+MAX_EVIDENCE_TEXT = 21_600
+MAX_CANDIDATE_TEXT = 1_600
 
 
-def _run_id():
-    return diagnostic_context().get('run_id', '-')
+class Claim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=1_500)
+    citations: list[str] = Field(default_factory=list, max_length=12)
 
 
-def _context(research):
-    return ToolContext(research["project_id"], research["source"], tuple(research.get("paper_ids") or ()))
+class Section(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    heading: str = Field(min_length=1, max_length=150)
+    paragraphs: list[Claim] = Field(default_factory=list, max_length=8)
 
 
-from src.agents.report import Claim, Draft, Section, Verdict, build_report_graph, render_partial, verify as _report_verify, render as _report_render
+class Draft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sections: list[Section] = Field(default_factory=list, max_length=8)
+    limitations: list[Claim] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def bounded_claims(self):
+        if sum(len(section.paragraphs) for section in self.sections) + len(self.limitations) > 24:
+            raise ValueError("草稿段落数量超限")
+        return self
+
+
+class ReporterOutput(Draft):
+    """Structured final report payload; same paragraph/citation contract as a draft."""
+
+
+class DispatcherOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    needs_research: bool
+    reason: str = Field(default="", max_length=1_000)
+    answer: str = Field(default="", max_length=8_000)
+
+    @model_validator(mode="after")
+    def direct_answer_present(self):
+        if not self.needs_research and not self.answer.strip():
+            raise ValueError("直接回答不能为空")
+        return self
+
+
+class BackgroundOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["web", "paper"]
+    queries: list[str] = Field(default_factory=list, max_length=3)
+    selected_candidate_ids: list[str] = Field(default_factory=list, max_length=20)
+    summary: str = Field(default="", max_length=5_000)
+    gaps: list[str] = Field(default_factory=list, max_length=8)
+
+
+class PlannerOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    requirements: list[str] = Field(default_factory=list, max_length=12)
+    plan: list[str] = Field(default_factory=list, max_length=8)
+    source: Literal["web", "paper"]
+    action: Literal["research", "report"]
+    rationale: str = Field(default="", max_length=1_000)
+
+
+class ResearcherOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["tool", "finish"]
+    tool_name: str = Field(default="", max_length=100)
+    arguments: dict = Field(default_factory=dict)
+    draft: Draft = Field(default_factory=Draft)
+    findings: list[Claim] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="after")
+    def action_has_tool(self):
+        if self.action == "tool" and not self.tool_name.strip():
+            raise ValueError("工具动作缺少名称")
+        return self
+
+
+class AnalystOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sufficient: bool
+    covered_requirements: list[str] = Field(default_factory=list, max_length=12)
+    gaps: list[str] = Field(default_factory=list, max_length=12)
+    next_steps: list[str] = Field(default_factory=list, max_length=8)
+    review: str = Field(default="", max_length=3_000)
+
 
 class State(TypedDict, total=False):
-    tool_feedback: dict
-    tool_validation_failures: int
-    review_failed: bool
-    retained_verified: dict
-    recursion_exhausted: bool
     research: dict
-    effective_source: str
-    directions: list
-    pools: dict
-    attempted_plans: list
-    excluded_evidence_ids: list
-    read_ids: list
-    executed_queries: list
-    web_search_blocked: str
-    web_failures: int
-    web_backend: str
-    web_empty_count: int
-    fallback_reason: str
-    auto_web: bool
-    subtask_notes: list
-    direct_url_attempts: list
-    plan: list
-    web_blocks: dict
-    web_read_failures: list
-    verification_gaps: list
-    verification_attempted: bool
-    feedback_pending: bool
-    feedback_actions: list
-    feedback_goal: str
     history: list
-    queries: list
-    evidence_query: str
-    candidates: list
-    papers: list
+    background: dict
+    plan: dict
+    current_plan: list
+    current_source: str
+    current_round: int
+    current_draft: dict
+    current_review: dict
+    current_findings: list
+    candidate_pools: dict
     query_results: dict
-    new_evidence: bool
-    evidence: list
+    collected_web_blocks: list
     evidence_pool: list
-    evidence_facets: list
-    draft: Draft
-    content: str
+    evidence: list
+    rounds: list
+    tool_results: list
+    errors: list
     warnings: list
-    candidate_identities: list
-    task: str
-    choice: object
-    tool_calls: int
-    recent_result: str
-    search_status: str
-    delegations: int
-    review_result: object
-    results: list
-    route: object
-    decisions: int
-    forced_reason: str
-    verified_content: str
-    verified_evidence: list
-    rejected: bool
-    revised: bool
-    rejection_feedback: list
+    needs_research: bool
+    content: str
+    coder_status: str
+    background_decision: dict
+    last_completed: str
+    next_node: str
+    prepared_round: int
+    final_evidence: list
+    final_rejections: list
 
 
-def _model(state, prompt_id, payload, schema):
-    research = state['research']
-    if research.get('model_name') or research.get('reasoning_effort'):
-        return structured(prompt_id, payload, schema, model_options=research)
-    return structured(prompt_id, payload, schema)
+def _emit(on_stage, node_name):
+    if on_stage:
+        on_stage(node_name)
 
 
+def _source_modes(source):
+    return ["paper"] if source in {"local", "collection"} else ["paper", "web"]
 
-def _direct_url_key(url):
+
+def _preferred_mode(source):
+    if source == "web":
+        return "web"
+    return "paper"
+
+
+def _tool_context(research, mode):
+    source = research["source"]
+    if mode == "web":
+        tool_source = "web"
+    elif source in {"local", "openalex", "all", "collection"}:
+        tool_source = source
+    elif source == "web":
+        # The planner may broaden a web-preferred task to papers on a later round.
+        tool_source = "all"
+    else:
+        tool_source = "all"
+    return ToolContext(research["project_id"], tool_source, tuple(research.get("paper_ids") or ()))
+
+
+def _catalog_for_mode(research, mode):
+    return registry.list_tools(_tool_context(research, mode))
+
+
+def _search_catalog(research, modes=None):
+    catalogs = []
+    seen = set()
+    for mode in modes or _source_modes(research["source"]):
+        for item in _catalog_for_mode(research, mode):
+            if item["name"] in {"search_papers", "search_web"} and item["name"] not in seen:
+                catalogs.append(item)
+                seen.add(item["name"])
+    return catalogs
+
+
+def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", available_tools=None):
+    research = state["research"]
+    catalog = _catalog_for_mode(research, search_mode) if available_tools is None and search_mode in ("web", "paper") else (available_tools or [])
+    template_context = {
+        "search_mode": search_mode,
+        "available_tools": catalog,
+        "local_papers": research.get("local_papers", []),
+        "node_role": node_role,
+    }
+    return structured(prompt_id, payload, schema, model_options=research, template_context=template_context)
+
+
+def _payload(state, **extra):
+    research = state["research"]
+    return {
+        "question": research["query"],
+        "history": _history_for_model(state.get("history", [])),
+        "source": research["source"],
+        "background": state.get("background", {}),
+        "plan": state.get("plan", {}),
+        "rounds": _rounds_for_model(state.get("rounds", [])),
+        "candidates": {mode: _candidate_summaries(state, mode) for mode in ("paper", "web")},
+        "evidence": _evidence_views(_select_evidence(state)),
+        "errors": state.get("errors", []),
+        "warnings": state.get("warnings", []),
+        **extra,
+    }
+
+
+def _rounds_for_model(rounds):
+    bounded = []
+    for round_item in rounds:
+        item = dict(round_item)
+        item["candidate_ids"] = list(round_item.get("candidate_ids", []))[-MAX_CANDIDATE_CONTEXT:]
+        cited = sorted(_claim_ids(round_item.get("draft", {}))) + sorted(_findings_ids(round_item.get("findings", [])))
+        evidence_ids = list(dict.fromkeys(cited + list(round_item.get("evidence_ids", []))[-18:]))
+        item["evidence_ids"] = evidence_ids[:36]
+        bounded.append(item)
+    return bounded
+
+
+def _history_for_model(history):
+    bounded = []
+    for item in (history or [])[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if isinstance(role, str) and isinstance(content, str):
+            bounded.append({"role": role[:30], "content": content[-2_000:]})
+    return bounded
+
+
+def _candidate_key(item, mode):
+    identities = sorted(_candidate_ids(item, "web" if mode == "web" else "paper"))
+    raw = "|".join(identities) if identities else "title:" + " ".join(str(item.get("title", "")).casefold().split())
+    return "C" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _evidence_signature(item):
+    url = item.get("original_url") or ""
     try:
         parts = urlsplit(url)
-        if (parts.scheme.lower() not in ('http', 'https') or not parts.hostname or parts.username is not None or parts.password is not None
-                or '?' in url or '#' in url or parts.port not in (None, 80 if parts.scheme.lower() == 'http' else 443)):
-            return ''
-        hostname = parts.hostname.lower()
-        host = f'[{hostname}]' if ':' in hostname else hostname
-        return urlunsplit((parts.scheme.lower(), host, parts.path or '/', '', ''))
+        url = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
     except ValueError:
-        return ''
+        pass
+    return (
+        item.get("paper_id"), item.get("version_id"), item.get("page"),
+        item.get("title"), item.get("source_level"), item.get("text"), url,
+        item.get("char_start"), item.get("char_end"),
+    )
 
 
+def _web_block_key(candidate_id, block):
+    body = str(block.get("content", ""))
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+    offset = block.get("content_offset")
+    return f"{candidate_id}:{offset if offset is not None else 'snippet'}:{digest}"
 
-def _can_read_direct(kind, state, candidate_count):
-    if kind != 'web': return False
-    return bool(state.get('web_search_blocked') or
-                (state.get('auto_web') and candidate_count == 0 and
-                 (state.get('fallback_reason') or state.get('web_failures', 0) or state.get('web_empty_count', 0))))
+
+def _candidate_view(item, mode, *, include_text=True):
+    allowed = ("candidate_id", "id", "title", "doi", "arxiv_id", "openalex_id", "year", "source_level", "original_url", "url", "provider", "retrieved_at", "content_offset")
+    result = {key: item.get(key) for key in allowed if item.get(key) is not None}
+    result["source"] = mode
+    if item.get("abstract"):
+        result["abstract"] = str(item["abstract"])[:MAX_CANDIDATE_TEXT]
+    if item.get("content") and include_text:
+        result["content"] = str(item["content"])[:MAX_CANDIDATE_TEXT]
+    if item.get("next_offset") is not None:
+        result["next_offset"] = item["next_offset"]
+    if include_text and item.get("content_blocks"):
+        blocks = []
+        budget = MAX_CANDIDATE_TEXT
+        for block in item["content_blocks"][-3:]:
+            body = str(block.get("content", ""))[:min(800, budget)]
+            if not body:
+                continue
+            blocks.append({
+                "content": body,
+                "offset": block.get("content_offset"),
+                "next_offset": block.get("next_offset"),
+                "source_level": block.get("source_level"),
+            })
+            budget -= len(body)
+            if budget <= 0:
+                break
+        if blocks:
+            result["content_blocks"] = blocks
+    return result
 
 
-def specialist_semantic_error(choice, *, kind, blocked, can_direct, candidate_ids, direct_url_attempts, candidate_urls=None):
-    if choice.action == 'search' and kind == 'web' and blocked: return 'search_blocked'
-    if choice.action == 'read_web_page' and choice.url and choice.candidate_ids:
-        known = (candidate_urls or {}).get(choice.candidate_ids[0], '')
-        same = bool(known and (choice.url == known or (_direct_url_key(choice.url) and _direct_url_key(choice.url) == _direct_url_key(known))))
-        if kind != 'web' or not same: return 'conflicting_candidate_url'
-    elif choice.action == 'read_web_page' and choice.url:
-        key = _direct_url_key(choice.url)
-        if key and key in direct_url_attempts: return 'repeated_direct_url'
-        if not (kind == 'web' and can_direct and key and choice.offset == 0 and key not in direct_url_attempts and len(direct_url_attempts) < 2):
-            return 'invalid_direct_url'
-    if choice.action == 'read_web_page' and kind != 'web': return 'invalid_candidate_ids'
-    if choice.action in ('read', 'read_web_page') and (len(set(choice.candidate_ids)) != len(choice.candidate_ids) or any(i not in candidate_ids for i in choice.candidate_ids)):
-        return 'invalid_candidate_ids'
-    return ''
+def _evidence_views(items):
+    fields = ("id", "paper_id", "title", "text", "source_level", "version_id", "page", "original_url", "provider", "retrieved_at", "char_start", "char_end", "published_at", "candidate_id")
+    result = []
+    for item in items:
+        view = {key: item.get(key) for key in fields if item.get(key) is not None}
+        if view.get("text"):
+            view["text"] = str(view["text"])[:1_200]
+        result.append(view)
+    return result
 
-def _web_actionable(s):
-    if not s.get('web_search_blocked'):
-        return True
-    pool = s.get('pools', {}).get('web_research', {})
-    failures = {item.get('candidate_id'): item for item in pool.get('web_read_failures', [])}
-    has_page = any(block.get('next_offset') is not None and not (
-        failures.get(key) and not (failures[key].get('retryable') and failures[key].get('attempts', 0) < 2)
-    ) for key, blocks in pool.get('web_blocks', {}).items() for block in blocks[-1:])
-    pending = len(pool.get('candidate_identities', [])) > len(pool.get('read_ids', [])) or has_page
-    last = next((item for item in reversed(s.get('results', [])) if item.get('route') == 'web_research'), {})
-    return pending or (len(s.get('direct_url_attempts', [])) < 2 and last.get('tool_calls') != 0)
 
-def search(s):
-    research = s['research']
-    query_results = {key: list(items) for key, items in s.get('query_results', {}).items()}
-    warnings = list(s.get('warnings', []))
-    queries = [' '.join(s['queries'])] if research['source'] == 'collection' else s['queries']
-    succeeded, returned_rows = False, 0
-    failures, blocked = s.get('web_failures', 0), s.get('web_search_blocked', '')
-    backend, empties = s.get('web_backend', 'primary'), s.get('web_empty_count', 0)
-    fallback_reason = s.get('fallback_reason', '')
-    for query in queries:
-        if research['source'] == 'web' and blocked: break
-        key = query.strip().casefold()
-        try:
-            if research['source'] == 'web':
-                while True:
-                    try:
-                        args = {'query': query, 'limit': MAX_SEARCH_RESULTS}
-                        if backend == 'alternative': args['backend'] = 'alternative'
-                        results = [item for item in registry.invoke('search_web', args, context=_context(research)) if item.get('url')][:MAX_SEARCH_RESULTS]
-                        failures = 0
-                        empties = empties + 1 if not results and not any(query_results.values()) else 0
-                        if backend == 'alternative' and results:
-                            warnings = [warning for warning in warnings if warning != 'web_search_failed']
-                        if s.get('auto_web') and empties >= 2 and not results:
-                            if backend == 'primary':
-                                backend, empties, fallback_reason = 'alternative', 0, 'empty'
-                                logger.info('web_search_fallback activated reason=%s', fallback_reason)
-                                continue
-                            blocked = 'empty'
-                        break
-                    except WebSearchError as exc:
-                        category = exc.category if exc.category in {'configuration', 'missing_key', 'challenge', 'rate_limit', 'auth', 'http_status', 'timeout', 'network', 'invalid_response', 'provider_error'} else 'provider_error'
-                        failures += 1
-                        hard = category in {'configuration', 'missing_key', 'challenge', 'rate_limit', 'auth'} or (failures >= 2 and (category in {'timeout', 'network', 'invalid_response', 'provider_error'} or category == 'http_status' and (exc.status or 0) >= 500))
-                        if hard and s.get('auto_web') and backend == 'primary':
-                            backend, failures, empties, fallback_reason = 'alternative', 0, 0, category
-                            logger.info('web_search_fallback activated reason=%s', fallback_reason)
-                            continue
-                        if hard:
-                            blocked = category
-                            warnings.append('web_search_blocked:' + category)
-                        warnings.append('web_search_failed')
-                        break
-                if failures: continue
-            else:
-                result = registry.invoke('search_papers', {'query': query}, context=_context(research))
-                warnings.extend(result.get('warnings', []))
-                results = result['results'] if research['source'] == 'collection' else result['results'][:MAX_SEARCH_RESULTS]
-            succeeded = True
-            returned_rows += len(results)
-        except RuntimeError:
-            if research['source'] != 'web': raise
-            warnings.append('web_search_failed')
+def _pool_add(pools, mode, items):
+    pool = list(pools.get(mode, []))
+    indexes = {item.get("candidate_id"): i for i, item in enumerate(pool)}
+    for raw_item in items:
+        if not isinstance(raw_item, dict):
             continue
-        entries = query_results.setdefault(key, [])
-        for position, paper in enumerate(results, 1):
-            rank = paper.get('rank')
-            if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1: rank = position
-            entries.append({'paper': paper, 'rank': rank})
-    candidates = rank_candidates(query_results, research['source'])
-    if research['source'] == 'web' and not succeeded and not query_results and not candidates and not blocked and failures == 0:
-        raise RuntimeError('网页检索失败，无法获取证据，请检查搜索设置或稍后重试。')
-    return {'candidates': candidates, 'papers': candidates[:6], 'query_results': query_results, 'warnings': warnings,
-            'search_status': 'failed' if not succeeded else ('results' if returned_rows else 'empty'), 'web_search_blocked': blocked,
-            'web_failures': failures, 'web_backend': backend, 'web_empty_count': empties, 'fallback_reason': fallback_reason}
+        item = dict(raw_item)
+        item["candidate_id"] = _candidate_key(item, mode)
+        key = item["candidate_id"]
+        if item.get("content"):
+            block = {
+                "content": item["content"],
+                "content_offset": item.get("content_offset"),
+                "next_offset": item.get("next_offset"),
+                "source_level": item.get("source_level"),
+            }
+            blocks = list(item.get("content_blocks", []))
+            if not any(existing.get("content_offset") == block["content_offset"] and existing.get("content") == block["content"] for existing in blocks):
+                blocks.append(block)
+            item["content_blocks"] = blocks
+        if key in indexes:
+            old = dict(pool[indexes[key]])
+            old_blocks = list(old.get("content_blocks", []))
+            for name, value in item.items():
+                if name == "content_blocks":
+                    continue
+                if value is not None and (not old.get(name) or name in {"content", "source_level", "content_offset", "next_offset"}):
+                    old[name] = value
+            merged_blocks = old_blocks
+            for block in item.get("content_blocks", []):
+                if not any(existing.get("content_offset") == block.get("content_offset") and existing.get("content") == block.get("content") for existing in merged_blocks):
+                    merged_blocks.append(block)
+            if merged_blocks:
+                old["content_blocks"] = merged_blocks
+            pool[indexes[key]] = old
+        else:
+            indexes[key] = len(pool)
+            pool.append(item)
+    pools[mode] = pool
+    return pools
 
 
-def _evidence_signature(entry):
-    url = entry.get('original_url') or ''
-    if url:
-        parts = urlsplit(url)
-        url = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ''))
-    return tuple(entry.get(field) for field in ('paper_id', 'version_id', 'page', 'title', 'source_level', 'text')) + (url,)
+def _ranked_candidates(query_results, mode, old_pool):
+    ranked = rank_candidates(query_results.get(mode, {}), mode)
+    ordered = []
+    for item in ranked:
+        candidate = dict(item)
+        identities = _candidate_ids(candidate, "web" if mode == "web" else "paper")
+        previous = next((old for old in old_pool if old.get("candidate_id") == _candidate_key(candidate, mode) or identities & _candidate_ids(old, "web" if mode == "web" else "paper")), None)
+        key = previous.get("candidate_id") if previous else _candidate_key(candidate, mode)
+        if previous:
+            merged = dict(previous)
+            for name, value in candidate.items():
+                if value is not None and (not merged.get(name) or name in {"rank", "retrieval_sources"}):
+                    merged[name] = value
+            candidate = merged
+        candidate["candidate_id"] = key
+        ordered.append(candidate)
+    return ordered
 
 
-# Bound both the number of entries and text sent to a model.
-EVIDENCE_LIMIT = 18
-EVIDENCE_TEXT_LIMIT = 21600
+def _record_search_results(state, mode, query, items):
+    query_results = {
+        key: {query_key: [dict(entry) for entry in entries] for query_key, entries in value.items()}
+        for key, value in state.get("query_results", {}).items()
+        if isinstance(value, dict)
+    }
+    source_results = query_results.setdefault(mode, {})
+    query_key = " ".join(str(query).casefold().split())
+    entries = source_results.setdefault(query_key, [])
+    by_key = {_candidate_key(entry.get("paper", {}), mode): i for i, entry in enumerate(entries)}
+    for position, item in enumerate(items, 1):
+        rank = item.get("rank")
+        if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
+            rank = position
+        key = _candidate_key(item, mode)
+        if key in by_key:
+            index = by_key[key]
+            entries[index]["rank"] = min(entries[index].get("rank", rank), rank)
+            stored = entries[index].get("paper", {})
+            for name, value in item.items():
+                if value is not None and not stored.get(name):
+                    stored[name] = value
+        else:
+            by_key[key] = len(entries)
+            entries.append({"paper": dict(item), "rank": rank})
+    pools = {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}
+    ranked = _ranked_candidates(query_results, mode, pools.get(mode, []))
+    pools[mode] = ranked
+    return pools, query_results
 
 
-def _select_evidence(pool, facets):
-    terms = [relevance_terms(facet) for facet in facets]
-    texts = [(entry.get('title', '') + ' ' + entry.get('text', '')).casefold() for entry in pool]
-    scores = [[relevance_score(facet, text) for text in texts] for facet in terms]
+def _candidate_summaries(state, mode, ids=None, *, limit=MAX_CANDIDATE_CONTEXT):
+    pool = state.get("candidate_pools", {}).get(mode, [])
+    if ids is not None:
+        wanted = set(ids)
+        pool = [item for item in pool if item.get("candidate_id") in wanted]
+    return [_candidate_view(item, mode) for item in pool[:limit]]
+
+
+def _unique_evidence(items):
+    kept = []
+    seen_signatures = set()
+    used_ids = set()
+    for item in items:
+        signature = _evidence_signature(item)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        entry = dict(item)
+        identifier = str(entry.get("id") or "evidence")
+        if identifier in used_ids:
+            key = json.dumps(signature, ensure_ascii=False, default=str, separators=(",", ":"))
+            identifier = "e" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+            suffix = 2
+            while identifier in used_ids:
+                identifier = "e" + hashlib.sha256((key + str(suffix)).encode("utf-8")).hexdigest()[:16]
+                suffix += 1
+        entry["id"] = identifier
+        used_ids.add(identifier)
+        kept.append(entry)
+    return kept
+
+
+def _enrich_evidence(items, candidates, mode):
+    enriched = []
+    for evidence in items:
+        item = dict(evidence)
+        match = next((candidate for candidate in candidates if (
+            item.get("paper_id") is not None and candidate.get("id") == item.get("paper_id")
+        ) or (
+            item.get("title") and candidate.get("title") == item.get("title")
+            and (not item.get("original_url") or item.get("original_url") in {candidate.get("original_url"), candidate.get("url")})
+        )), None)
+        if match and match.get("candidate_id"):
+            item["candidate_id"] = match["candidate_id"]
+        item["research_source"] = mode
+        enriched.append(item)
+    return enriched
+
+
+def _claim_ids(draft):
+    ids = set()
+    for section in draft.get("sections", []):
+        for claim in section.get("paragraphs", []):
+            ids.update(claim.get("citations", []))
+    for claim in draft.get("limitations", []):
+        ids.update(claim.get("citations", []))
+    return ids
+
+
+def _findings_ids(findings):
+    return {item for finding in findings for item in finding.get("citations", [])}
+
+
+def _select_evidence(state, include_ids=None):
+    pool = _unique_evidence(state.get("evidence_pool", []))
+    include_ids = set(include_ids or ())
     selected = []
     size = 0
 
-    def add(index):
+    def add(item):
         nonlocal size
-        length = len(pool[index].get('text', ''))
-        if index not in selected and len(selected) < EVIDENCE_LIMIT and size + length <= EVIDENCE_TEXT_LIMIT:
-            selected.append(index)
-            size += length
+        if item in selected or len(selected) >= MAX_EVIDENCE_CONTEXT:
+            return
+        text = str(item.get("text", ""))
+        if size + len(text) > MAX_EVIDENCE_TEXT:
+            return
+        selected.append(item)
+        size += len(text)
 
-    for facet_scores in scores:
-        for index in sorted(range(len(pool)), key=lambda i: (-facet_scores[i], i)):
-            if not facet_scores[index]:
-                break
-            add(index)
-            if index in selected:
-                break
-    for index in sorted(range(len(pool)), key=lambda i: (-sum(row[i] for row in scores), i)):
-        if sum(row[index] for row in scores) > 0:
-            add(index)
-    return [pool[index] for index in selected]
+    for item in pool:
+        if item.get("id") in include_ids:
+            add(item)
 
-
-
-def _plan_signature(route, goal):
-    return (route, ' '.join(goal.casefold().split()))
-
-
-def _allowed_routes(source):
-    return ['paper_research'] if source in ('local', 'collection') else ['paper_research', 'web_research']
-
-
-def _relevance_queries(question, query, executed):
-    # Reserve space for both actual searches and an original-question excerpt.
-    searches = list(dict.fromkeys(value.strip() for value in reversed(executed) if value.strip()))[:4]
-    parts = [question[i:i+1000].strip() for i in range(0, len(question), 1000)]
-    return list(dict.fromkeys(searches + [part for part in parts if part]))[:8]
-
-
-def evidence(s):
-    query = s.get('evidence_query') or s['research']['query']
-    found = registry.invoke(
-        'collect_evidence', {'query': query, 'papers': s['papers'], 'relevance_queries': _relevance_queries(s['research']['query'], query, s.get('executed_queries', []))}, context=_context(s['research'])
+    facets = [state["research"]["query"]]
+    for round_item in state.get("rounds", []):
+        facets.extend(round_item.get("plan", []))
+        review = round_item.get("review", {})
+        facets.extend(review.get("gaps", []))
+    terms = [relevance_terms(value) for value in facets if value]
+    ranked = sorted(
+        enumerate(pool),
+        key=lambda pair: (
+            -sum(relevance_score(facet, (pair[1].get("title", "") + " " + pair[1].get("text", "")).casefold()) for facet in terms),
+            pair[0],
+        ),
     )
-    pool = list(s.get('evidence_pool', []))
-    signatures = {_evidence_signature(item) for item in pool}
-    ids = {item['id'] for item in pool}
-    new_evidence = False
-    for item in found:
-        signature = _evidence_signature(item)
-        if signature in signatures:
-            continue
-        entry = dict(item)
-        base = entry['id']
-        suffix = 2
-        while entry['id'] in ids:
-            entry['id'] = f'{base}_{suffix}'
-            suffix += 1
-        ids.add(entry['id'])
-        signatures.add(signature)
-        pool.append(entry)
-        new_evidence = True
-    facets = list(s.get('evidence_facets', [s['research']['query']]))
-    if query.strip() and query.strip().casefold() not in {q.strip().casefold() for q in facets}:
-        facets.append(query)
-    facets = list(dict.fromkeys(facets + s.get('executed_queries', [])))
-    excluded = set(s.get('excluded_evidence_ids', []))
-    return {'evidence': _select_evidence([item for item in pool if item['id'] not in excluded], facets), 'evidence_pool': pool,
-            'evidence_facets': facets, 'new_evidence': new_evidence}
+    for _, item in ranked:
+        add(item)
+    return selected
 
 
-def verify(s):
-    checked = _report_verify(s, model=_model)
-    return {**checked, **_report_render({**s, **checked})}
+def _safe_error(node, code, message):
+    return {"node": node, "code": code, "message": message[:300]}
 
 
-class Route(BaseModel):
-    action: Literal['direct', 'paper_research', 'web_research', 'review', 'report', 'partial']
-    task: str = Field(default='', max_length=1000)
-    answer: str = Field(default='', max_length=12000)
-    directions: list[str] = Field(default_factory=list, max_length=5)
-
-    @model_validator(mode='after')
-    def validate_action(self):
-        if self.action in ('paper_research', 'web_research') and (not self.directions or any(not d.strip() or len(d) > 500 for d in self.directions)):
-            raise ValueError('研究方向不能为空')
-        if self.action in ('paper_research', 'web_research') and not self.task.strip():
-            raise ValueError('委派任务不能为空')
-        if self.action == 'direct' and not self.answer.strip():
-            raise ValueError('直接回答不能为空')
-        return self
+def _tool_error(name, exc):
+    if isinstance(exc, ToolCallValidationError):
+        return _safe_error("researcher", exc.code, "工具参数不符合当前来源范围或结构要求。")
+    category = getattr(exc, "category", "")
+    if category:
+        return _safe_error("researcher", "search_" + str(category)[:40], "搜索服务返回失败，可改写查询或尝试其他允许来源。")
+    if name == "read_web_page":
+        return _safe_error("researcher", "web_page_read_failed", "网页正文读取失败，可继续尝试其他候选。")
+    if name in {"search_web", "search_papers"}:
+        return _safe_error("researcher", name + "_failed", "搜索失败，可改写查询后继续尝试。")
+    return _safe_error("researcher", "tool_failed", "工具调用失败，可根据允许工具继续研究。")
 
 
-class Specialist(BaseModel):
-    action: Literal['search', 'read', 'read_web_page', 'finish']
-    query: str = Field(default='', max_length=1000)
-    candidate_ids: list[str] = Field(default_factory=list, max_length=6)
-    plan: list[str] = Field(min_length=1, max_length=6)
-    url: str = Field(default='', max_length=2000)
-    offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=1000, ge=1, le=4000)
-
-    @field_validator('plan', mode='before')
-    @classmethod
-    def validate_plan(cls, value):
-        if not isinstance(value, list) or not value or len(value) > 6 or any(not isinstance(item, str) or not item.strip() or len(item) > 500 for item in value):
-            raise PydanticCustomError('specialist_plan_invalid', '研究计划不能为空')
-        return value
-
-    @model_validator(mode='after')
-    def validate_action(self):
-        if self.action == 'search' and not self.query.strip():
-            raise PydanticCustomError('specialist_search_query_required', '搜索查询不能为空')
-        if self.action == 'read_web_page' and not self.candidate_ids and self.url and not self.query.strip():
-            raise PydanticCustomError('specialist_direct_query_required', '直读网址需提供主题词')
-        if self.action == 'read_web_page' and not (len(self.candidate_ids) == 1 or (not self.candidate_ids and self.url and self.query.strip())):
-            raise PydanticCustomError('specialist_web_target_required', '读取网页须指定一个候选或网址')
-        if self.action == 'read' and not self.candidate_ids:
-            raise PydanticCustomError('specialist_read_candidates_required', '精读候选不能为空')
-        return self
+def _find_candidates(pool, ids):
+    by_id = {item.get("candidate_id"): item for item in pool}
+    if not isinstance(ids, list) or not ids or any(item not in by_id for item in ids):
+        raise ToolCallValidationError("工具参数无效", "unknown_candidate")
+    if len(set(ids)) != len(ids):
+        raise ToolCallValidationError("工具参数无效", "duplicate_candidate")
+    return [by_id[item] for item in ids]
 
 
-class NextStep(BaseModel):
-    direction: str = Field(min_length=1, max_length=500)
-    goal: str = Field(min_length=1, max_length=1000)
-    route: Literal['paper_research', 'web_research']
+def _helper_catalog(research, mode):
+    """Expose the candidate-ID helper while keeping the registry's real schemas visible."""
+    catalog = [dict(item) for item in _catalog_for_mode(research, mode)]
+    for item in catalog:
+        if item["name"] == "collect_evidence":
+            item["description"] += " 研究节点用 candidate_ids 引用本次检索池中已存在的候选；运行器会映射为原始候选对象，不能自行编造论文或网页正文。"
+            item["input_schema"] = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "query": {"type": "string", "minLength": 1},
+                    "candidate_ids": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string"}},
+                    "relevance_queries": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 1000}},
+                },
+                "required": ["query", "candidate_ids"],
+            }
+        elif item["name"] == "read_web_page":
+            item["description"] += " URL 必须来自当前网页候选池，运行器会拒绝模型自行构造的地址。"
+            item["input_schema"] = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "url": {"type": "string", "maxLength": 4096},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 4000},
+                },
+                "anyOf": [{"required": ["candidate_id"]}, {"required": ["url"]}],
+            }
+    return catalog
 
 
-class SubtaskFinding(BaseModel):
-    text: str = Field(min_length=1, max_length=400)
-    citations: list[str] = Field(min_length=1, max_length=6)
-
-
-class Review(BaseModel):
-    sufficient: bool
-    gaps: list[str] = Field(default_factory=list, max_length=10)
-    summary: str = Field(max_length=2000)
-    coverage: list[str] = Field(default_factory=list, max_length=10)
-    next_steps: list[NextStep] = Field(default_factory=list, max_length=6)
-    irrelevant_evidence_ids: list[str] = Field(default_factory=list, max_length=18)
-    subtask_findings: list[SubtaskFinding] = Field(default_factory=list, max_length=3)
-    subtask_gap: str = Field(default='', max_length=400)
-
-    @field_validator('subtask_findings', mode='before')
-    @classmethod
-    def clean_findings(cls, value):
-        if not isinstance(value, list): return []
-        valid = []
-        for item in value:
-            try:
-                finding = SubtaskFinding.model_validate(item)
-                if finding.text.strip() and all(c.strip() for c in finding.citations): valid.append(finding)
-            except (ValidationError, TypeError, ValueError):
-                continue
-            if len(valid) == 3: break
-        return valid
-
-    @model_validator(mode='after')
-    def validate_gaps(self):
-        if any(len(gap) > 1000 for gap in self.gaps) or any(not item.strip() or len(item) > 500 for item in self.coverage):
-            raise ValueError('审查缺口过长')
-        return self
-
-
-def _summary_evidence(s):
-    return [{**{key: e.get(key) for key in ('id', 'title', 'source_level', 'paper_id', 'version_id', 'page', 'original_url', 'provider', 'retrieved_at', 'char_start', 'char_end')}, 'text': e.get('text', '')[:600]} for e in s.get('evidence', [])]
-
-
-def _candidate_views(s):
-    # IDs are assigned once, independently of changing RRF order.
-    identities = [{'id': item['id'], 'keys': set(item['keys']), 'title': item['title']} for item in s.get('candidate_identities', [])]
-    views = []
-    for paper in s.get('candidates', []):
-        keys = _candidate_ids(paper, s['research']['source'])
-        title = (paper.get('title') or '').strip().casefold()
-        match = next((item for item in identities if keys & item['keys'] or (not keys and not item['keys'] and title and title == item['title'])), None)
-        if match is None:
-            match = {'id': f'C{len(identities) + 1}', 'keys': set(), 'title': title}
-            identities.append(match)
-        match['keys'].update(keys)
-        views.append((match['id'], paper))
-    return views, identities
-
-
-class ResearchToolFailure(RuntimeError):
-    pass
-
-
-def _research_graph(kind, on_stage):
-    def decide(s):
-        views, identities = _candidate_views(s)
-        allowed = {'search_web' if kind == 'web' else 'search_papers', 'collect_evidence'}
-        if kind == 'web':
-            allowed.add('read_web_page')
-            if s.get('web_search_blocked'): allowed.discard('search_web')
-        tools = [tool for tool in registry.list_tools(_context(s['research'])) if tool['name'] in allowed]
-        can_direct = _can_read_direct(kind, s, len(views))
-        direct_reason = ('blocked' if s.get('web_search_blocked') else 'search_unavailable' if can_direct else '')
-        payload = {
-            'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason, 'task': s['task'], 'verification_gaps': s.get('verification_gaps', []), 'directions': s.get('directions', []), 'plan': s.get('plan', []), 'review': s['review_result'].model_dump() if s.get('review_result') else None, 'results': s.get('results', []), 'role': kind, 'source': s['research']['source'], 'tools': tools,
-            'candidates': [{'id': key, 'title': p.get('title', ''), 'summary': (p.get('abstract') or p.get('content') or '')[:500], 'doi': p.get('doi'), 'url': p.get('url'), 'collected': key in s.get('read_ids', []), 'next_offset': (s.get('web_blocks', {}).get(key) or [{}])[-1].get('next_offset')} for key, p in views[:20]],
-            'candidate_count': len(views), 'recent_result': s.get('recent_result', ''), 'search_status': s.get('search_status', 'not_searched'),
-            'web_blocks': [{'candidate_id': key, **{k: block.get(k) for k in ('offset', 'next_offset', 'markdown')}} for key, blocks in s.get('web_blocks', {}).items() for block in blocks[-1:]][-6:],
-            'web_read_failures': s.get('web_read_failures', []),
-            'evidence': _summary_evidence(s), 'calls_remaining': MAX_TOOL_CALLS - s.get('tool_calls', 0), 'search_blocked': s.get('web_search_blocked', ''), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'prior_subtask_notes': s.get('subtask_notes', [])[-10:], 'direct_url_attempts_remaining': 2-len(s.get('direct_url_attempts', [])), 'attempted_direct_urls': s.get('direct_url_attempts', []),
+def _invoke_tool(state, mode, tool_name, arguments):
+    research = state["research"]
+    context = _tool_context(research, mode)
+    args = dict(arguments)
+    if tool_name == "collect_evidence":
+        pool = state.get("candidate_pools", {}).get(mode, [])
+        chosen = _find_candidates(pool, args.pop("candidate_ids", []))
+        papers = []
+        blocks_to_mark = []
+        processed = set(state.get("collected_web_blocks", []))
+        per_candidate = []
+        for item in chosen:
+            blocks = item.get("content_blocks") or []
+            if mode == "web" and blocks:
+                pending = []
+                for block in sorted(blocks, key=lambda value: value.get("content_offset") if value.get("content_offset") is not None else -1, reverse=True):
+                    marker = _web_block_key(item["candidate_id"], block)
+                    if marker not in processed:
+                        pending.append((item, block, marker))
+                per_candidate.append(pending)
+            else:
+                papers.append({key: value for key, value in item.items() if key != "candidate_id"})
+        if mode == "web":
+            # First take the newest unprocessed block for each candidate, then
+            # fill the six-entry tool limit in round-robin order.
+            selected_blocks = []
+            for pending in per_candidate:
+                if pending and len(selected_blocks) < 6:
+                    selected_blocks.append(pending[0])
+            offset = 1
+            while len(selected_blocks) < 6 and any(len(pending) > offset for pending in per_candidate):
+                for pending in per_candidate:
+                    if len(pending) > offset and len(selected_blocks) < 6:
+                        selected_blocks.append(pending[offset])
+                offset += 1
+            for item, block, marker in selected_blocks:
+                candidate = {key: value for key, value in item.items() if key not in {"candidate_id", "content_blocks"}}
+                candidate.update(block)
+                papers.append(candidate)
+                blocks_to_mark.append(marker)
+        args["papers"] = papers[:6]
+        result = registry.invoke(tool_name, args, context=context)
+        enriched = _enrich_evidence(result, chosen, mode)
+        evidence_pool = _unique_evidence(state.get("evidence_pool", []) + enriched)
+        id_by_signature = {_evidence_signature(item): item["id"] for item in evidence_pool}
+        normalized = [{**item, "id": id_by_signature[_evidence_signature(item)]} for item in enriched]
+        tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "count": len(normalized), "evidence_ids": [item["id"] for item in normalized]}]
+        return {"evidence_pool": evidence_pool, "evidence": evidence_pool, "tool_results": tool_results, "collected_web_blocks": list(processed | set(blocks_to_mark))}, normalized
+    if tool_name == "read_web_page":
+        pool = state.get("candidate_pools", {}).get("web", [])
+        candidate_id = args.pop("candidate_id", "")
+        if candidate_id:
+            match = _find_candidates(pool, [candidate_id])[0]
+            args["url"] = match.get("url") or match.get("original_url")
+        allowed_urls = {item.get("url") or item.get("original_url") for item in pool}
+        if not args.get("url") or args["url"] not in allowed_urls:
+            raise ToolCallValidationError("工具参数无效", "unknown_candidate_url")
+        result = registry.invoke(tool_name, args, context=context)
+        original = next((item for item in pool if (item.get("url") or item.get("original_url")) == args["url"]), {})
+        content = result.get("markdown", "")
+        page_item = {
+            **original,
+            "title": result.get("title") or original.get("title") or args["url"],
+            "url": original.get("url") or args["url"],
+            "original_url": original.get("original_url") or args["url"],
+            "content": content,
+            "content_offset": result.get("offset", args.get("offset", 0)),
+            "next_offset": result.get("next_offset"),
+            "source_level": "web_content",
+            "provider": original.get("provider") or "web_reader",
+            "retrieved_at": result.get("retrieved_at") or original.get("retrieved_at") or "",
         }
-        if s.get('tool_feedback'): payload['validation_feedback'] = s['tool_feedback']
-        valid_ids = {key for key, _ in views}
-        for attempt in range(2):
-            try:
-                choice = _model(s, 'literature/research', payload, Specialist)
-            except StructuredOutputError:
-                return {'choice': Specialist(action='finish', plan=['结束']), 'recent_result': '研究决策格式无效，已结束本轮'}
-            except ModelServiceError:
-                if not (s.get('evidence') or s.get('evidence_pool')): raise
-                return {'choice': Specialist(action='finish', plan=['结束']), 'recent_result': '模型服务不可用，已结束本轮', 'review_failed': True}
-            logger.info('prompt_id=literature/research action=%s tool_calls=%d attempt=%d', choice.action, s.get('tool_calls', 0), attempt + 1)
-            code = specialist_semantic_error(choice, kind=kind, blocked=bool(s.get('web_search_blocked')),
-                can_direct=can_direct, candidate_ids=valid_ids, direct_url_attempts=s.get('direct_url_attempts', []), candidate_urls={key: item.get('url', '') for key, item in views})
-            if not code and choice.action == 'read_web_page' and choice.candidate_ids:
-                failed_pages = [item for item in s.get('web_read_failures', []) if item.get('candidate_id') == choice.candidate_ids[0]]
-                retry = next((item for item in failed_pages if item.get('offset') == choice.offset), None)
-                if failed_pages and not (retry and retry.get('retryable') and retry.get('attempts', 0) < 2):
-                    code = 'repeated_web_page_failure'
-                    failure = retry or failed_pages[-1]
-                    logger.info('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=repeated_failure_rejected category=%s reason=%s status=%s',
-                                _run_id(), choice.candidate_ids[0], choice.offset, choice.limit,
-                                failure.get('category', 'reader_error'), failure.get('reason', 'reader_error'),
-                                failure.get('status') if failure.get('status') is not None else '-')
-            if not code:
-                if choice.action == 'read_web_page' and choice.candidate_ids and choice.url:
-                    choice = choice.model_copy(update={'url': '', 'query': ''})
-                break
-            if choice.action == 'read_web_page' and code != 'repeated_web_page_failure':
-                rejected_id = (choice.candidate_ids[0] if choice.candidate_ids and choice.candidate_ids[0] in valid_ids
-                               else 'direct' if not choice.candidate_ids else 'unknown')
-                reason = 'previously_attempted' if code == 'repeated_direct_url' else 'validation_rejected'
-                logger.info('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=rejected category=%s reason=%s status=-',
-                            _run_id(), rejected_id, choice.offset, choice.limit, code, reason)
-            if code != 'repeated_web_page_failure':
-                diagnostic_id = record_failure(kind='semantic_candidates', payload=payload, schema=Specialist.model_json_schema(),
-                    response=choice.model_dump(), errors=[code],
-                    context={'candidate_ids': sorted(valid_ids), 'prompt_id': 'literature/research', 'attempt': attempt + 1, 'role': kind, 'search_blocked': bool(s.get('web_search_blocked')), 'can_read_direct_url': can_direct, 'direct_url_attempts': s.get('direct_url_attempts', [])})
-                logger.warning('prompt_id=literature/research diagnostic_id=%s', diagnostic_id)
-            if attempt:
-                reason = '网页正文读取已失败且不应重复请求，已结束本轮' if code == 'repeated_web_page_failure' else '工具选择无效，已结束本轮'
-                return {'choice': Specialist(action='finish', plan=choice.plan), 'candidate_identities': identities, 'plan': choice.plan, 'recent_result': reason}
-            instruction = ('该网址已尝试，请选择其他可信网址或结束' if code == 'repeated_direct_url' else
-                           '候选分页只传 candidate_ids，省略 url 和 query' if code == 'conflicting_candidate_url' else
-                           '该候选正文读取已失败；使用其搜索摘要、其他候选，或对该候选执行证据提取' if code == 'repeated_web_page_failure' else '')
-            payload = {**payload, 'validation_feedback': {'code': code, 'allowed_ids': [key for key, _ in views[:20]], 'instruction': instruction, 'can_read_direct_url': can_direct, 'direct_url_reason': direct_reason}}
-        return {'choice': choice, 'candidate_identities': identities, 'plan': choice.plan}
+        pools = dict(state.get("candidate_pools", {}))
+        _pool_add(pools, "web", [page_item])
+        tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "candidate_id": page_item["candidate_id"], "offset": page_item["content_offset"], "next_offset": page_item["next_offset"], "content": content[:MAX_CANDIDATE_TEXT]}]
+        return {"candidate_pools": pools, "tool_results": tool_results}, {"candidate_id": page_item["candidate_id"], "content": content[:MAX_CANDIDATE_TEXT], "offset": page_item["content_offset"], "next_offset": page_item["next_offset"], "truncated": result.get("truncated", False)}
+    if tool_name == "search_papers":
+        result = registry.invoke(tool_name, args, context=context)
+        items = result.get("results", [])
+        pools, query_results = _record_search_results(state, mode, args.get("query", ""), items)
+        warnings = list(state.get("warnings", []))
+        if result.get("warnings") and "paper_search_incomplete" not in warnings:
+            warnings.append("paper_search_incomplete")
+        tool_warnings = ["paper_search_incomplete"] if result.get("warnings") else []
+        tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "query": args.get("query", ""), "candidate_count": len(items), "warnings": tool_warnings}]
+        return {"candidate_pools": pools, "query_results": query_results, "tool_results": tool_results, "warnings": warnings}, {"candidate_count": len(items), "warnings": tool_warnings}
+    if tool_name == "search_web":
+        result = registry.invoke(tool_name, args, context=context)
+        pools, query_results = _record_search_results(state, "web", args.get("query", ""), result)
+        tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "query": args.get("query", ""), "candidate_count": len(result)}]
+        return {"candidate_pools": pools, "query_results": query_results, "tool_results": tool_results}, {"candidate_count": len(result)}
+    result = registry.invoke(tool_name, args, context=context)
+    return {"tool_results": list(state.get("tool_results", [])) + [{"tool": tool_name, "result": str(result)[:MAX_CANDIDATE_TEXT]}]}, result
 
-    def invoke_core(s):
-        choice = s['choice']
-        if choice.action == 'search':
-            if on_stage: on_stage('searching_web' if kind == 'web' else 'searching')
-            try:
-                update = search({**s, 'queries': [choice.query]})
-            except RuntimeError as exc:
-                raise ResearchToolFailure() from exc
-            update['executed_queries'] = list(dict.fromkeys(s.get('executed_queries', []) + ([choice.query] if update['search_status'] != 'failed' else [])))[-7:]
-            status = update['search_status']
-            result = ('本次网页检索失败；保留此前结果' if status == 'failed' else
-                      '本次检索成功但没有返回结果；仍可使用此前候选' if status == 'empty' else f"检索到 {len(update['candidates'])} 个累计候选")
-        elif choice.action == 'read_web_page':
-            if on_stage: on_stage('searching_web')
-            mapping = dict(_candidate_views(s)[0])
-            candidate = mapping[choice.candidate_ids[0]] if choice.candidate_ids else {'url': choice.url, 'title': choice.url}
-            attempts = list(s.get('direct_url_attempts', []))
-            if choice.url: attempts.append(_direct_url_key(choice.url))
-            blocks = {key: list(value) for key, value in s.get('web_blocks', {}).items()}
-            failures = [dict(item) for item in s.get('web_read_failures', [])]
-            candidate_id = choice.candidate_ids[0] if choice.candidate_ids else ''
-            log_candidate_id = candidate_id or 'direct'
-            prior_failure = next((item for item in failures if item.get('candidate_id') == candidate_id and item.get('offset') == choice.offset), None) if candidate_id else None
-            try:
-                block = registry.invoke('read_web_page', {'url': candidate['url'], 'offset': choice.offset, 'limit': choice.limit}, context=_context(s['research']))
-                if candidate_id:
-                    failures = [item for item in failures if item.get('candidate_id') != candidate_id]
-                markdown = block.get('markdown', '')
-                chars = len(markdown) if isinstance(markdown, str) else 0
-                if isinstance(markdown, str) and markdown.strip():
-                    if choice.url:
-                        direct_candidate = {'url': block['url'], 'title': block['title'] or choice.url, 'content': '', 'source_level': 'web_content', 'provider': 'web_page', 'retrieved_at': block['retrieved_at']}
-                        candidates = list(s.get('candidates', []))
-                        matching = next((i for i, item in enumerate(candidates) if _candidate_ids(item, 'web') & _candidate_ids(direct_candidate, 'web')), None)
-                        if matching is None:
-                            candidates.append(direct_candidate)
-                            matching = len(candidates) - 1
-                        views, identities = _candidate_views({**s, 'candidates': candidates})
-                        candidate_id = views[matching][0]
-                    else:
-                        candidates, identities, candidate_id = s.get('candidates', []), s.get('candidate_identities', []), choice.candidate_ids[0]
-                    entries = blocks.setdefault(candidate_id, [])
-                    entries[:] = [item for item in entries if item['offset'] != block['offset']]
-                    entries.append(block)
-                    result = '网页正文块已读取'
-                    outcome = 'success'
-                else:
-                    result = '网页正文为空或已到末尾'
-                    outcome = 'empty'
-                logger.info('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=%s chars=%d next_offset=%s',
-                            _run_id(), log_candidate_id, choice.offset, choice.limit, outcome, chars,
-                            block.get('next_offset') if block.get('next_offset') is not None else '-')
-                update = {'web_blocks': blocks, 'web_read_failures': failures, 'direct_url_attempts': attempts}
-                if isinstance(markdown, str) and markdown.strip() and choice.url:
-                    update.update(candidates=candidates, candidate_identities=identities, executed_queries=list(dict.fromkeys(s.get('executed_queries', []) + [choice.query]))[-7:])
-            except RuntimeError as exc:
-                category = exc.category if isinstance(exc, WebPageError) else 'reader_error'
-                reason = exc.reason if isinstance(exc, WebPageError) else category
-                status = getattr(exc, 'status', None) if isinstance(exc, WebPageError) else None
-                if isinstance(status, bool) or not isinstance(status, int): status = None
-                retryable = category in {'connect_error', 'timeout'} or category == 'http_status' and isinstance(status, int) and status >= 500
-                attempts_used = (prior_failure.get('attempts', 0) if prior_failure else 0) + 1
-                failure = {'candidate_id': candidate_id, 'offset': choice.offset, 'category': category, 'reason': reason, 'status': status,
-                           'attempts': attempts_used, 'retryable': retryable and attempts_used < 2}
-                if candidate_id:
-                    failures = [item for item in failures if item.get('candidate_id') != candidate_id]
-                    failures.append(failure)
-                update = {'web_blocks': blocks, 'web_read_failures': failures,
-                          'warnings': s.get('warnings', []) + ['web_page_read_failed'], 'direct_url_attempts': attempts}
-                position = f'候选 {candidate_id} 的 offset={choice.offset}' if candidate_id else f'直读网页的 offset={choice.offset}'
-                if status is not None: category = f'{category} (HTTP {status})'
-                retry_hint = '可在当前工具预算内重试一次' if failure['retryable'] else '不应再次请求该页'
-                result = f'网页正文读取失败，位置：{position}；原因：{category}；安全原因：{reason}；{retry_hint}。可使用候选摘要或其他候选'
-                logger.warning('research_web_page run_id=%s candidate_id=%s offset=%d limit=%d outcome=failed category=%s reason=%s status=%s',
-                               _run_id(), log_candidate_id, choice.offset, choice.limit, failure['category'], reason,
-                               status if status is not None else '-')
-        else:
-            if on_stage: on_stage('evidence')
-            mapping = dict(_candidate_views(s)[0])
-            if len(set(choice.candidate_ids)) != len(choice.candidate_ids) or any(i not in mapping for i in choice.candidate_ids):
-                raise ToolCallValidationError('工具参数无效', 'invalid_arguments', [{'type': 'value_error', 'path': ['candidate_ids']}])
-            papers = []
-            extras = []
-            for candidate_id in choice.candidate_ids:
-                candidate = mapping[candidate_id]
-                blocks = s.get('web_blocks', {}).get(candidate_id, []) if kind == 'web' else []
-                converted = [{'url': block['url'], 'title': block['title'] or candidate.get('title', ''),
-                              'content': block['markdown'], 'source_level': 'web_content', 'provider': 'web_page',
-                              'retrieved_at': block['retrieved_at'], 'content_offset': block['offset']}
-                             for block in reversed(blocks) if block.get('markdown', '').strip()]
-                papers.append(converted[0] if converted else candidate)
-                extras.extend(converted[1:])
-            papers.extend(extras[:6-len(papers)])
-            update = evidence({**s, 'papers': papers, 'evidence_query': s['task']})
-            update['read_ids'] = list(set(s.get('read_ids', [])) | set(choice.candidate_ids))
-            result = f"本次新增证据：{update['new_evidence']}"
-        return {**update, 'tool_calls': s.get('tool_calls', 0) + 1, 'recent_result': result}
 
-    def invoke(s):
+def _background_investigator(state, on_stage):
+    _emit(on_stage, "background_investigator")
+    if state.get("background"):
+        return {}
+    research = state["research"]
+    preferred = _preferred_mode(research["source"])
+    allowed_modes = _source_modes(research["source"])
+    query_tools = _search_catalog(research, _source_modes(research["source"]) if research["source"] == "auto" else [preferred])
+    try:
+        query_plan = _model(
+            state,
+            "literature/background_investigator",
+            _payload(state, phase="query", available_sources=allowed_modes),
+            BackgroundOutput,
+            node_role="background_investigator",
+            search_mode="none" if research["source"] == "auto" else preferred,
+            available_tools=query_tools,
+        )
+        mode = query_plan.source if research["source"] == "auto" and query_plan.source in allowed_modes else preferred
+        queries = [value.strip() for value in query_plan.queries if value.strip()][:MAX_BACKGROUND_SEARCHES]
+    except (ModelServiceError, StructuredOutputError):
+        mode = preferred
+        queries = []
+        state = {**state, "errors": list(state.get("errors", [])) + [_safe_error("background_investigator", "model_failed", "背景检索规划不可用，改用原问题进行有限检索。")]
+        }
+    if not queries:
+        queries = [research["query"][:1_000]]
+    pools = {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}
+    query_results = state.get("query_results", {})
+    errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    context = _tool_context(research, mode)
+    for query in queries[:MAX_BACKGROUND_SEARCHES]:
+        tool_name = "search_web" if mode == "web" else "search_papers"
         try:
-            return {**invoke_core(s), 'tool_feedback': {}, 'tool_validation_failures': 0}
-        except ToolCallValidationError as exc:
-            diagnostic_id = record_failure(kind='tool_validation', payload={}, schema={}, errors={'code': exc.code, 'errors': exc.errors}, context={'prompt_id': 'literature/research', 'role': kind, 'action': s['choice'].action})
-            logger.warning('tool_validation role=%s action=%s code=%s errors=%s diagnostic_id=%s', kind, s['choice'].action, exc.code, json.dumps(exc.errors, ensure_ascii=False), diagnostic_id)
-            failures = s.get('tool_validation_failures', 0) + 1
-            return {'tool_calls': s.get('tool_calls', 0) + 1, 'tool_validation_failures': failures,
-                    'tool_feedback': {'code': exc.code, 'errors': exc.errors},
-                    'recent_result': '工具参数无效，已结束本轮' if failures >= 2 else '工具参数无效，请修正'}
+            if mode == "web":
+                results = registry.invoke(tool_name, {"query": query, "limit": 5}, context=context)
+            else:
+                result = registry.invoke(tool_name, {"query": query}, context=context)
+                results = result.get("results", [])
+                if result.get("warnings"):
+                    warnings.append("paper_search_incomplete")
+            search_state = {"candidate_pools": pools, "query_results": query_results}
+            pools, query_results = _record_search_results(search_state, mode, query, results)
+        except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
+            errors.append(_tool_error(tool_name, exc))
+    query_state = {**state, "candidate_pools": pools, "query_results": query_results, "errors": errors, "warnings": warnings}
+    background_decision = {"source": mode, "queries": queries[:MAX_BACKGROUND_SEARCHES]}
+    candidates = _candidate_summaries(query_state, mode)
+    try:
+        selected = _model(
+            query_state,
+            "literature/background_investigator",
+            _payload(query_state, phase="select", search_mode=mode, queries=background_decision["queries"], candidates=candidates),
+            BackgroundOutput,
+            node_role="background_investigator",
+            search_mode=mode,
+            available_tools=[],
+        )
+        valid_ids = {item["candidate_id"] for item in query_state.get("candidate_pools", {}).get(mode, [])}
+        selected_ids = [item for item in selected.selected_candidate_ids if item in valid_ids]
+        selected_items = _candidate_summaries(query_state, mode, selected_ids)
+        background = {
+            "source": mode,
+            "queries": background_decision["queries"],
+            "selected_candidates": selected_items,
+            "summary": selected.summary,
+            "gaps": selected.gaps,
+        }
+    except (ModelServiceError, StructuredOutputError):
+        valid_items = candidates[:5]
+        background = {
+            "source": mode,
+            "queries": background_decision["queries"],
+            "selected_candidates": valid_items,
+            "summary": "；".join((item.get("title", "未命名来源") + "：" + (item.get("abstract") or item.get("content") or "无摘要"))[:500] for item in valid_items),
+            "gaps": ["背景筛选模型不可用，候选仅按检索顺序保留。"],
+        }
+        query_state["errors"] = list(query_state.get("errors", [])) + [_safe_error("background_investigator", "selection_failed", "背景候选筛选模型不可用，保留实际检索候选。")]
+    return {
+        "candidate_pools": query_state.get("candidate_pools", {"paper": [], "web": []}),
+        "query_results": query_state.get("query_results", {}),
+        "background_decision": background_decision,
+        "background": background,
+        "errors": query_state.get("errors", []),
+        "warnings": query_state.get("warnings", []),
+    }
 
+
+def _fallback_plan(state):
+    background = state.get("background", {})
+    mode = background.get("source") or _preferred_mode(state["research"]["source"])
+    return {
+        "requirements": [state["research"]["query"][:500]],
+        "plan": ["围绕原问题和已有背景检索可核验资料"],
+        "source": mode,
+        "action": "research",
+        "rationale": "使用保守默认计划继续研究。",
+    }
+
+
+def _planner(state, on_stage):
+    _emit(on_stage, "planner")
+    rounds = state.get("rounds", [])
+    allowed = _source_modes(state["research"]["source"])
+    if len(rounds) >= MAX_ROUNDS:
+        data = dict(state.get("plan") or _fallback_plan(state))
+        data["action"] = "report"
+        return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
+    prompt_id = "literature/planner"
+    payload = _payload(
+        state,
+        round_count=len(rounds),
+        background=state.get("background", {}),
+        current_plan=state.get("current_plan", []),
+        current_draft=state.get("current_draft", {}),
+        current_review=state.get("current_review", {}),
+        allowed_sources=allowed,
+        source_preference=state.get("background", {}).get("source", _preferred_mode(state["research"]["source"])),
+    )
+    try:
+        result = _model(
+            state,
+            prompt_id,
+            payload,
+            PlannerOutput,
+            node_role="planner",
+            search_mode="none",
+            available_tools=[],
+        )
+        data = result.model_dump()
+        if data["source"] not in allowed:
+            data["source"] = state.get("current_source") or state.get("background", {}).get("source") or allowed[0]
+        if not data["requirements"]:
+            data["requirements"] = [state["research"]["query"][:500]]
+        if not data["plan"]:
+            data["plan"] = ["围绕原问题补充可核验证据"]
+        if not rounds:
+            if state["research"]["source"] != "auto":
+                data["source"] = _preferred_mode(state["research"]["source"])
+            data["action"] = "research"
+        return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
+    except (ModelServiceError, StructuredOutputError):
+        data = _fallback_plan(state)
+        if rounds and len(rounds) >= MAX_ROUNDS:
+            data["action"] = "report"
+        return {
+            "plan": data,
+            "current_plan": data["plan"],
+            "current_source": data["source"],
+            "last_completed": "planner",
+            "errors": list(state.get("errors", [])) + [_safe_error("planner", "model_failed", "规划模型不可用，按当前来源继续有限研究。")],
+        }
+
+
+def _supervisor(state, on_stage):
+    _emit(on_stage, "supervisor")
+    completed = state.get("last_completed", "planner")
+    rounds = state.get("rounds", [])
+    plan = state.get("plan") or _fallback_plan(state)
+    if completed == "researcher":
+        target = "analyst"
+    elif completed == "analyst":
+        target = "coder"
+    elif completed == "coder":
+        target = "planner"
+    elif completed == "planner":
+        target = "researcher"
+    else:
+        target = "researcher"
+    update = {"next_node": target}
+    if target == "researcher":
+        next_round = len(rounds) + 1
+        if state.get("prepared_round", 0) != next_round:
+            mode = plan.get("source")
+            allowed = _source_modes(state["research"]["source"])
+            if mode not in allowed:
+                mode = state.get("background", {}).get("source", allowed[0])
+            update.update({
+                "current_source": mode,
+                "current_plan": plan.get("plan", []),
+                "current_round": next_round,
+                "current_draft": {},
+                "current_review": {},
+                "current_findings": [],
+                "tool_results": [],
+                "prepared_round": next_round,
+            })
+    return update
+
+
+def _retry_query(state, attempted):
+    question = state["research"]["query"].strip()
+    normalized_attempts = {" ".join(value.casefold().split()) for value in attempted}
+    choices = [
+        " ".join(state.get("current_plan", [])),
+        " ".join((state.get("plan") or {}).get("requirements", [])),
+        question,
+    ]
+    for item in choices:
+        value = re.sub(r"\s+", " ", item).strip()[:900]
+        if value and " ".join(value.casefold().split()) not in normalized_attempts:
+            return value
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9._/-]*|[\u3400-\u9fff]{2,}", question)
+    if len(tokens) > 3:
+        shortened = " ".join(tokens[::2])[:900]
+        if " ".join(shortened.casefold().split()) not in normalized_attempts:
+            return shortened
+    if re.search(r"[\u3400-\u9fff]", question):
+        qualifiers = ("相关研究", "公开资料", "官方来源") if state.get("current_source") == "web" else ("相关论文", "研究结果", "实验方法")
+    else:
+        qualifiers = ("related research", "public information", "official sources") if state.get("current_source") == "web" else ("related papers", "research results", "experimental methods")
+    expanded = [f"{question} {qualifier}".strip()[:900] for qualifier in qualifiers]
+    for value in expanded:
+        if " ".join(value.casefold().split()) not in normalized_attempts:
+            return value
+    return expanded[-1] if expanded else question[:900]
+
+
+def _force_search_retry(state, mode, tried_queries):
+    query = _retry_query(state, tried_queries)
+    name = "search_web" if mode == "web" else "search_papers"
+    args = {"query": query, "limit": 5} if mode == "web" else {"query": query}
+    return name, args
+
+
+def _researcher(state, on_stage):
+    _emit(on_stage, "researcher")
+    mode = state.get("current_source", "paper")
+    allowed_modes = _source_modes(state["research"]["source"])
+    if mode not in allowed_modes:
+        mode = allowed_modes[0]
+    state = {**state, "candidate_pools": {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}, "tool_results": [], "errors": list(state.get("errors", []))}
+    tried_queries = set()
+    search_failures = 0
+    search_attempts = 0
+    action_count = 0
+    draft = Draft()
+    findings = []
+    failure_message = ""
+    tools = _helper_catalog(state["research"], mode)
+    while action_count < MAX_RESEARCH_ACTIONS:
+        payload = _payload(
+            state,
+            phase="act",
+            current_round=state.get("current_round", 1),
+            current_source=mode,
+            current_plan=state.get("current_plan", []),
+            current_candidates=_candidate_summaries(state, mode),
+            evidence=_evidence_views(_select_evidence(state, _claim_ids(draft.model_dump()) | _findings_ids([item.model_dump() for item in findings]))),
+            tool_results=state.get("tool_results", [])[-8:],
+            tool_feedback=state.get("errors", [])[-6:],
+            calls_remaining=MAX_RESEARCH_ACTIONS - action_count,
+            search_attempts=search_attempts,
+            search_failures=search_failures,
+        )
+        try:
+            result = _model(
+                state,
+                "literature/researcher",
+                payload,
+                ResearcherOutput,
+                node_role="researcher",
+                search_mode=mode,
+                available_tools=tools,
+            )
+        except (ModelServiceError, StructuredOutputError):
+            state["errors"].append(_safe_error("researcher", "model_failed", "研究模型不可用，保留已收集证据并继续生成缺口说明。"))
+            failure_message = "研究模型不可用，未能完成本轮初稿。"
+            break
+        if result.action == "finish":
+            # A failed search is feedback, not a stop condition. Give the model a
+            # chance to rewrite the query; if it finishes immediately, make a
+            # bounded code-generated rewrite while budget remains.
+            if search_failures and search_attempts < 3 and action_count < MAX_RESEARCH_ACTIONS:
+                name, args = _force_search_retry(state, mode, tried_queries)
+                action_count += 1
+                search_attempts += 1
+                tried_queries.add(" ".join(args["query"].casefold().split()))
+                try:
+                    patch, _ = _invoke_tool(state, mode, name, args)
+                    state.update(patch)
+                except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
+                    search_failures += 1
+                    state["errors"].append(_tool_error(name, exc))
+                continue
+            draft = result.draft
+            findings = result.findings
+            break
+        action_count += 1
+        try:
+            if result.tool_name in {"search_web", "search_papers"}:
+                search_attempts += 1
+                query = result.arguments.get("query")
+                if isinstance(query, str):
+                    tried_queries.add(" ".join(query.casefold().split()))
+            patch, _ = _invoke_tool(state, mode, result.tool_name, result.arguments)
+            state.update(patch)
+        except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
+            error = _tool_error(result.tool_name, exc)
+            state["errors"].append(error)
+            if result.tool_name in {"search_web", "search_papers"}:
+                search_failures += 1
+    if not draft.sections and not draft.limitations:
+        finalization_payload = _payload(
+            state,
+            phase="draft",
+            current_round=state.get("current_round", 1),
+            current_source=mode,
+            current_plan=state.get("current_plan", []),
+            current_candidates=_candidate_summaries(state, mode),
+            evidence=_evidence_views(_select_evidence(state)),
+            tool_results=state.get("tool_results", [])[-8:],
+            tool_feedback=state.get("errors", [])[-6:],
+            calls_remaining=0,
+        )
+        try:
+            final_draft = _model(
+                state,
+                "literature/researcher",
+                finalization_payload,
+                ResearcherOutput,
+                node_role="researcher",
+                search_mode=mode,
+                available_tools=[],
+            )
+            if final_draft.action == "finish":
+                draft = final_draft.draft
+                findings = final_draft.findings
+        except (ModelServiceError, StructuredOutputError):
+            state["errors"].append(_safe_error("researcher", "draft_failed", "初稿整理模型不可用，保留证据并说明缺口。"))
+            failure_message = "未能生成本轮初稿；当前证据和来源仍需人工核对。"
+    if not draft.sections and not draft.limitations and not failure_message:
+        failure_message = "本轮研究未生成可引用段落；现有来源或证据不足以形成结论。"
+    if not draft.sections and not draft.limitations and failure_message:
+        draft = Draft(sections=[], limitations=[Claim(text=failure_message, citations=[])])
+    evidence_pool = _unique_evidence(state.get("evidence_pool", []))
+    evidence_by_id = {item["id"]: item for item in evidence_pool}
+    allowed_papers = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
+    safe_sections = []
+    rejected = []
+    for section in draft.sections:
+        paragraphs = []
+        for claim in section.paragraphs:
+            _, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_papers)
+            if reason:
+                rejected.append(reason)
+            else:
+                paragraphs.append(claim)
+        if paragraphs:
+            citations = list(dict.fromkeys(item for claim in paragraphs for item in claim.citations))
+            _, heading_error = validate_claim(section.heading, citations, evidence_by_id, allowed_papers)
+            heading = section.heading if not heading_error else "本轮研究发现"
+            if heading_error:
+                rejected.append("章节标题未通过格式或数值依据检查")
+            safe_sections.append(Section(heading=heading, paragraphs=paragraphs))
+    safe_limitations = []
+    for claim in draft.limitations:
+        _, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_papers, allow_uncited=True, is_limitation=True)
+        if reason:
+            rejected.append(reason)
+        else:
+            safe_limitations.append(claim)
+    safe_draft = Draft(sections=safe_sections, limitations=safe_limitations)
+    if not safe_draft.sections and not safe_draft.limitations:
+        safe_draft = Draft(limitations=[Claim(text="本轮初稿内容未通过引用、数值或来源范围检查，尚无可验证结论。", citations=[])])
+    safe_findings = []
+    for claim in findings:
+        _, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_papers)
+        if not reason:
+            safe_findings.append(claim.model_dump())
+        else:
+            rejected.append(reason)
+    if rejected:
+        state["errors"].append(_safe_error("researcher", "claim_rejected", "代码检查移除了引用、数值或范围不符合要求的草稿段落。"))
+    return {
+        "candidate_pools": state.get("candidate_pools", {}),
+        "query_results": state.get("query_results", {}),
+        "evidence_pool": evidence_pool,
+        "evidence": evidence_pool,
+        "current_draft": safe_draft.model_dump(),
+        "current_findings": safe_findings,
+        "tool_results": state.get("tool_results", []),
+        "errors": state.get("errors", []),
+        "warnings": state.get("warnings", []),
+        "last_completed": "researcher",
+        "collected_web_blocks": state.get("collected_web_blocks", []),
+    }
+
+
+def _analyst(state, on_stage, on_subtask):
+    _emit(on_stage, "analyst")
+    mode = state.get("current_source", "paper")
+    draft = state.get("current_draft", {})
+    candidate_items = _candidate_summaries(state, mode, limit=12)
+    evidence = _select_evidence(state, _claim_ids(draft) | _findings_ids(state.get("current_findings", [])))
+    allowed_papers = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
+    payload = _payload(
+        state,
+        current_round=state.get("current_round", 1),
+        current_source=mode,
+        current_plan=state.get("current_plan", []),
+        current_draft=draft,
+        current_candidates=candidate_items,
+        tool_results=state.get("tool_results", [])[-8:],
+        evidence=_evidence_views(evidence),
+        requirements=(state.get("plan") or {}).get("requirements", []),
+        current_findings=state.get("current_findings", []),
+    )
+    try:
+        result = _model(state, "literature/analyst", payload, AnalystOutput, node_role="analyst", search_mode=mode, available_tools=[])
+        review = result.model_dump()
+    except (ModelServiceError, StructuredOutputError):
+        review = {
+            "sufficient": False,
+            "covered_requirements": [],
+            "gaps": ["审查模型不可用，当前初稿和证据尚未完成语义审查。"],
+            "next_steps": ["针对原问题补充检索并复核现有资料。"],
+            "review": "审查模型不可用。",
+        }
+        state["errors"] = list(state.get("errors", [])) + [_safe_error("analyst", "model_failed", "审查模型不可用，保留缺口后继续。")]
+    evidence_by_id = {item["id"]: item for item in state.get("evidence_pool", [])}
+    findings = []
+    for claim in state.get("current_findings", []):
+        _, reason = validate_claim(claim.get("text", ""), claim.get("citations", []), evidence_by_id, allowed_papers)
+        if not reason:
+            findings.append(claim)
+    current_findings = findings
+    evidence_ids = set(_claim_ids(draft)) | _findings_ids(current_findings)
+    used = [item for item in state.get("evidence_pool", []) if item.get("id") in evidence_ids]
+    candidate_count = len(state.get("candidate_pools", {}).get(mode, []))
+    status = "findings" if current_findings else ("sources_only" if candidate_count or evidence else "no_evidence")
+    task_text = "；".join(state.get("current_plan", []))[:1_000]
+    note_sources = [
+        {key: item.get(key) for key in ("id", "title", "original_url", "source_level")}
+        for item in used
+    ]
+    note = {
+        "index": state.get("current_round", len(state.get("rounds", [])) + 1),
+        "source": mode,
+        "task": task_text or state["research"]["query"],
+        "status": status,
+        "findings": current_findings,
+        "gap": "；".join(review.get("gaps", [])[:5]),
+        "sources": note_sources,
+        "evidence": [item.get("id") for item in used],
+    }
+    if on_subtask:
+        on_subtask(note)
+    round_item = {
+        "index": note["index"],
+        "source": mode,
+        "plan": list(state.get("current_plan", [])),
+        "draft": draft,
+        "review": review,
+        "findings": current_findings,
+        "candidate_ids": [item["candidate_id"] for item in state.get("candidate_pools", {}).get(mode, [])],
+        "evidence_ids": [item["id"] for item in state.get("evidence_pool", [])],
+        "status": status,
+    }
+    rounds = list(state.get("rounds", [])) + [round_item]
+    return {"current_review": review, "current_findings": current_findings, "rounds": rounds, "errors": state.get("errors", []), "last_completed": "analyst"}
+
+
+def _coder(state, on_stage):
+    _emit(on_stage, "coder")
+    # This node reserves a deterministic role in the pipeline. Data safety and
+    # citation validation are performed by code at ingestion and report time.
+    return {"coder_status": "placeholder", "last_completed": "coder"}
+
+
+def _render_draft(draft, evidence, source, *, title, caveats=None, allowed_paper_ids=None, visible_ids=None):
+    evidence_by_id = {item["id"]: item for item in evidence}
+    permitted_ids = set(visible_ids) if visible_ids is not None else set(evidence_by_id)
+    used_ids = set()
+    rejected = []
+    lines = [title]
+    for section in draft.sections:
+        accepted = []
+        section_ids = []
+        for claim in section.paragraphs:
+            if any(identifier not in permitted_ids for identifier in claim.citations):
+                rejected.append("引用不在报告工作证据范围内")
+                continue
+            cited, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_paper_ids)
+            if reason:
+                rejected.append(reason)
+                continue
+            accepted.append(claim)
+            used_ids.update(item["id"] for item in cited)
+            section_ids.extend(claim.citations)
+        if accepted:
+            _, heading_error = validate_claim(section.heading, list(dict.fromkeys(section_ids)), evidence_by_id, allowed_paper_ids)
+            heading = section.heading if not heading_error else "研究发现"
+            if heading_error:
+                rejected.append("章节标题未通过格式或数值依据检查")
+            lines.append("## " + heading)
+            for claim in accepted:
+                citations = " ".join(f"[{item}]" for item in claim.citations)
+                lines.append(claim.text + (" " + citations if citations else ""))
+    accepted_limitations = []
+    for claim in draft.limitations:
+        if any(identifier not in permitted_ids for identifier in claim.citations):
+            rejected.append("局限引用不在报告工作证据范围内")
+            continue
+        cited, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_paper_ids, allow_uncited=True, is_limitation=True)
+        if reason:
+            rejected.append(reason)
+            continue
+        accepted_limitations.append(claim)
+        used_ids.update(item["id"] for item in cited)
+    if accepted_limitations:
+        lines.append("## 局限与缺口")
+        for claim in accepted_limitations:
+            citations = " ".join(f"[{item}]" for item in claim.citations)
+            lines.append(claim.text + (" " + citations if citations else ""))
+    if caveats:
+        lines.append("## 局限与待核查")
+        lines.extend(caveats)
+    source_label = {"auto": "自动选择", "local": "项目文献", "openalex": "OpenAlex", "all": "项目与外部论文", "collection": "收藏夹快照", "web": "网页"}.get(source, source)
+    lines.append("初始来源偏好：" + source_label + "。")
+    kept = [item for item in evidence if item.get("id") in used_ids]
+    used_modes = {item.get("research_source") for item in kept if item.get("research_source")}
+    if used_modes:
+        actual_labels = {"paper": "论文", "web": "网页"}
+        lines.append("本次引用资料：" + "、".join(actual_labels.get(mode, mode) for mode in ("paper", "web") if mode in used_modes) + "。")
+    if kept:
+        lines.append("## 参考证据")
+        lines.extend(reference(item) for item in kept)
+    return {"content": "\n\n".join(lines), "evidence": kept, "rejected": rejected}
+
+
+def _reporter_fallback(state, reason):
+    all_evidence = state.get("evidence_pool", [])
+    allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
+    if allowed is not None:
+        all_evidence = [item for item in all_evidence if item.get("paper_id") in allowed]
+    evidence_by_id = {item["id"]: item for item in all_evidence}
+    grouped_sections = {}
+    claim_count = 0
+    fallback_findings = []
+    fallback_limitations = []
+    for round_item in state.get("rounds", []):
+        for section in round_item.get("draft", {}).get("sections", []):
+            for claim in section.get("paragraphs", []):
+                _, invalid = validate_claim(claim.get("text", ""), claim.get("citations", []), evidence_by_id, allowed)
+                if invalid or claim_count >= 16:
+                    continue
+                heading = section["heading"]
+                if heading not in grouped_sections and len(grouped_sections) >= 8:
+                    continue
+                _, heading_error = validate_claim(heading, claim.get("citations", []), evidence_by_id, allowed)
+                if heading_error:
+                    heading = "研究发现"
+                claims = grouped_sections.setdefault(heading, [])
+                if len(claims) < 8:
+                    claims.append(Claim.model_validate(claim))
+                    claim_count += 1
+        for finding in round_item.get("findings", []):
+            _, invalid = validate_claim(finding.get("text", ""), finding.get("citations", []), evidence_by_id, allowed)
+            if not invalid and len(fallback_findings) < 8:
+                fallback_findings.append(Claim.model_validate(finding))
+        for claim in round_item.get("draft", {}).get("limitations", []):
+            if len(fallback_limitations) >= 4:
+                break
+            _, invalid = validate_claim(claim.get("text", ""), claim.get("citations", []), evidence_by_id, allowed, allow_uncited=True, is_limitation=True)
+            if not invalid:
+                fallback_limitations.append(Claim.model_validate(claim))
+    round_sections = [Section(heading=heading, paragraphs=claims) for heading, claims in grouped_sections.items()]
+    if fallback_findings and len(round_sections) < 8 and claim_count < 16:
+        round_sections.append(Section(heading="初步发现", paragraphs=fallback_findings[:min(8, 16 - claim_count)]))
+    gaps = []
+    for round_item in state.get("rounds", []):
+        review = round_item.get("review", {})
+        gaps.extend(review.get("gaps", []))
+        if not review.get("sufficient"):
+            gaps.extend(review.get("next_steps", []))
+    gaps.extend(state.get("background", {}).get("gaps", []))
+    limitations = [Claim(text=reason[:1_500], citations=[])]
+    limitations.extend(fallback_limitations[:3])
+    for gap in list(dict.fromkeys(value.strip() for value in gaps if isinstance(value, str) and value.strip()))[:5]:
+        if len(limitations) >= 8:
+            break
+        limitations.append(Claim(text=gap[:1_500], citations=[]))
+    draft = Draft(sections=round_sections, limitations=limitations)
+    return _render_draft(
+        draft,
+        all_evidence,
+        state["research"]["source"],
+        title="# 研究报告",
+        caveats=["以上仅保留通过代码引用与数值检查的初稿和发现。", "研究结论仍需结合原始资料核对。", *_warning_caveats(state)],
+        allowed_paper_ids=allowed,
+    )
+
+
+def _warning_caveats(state):
+    if "paper_search_incomplete" in state.get("warnings", []):
+        return ["论文检索的部分外部来源失败，已保留可用结果，资料可能不完整。"]
+    return []
+
+
+def _reporter(state, on_stage):
+    _emit(on_stage, "reporter")
+    all_evidence = state.get("evidence_pool", [])
+    allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
+    all_evidence = [item for item in all_evidence if allowed is None or item.get("paper_id") in allowed]
+    required_ids = set()
+    for round_item in state.get("rounds", []):
+        required_ids |= _claim_ids(round_item.get("draft", {}))
+        required_ids |= _findings_ids(round_item.get("findings", []))
+    report_state = {**state, "evidence_pool": all_evidence}
+    working = _select_evidence(report_state, required_ids)
+    payload = _payload(
+        state,
+        source_scope=state["research"]["source"],
+        background=state.get("background", {}),
+        rounds=_rounds_for_model(state.get("rounds", [])),
+        evidence=_evidence_views(working),
+        final_requirements=(state.get("plan") or {}).get("requirements", []),
+        outstanding_gaps=[gap for item in state.get("rounds", []) for gap in item.get("review", {}).get("gaps", [])],
+        errors=state.get("errors", []),
+    )
+    try:
+        result = _model(state, "literature/reporter", payload, ReporterOutput, node_role="reporter", search_mode="none", available_tools=[])
+    except ModelServiceError:
+        result = _reporter_fallback(state, "报告模型服务不可用，未能形成完整终稿。")
+        return {"content": result["content"], "final_evidence": result["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "model_service_failed", "报告模型服务不可用，已返回明确缺口和可核查资料。")], "final_rejections": result.get("rejected", []), "last_completed": "reporter"}
+    except StructuredOutputError:
+        result = _reporter_fallback(state, "报告结构校验失败，未能形成完整终稿。")
+        return {"content": result["content"], "final_evidence": result["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "invalid_output", "报告输出未通过结构校验，已返回明确缺口和可核查资料。")], "final_rejections": result.get("rejected", []), "last_completed": "reporter"}
+    if not result.sections and not result.limitations:
+        fallback = _reporter_fallback(state, "报告内容为空，未能形成完整终稿。")
+        return {"content": fallback["content"], "final_evidence": fallback["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "empty_report", "报告输出为空，已返回明确缺口和可核查资料。")], "final_rejections": fallback.get("rejected", []), "last_completed": "reporter"}
+    visible_ids = {item["id"] for item in working}
+    caveats = []
+    if not all_evidence:
+        caveats.append("本次没有获得可用证据，以下内容不能视为已核验结论。")
+    if any(not item.get("sufficient") or item.get("gaps") for item in (round_item.get("review", {}) for round_item in state.get("rounds", []))):
+        caveats.append("研究审查仍记录有未解决缺口；请以原始证据为准。")
+    caveats.extend(_warning_caveats(state))
+    rendered = _render_draft(
+        result,
+        working,
+        state["research"]["source"],
+        title="# 研究报告",
+        caveats=caveats,
+        allowed_paper_ids=allowed,
+        visible_ids=visible_ids,
+    )
+    if rendered["rejected"]:
+        rendered["content"] += "\n\n部分段落因引用、数值或来源范围校验未通过而省略。"
+    if not rendered["evidence"] and all_evidence:
+        rendered["content"] += "\n\n报告没有通过代码检查的有效引用；现有资料仍需进一步核对。"
+    return {"content": rendered["content"], "final_evidence": rendered["evidence"], "final_rejections": rendered["rejected"], "last_completed": "reporter"}
+
+
+def _dispatch(state, on_stage):
+    _emit(on_stage, "dispatcher")
+    research = state["research"]
+    if research["source"] == "collection":
+        return {"needs_research": True}
+    try:
+        result = _model(
+            state,
+            "runtime/dispatcher",
+            _payload(state, allowed_sources=_source_modes(research["source"])),
+            DispatcherOutput,
+            node_role="dispatcher",
+            search_mode="none",
+            available_tools=[],
+        )
+        if result.needs_research:
+            return {"needs_research": True}
+        return {"needs_research": False, "content": result.answer, "evidence": []}
+    except (ModelServiceError, StructuredOutputError):
+        return {
+            "needs_research": True,
+            "errors": list(state.get("errors", [])) + [_safe_error("dispatcher", "model_failed", "路由模型不可用，按有限研究流程继续。")],
+        }
+
+
+def _graph(on_stage, on_subtask):
     graph = StateGraph(State)
-    graph.add_node('decide', decide)
-    graph.add_node('invoke', invoke)
-    graph.add_edge(START, 'decide')
-    graph.add_conditional_edges('decide', lambda s: END if s['choice'].action == 'finish' or s.get('tool_calls', 0) >= MAX_TOOL_CALLS else 'invoke')
-    graph.add_conditional_edges('invoke', lambda s: END if s['tool_calls'] >= MAX_TOOL_CALLS or s.get('tool_validation_failures', 0) >= 2 or (s.get('search_status') == 'failed' and not s.get('candidates') and not s.get('web_search_blocked') and not (kind == 'web' and s.get('auto_web') and s.get('web_backend') == 'alternative' and s.get('fallback_reason'))) else 'decide')
+    graph.add_node("dispatcher", lambda state: _dispatch(state, on_stage))
+    graph.add_node("background_investigator", lambda state: _background_investigator(state, on_stage))
+    graph.add_node("planner", lambda state: _planner(state, on_stage))
+    graph.add_node("supervisor", lambda state: _supervisor(state, on_stage))
+    graph.add_node("researcher", lambda state: _researcher(state, on_stage))
+    graph.add_node("analyst", lambda state: _analyst(state, on_stage, on_subtask))
+    graph.add_node("coder", lambda state: _coder(state, on_stage))
+    graph.add_node("reporter", lambda state: _reporter(state, on_stage))
+    graph.add_edge(START, "dispatcher")
+    graph.add_conditional_edges(
+        "dispatcher",
+        lambda state: "background_investigator" if state.get("needs_research") else END,
+        {"background_investigator": "background_investigator", END: END},
+    )
+    graph.add_edge("background_investigator", "planner")
+    graph.add_conditional_edges(
+        "planner",
+        lambda state: "reporter" if len(state.get("rounds", [])) >= MAX_ROUNDS or (state.get("rounds") and (state.get("plan") or {}).get("action") == "report") else "supervisor",
+        {"reporter": "reporter", "supervisor": "supervisor"},
+    )
+    graph.add_conditional_edges(
+        "supervisor",
+        lambda state: state["next_node"],
+        {"researcher": "researcher", "analyst": "analyst", "coder": "coder", "planner": "planner"},
+    )
+    graph.add_edge("researcher", "supervisor")
+    graph.add_edge("analyst", "supervisor")
+    graph.add_edge("coder", "supervisor")
+    graph.add_edge("reporter", END)
     return graph.compile()
 
 
-def _stream_bounded(graph, state):
-    latest = dict(state)
-    try:
-        for latest in graph.stream(state, {'recursion_limit': GRAPH_RECURSION_LIMIT}, stream_mode='values'):
-            pass
-    except GraphRecursionError:
-        return {**latest, 'recursion_exhausted': True}
-    return latest
-
-def run(research: dict, *, history: list, on_stage=None, on_subtask=None):
-    if research['source'] == 'collection' and not research.get('paper_ids'):
-        return '证据不足：所选收藏夹没有文献。', []
-    paper_graph = _research_graph('paper', on_stage)
-    web_graph = _research_graph('web', on_stage)
-
-    def supervisor(s):
-        if on_stage: on_stage('planning')
-        count = s.get('delegations', 0)
-        if s.get('review_failed') or s.get('recursion_exhausted'):
-            return {'route': Route(action='partial'), 'forced_reason': '审查或研究未能完成'}
-        reviewed = s.get('review_result')
-        exhausted = count >= MAX_DELEGATIONS or s.get('decisions', 0) >= MAX_DECISIONS
-        effective = s.get('effective_source')
-        source = research['source']
-        if count and not reviewed:
-            return {'route': Route(action='review')}
-        if count and reviewed and not s.get('feedback_pending'):
-            if reviewed.sufficient and not reviewed.gaps and s.get('evidence'):
-                return {'route': Route(action='report')}
-            permitted = _allowed_routes(source)
-            attempted = [tuple(item) for item in s.get('attempted_plans', [])]
-            def viable(step):
-                signature = _plan_signature(step.route, step.goal)
-                times = attempted.count(signature)
-                latest = next((item for item in reversed(s.get('results', [])) if _plan_signature(item.get('route', ''), item.get('task', '')) == signature), {})
-                return times == 0 or (times == 1 and latest.get('continuation_available', False))
-            steps = [step for step in reviewed.next_steps if step.route in permitted and step.goal.strip() and step.direction.strip() and viable(step)]
-            if not _web_actionable(s):
-                steps = [step for step in steps if step.route != 'web_research']
-            if exhausted or not steps:
-                logger.info('research_partial reason=%s delegations=%d decisions=%d attempted=%d', 'budget' if exhausted else ('web_search_blocked' if s.get('web_search_blocked') else 'no_plan'), count, s.get('decisions', 0), len(attempted))
-                return {'route': Route(action='partial'), 'forced_reason': '研究预算已耗尽' if exhausted else ('网页搜索连续未找到结果，已停止重复搜索' if s.get('web_search_blocked') == 'empty' else '网页搜索服务暂不可用，已暂停重复请求' if s.get('web_search_blocked') else '没有可执行的补研计划')}
-            step = steps[0]
-            return {'route': Route(action=step.route, task=step.goal, directions=[step.direction]), 'decisions': s.get('decisions', 0) + 1}
-        if exhausted:
-            return {'route': Route(action='partial'), 'forced_reason': '研究预算已耗尽'}
-        if s.get('feedback_pending'):
-            return {'route': Route(action=s['feedback_actions'][0], task=s['feedback_goal'], directions=[s['feedback_goal'][:500]]), 'decisions': s.get('decisions', 0) + 1}
-        else:
-            actions = (['paper_research', 'web_research'] if source == 'auto' else
-                       ['web_research'] if source == 'web' else ['paper_research'])
-            if source in ('auto', 'local'): actions.append('direct')
-        payload = {'question': research['query'], 'history': s['history'], 'source': research['source'],
-            'available_actions': actions, 'effective_source': effective, 'directions': s.get('directions', []), 'results': s.get('results', [])[-3:], 'evidence': _summary_evidence(s),
-            'review': reviewed.model_dump() if reviewed else None, 'verification_gaps': s.get('verification_gaps', []), 'delegations_remaining': max(0, MAX_DELEGATIONS-count),
-            'decisions_remaining': max(0, MAX_DECISIONS-s.get('decisions', 0))}
-        for attempt in range(2):
-            try:
-                route = _model(s, 'runtime/route', payload, Route)
-            except StructuredOutputError:
-                return {'route': Route(action='partial'), 'forced_reason': '主控决策格式无效'}
-            logger.info('prompt_id=runtime/route action=%s allowed=%s delegations=%d decisions=%d attempt=%d', route.action, actions, count, s.get('decisions', 0), attempt + 1)
-            if route.action in actions:
-                break
-            diagnostic_id = record_failure(kind='semantic_route', payload=payload, schema=Route.model_json_schema(),
-                response=route.model_dump(), errors=['invalid_action'],
-                context={'allowed_actions': actions, 'prompt_id': 'runtime/route', 'attempt': attempt + 1})
-            logger.warning('prompt_id=runtime/route diagnostic_id=%s', diagnostic_id)
-            if attempt:
-                return {'route': Route(action='partial'), 'forced_reason': '主控选择不符合当前范围'}
-            payload = {**payload, 'validation_feedback': {'code': 'invalid_action', 'allowed_actions': actions}}
-        return {'route': route, 'decisions': s.get('decisions', 0) + 1}
-
-    def delegate(s):
-        before = {_evidence_signature(e) for e in s.get('evidence_pool', [])}
-        action = s['route'].action
-        effective = 'web' if action == 'web_research' else (research['source'] if research['source'] in ('local', 'collection', 'openalex') else 'all')
-        pools = dict(s.get('pools', {}))
-        prior = pools.get(action, {})
-        scoped_research = {**research, 'source': effective}
-        directions = list(dict.fromkeys(s.get('directions', []) + s['route'].directions))
-        input_state = {**s, **prior, 'research': scoped_research, 'directions': directions,
-                       'auto_web': research['source'] == 'auto' and effective == 'web', 'task': s['route'].task, 'tool_calls': 0, 'recent_result': '', 'search_status': 'not_searched', 'tool_feedback': {}, 'tool_validation_failures': 0, 'executed_queries': list(prior.get('executed_queries', [])), 'plan': []}
-        try:
-            result = _stream_bounded(web_graph if action == 'web_research' else paper_graph, input_state)
-        except ResearchToolFailure as exc:
-            if not before and not prior.get('candidates') and not (research['source'] == 'auto' and effective == 'web'):
-                raise exc.__cause__ from None
-            result = {**input_state, 'tool_calls': 1, 'search_status': 'failed', 'warnings': s.get('warnings', []) + [('web_search_failed' if effective == 'web' else 'paper_search_failed')]}
-        pools[action] = {key: result.get(key, default) for key, default in [('candidates', []), ('query_results', {}), ('candidate_identities', []), ('web_blocks', {}), ('web_read_failures', []), ('read_ids', []), ('executed_queries', [])]}
-        facets = result.get('evidence_facets', [])
-        excluded = set(s.get('excluded_evidence_ids', []))
-        facet_terms = [relevance_terms(f) for f in facets]
-        relevant_new = [e for e in result.get('evidence_pool', []) if _evidence_signature(e) not in before and e['id'] not in excluded and any(relevance_score(terms, (e.get('title', '') + ' ' + e.get('text', '')).casefold()) > 0 for terms in facet_terms)]
-        attempted = list(s.get('attempted_plans', []))
-        signature = _plan_signature(action, s['route'].task)
-        attempted.append(signature)
-        old_keys = {item['id'] for item in prior.get('candidate_identities', [])}
-        new_keys = {item['id'] for item in result.get('candidate_identities', [])}
-        unread = max(0, len(result.get('candidate_identities', [])) - len(result.get('read_ids', [])))
-        old_offsets = {(key, block['offset']) for key, blocks in prior.get('web_blocks', {}).items() for block in blocks}
-        continuation = bool((new_keys - old_keys) - set(result.get('read_ids', []))) or any((key, block['offset']) not in old_offsets and block.get('next_offset') is not None for key, blocks in result.get('web_blocks', {}).items() for block in blocks)
-        summaries = [{key: p.get(key) for key in ('title', 'doi', 'url', 'original_url', 'source_level')} for p in result.get('candidates', [])[:20]]
-        return {'effective_source': effective, 'directions': directions, 'pools': pools, 'attempted_plans': attempted,
-                'delegations': s.get('delegations', 0) + 1, 'review_failed': result.get('review_failed', False), 'recursion_exhausted': result.get('recursion_exhausted', False), 'review_result': None, 'feedback_pending': False,
-                'evidence': result.get('evidence', []), 'evidence_pool': result.get('evidence_pool', []),
-                'evidence_facets': result.get('evidence_facets', []), 'warnings': result.get('warnings', []), 'web_search_blocked': result.get('web_search_blocked', ''), 'web_failures': result.get('web_failures', 0), 'web_backend': result.get('web_backend', 'primary'), 'web_empty_count': result.get('web_empty_count', 0), 'fallback_reason': result.get('fallback_reason', ''), 'direct_url_attempts': result.get('direct_url_attempts', []),
-                'results': (s.get('results', []) + [{'source': effective, 'route': action, 'continuation_available': continuation, 'task': s['route'].task, 'directions': s['route'].directions, 'plan': result.get('plan', []), 'new_evidence': len(relevant_new), 'new_evidence_ids': [e['id'] for e in relevant_new], 'new_candidates': len(new_keys-old_keys), 'unread_candidates': unread, 'candidates': summaries, 'search_status': result.get('search_status', 'not_searched'), 'step_status': result.get('recent_result', ''), 'tool_calls': result.get('tool_calls', 0)}])[-3:]}
-
-    def review(s):
-        if on_stage: on_stage('assessing')
-        try:
-            result = _model(s, 'literature/review', {'question': research['query'], 'directions': s.get('directions', []), 'evidence': _summary_evidence(s), 'results': s.get('results', []), 'allowed_routes': _allowed_routes(research['source']), 'attempted_plans': s.get('attempted_plans', []), 'search_blocked': s.get('web_search_blocked', ''), 'can_read_direct_url': _can_read_direct('web', {**s, 'auto_web': research['source'] == 'auto'}, len(s.get('pools', {}).get('web_research', {}).get('candidates', []))), 'search_backend': s.get('web_backend', 'primary'), 'fallback_reason': s.get('fallback_reason', ''), 'empty_searches': s.get('web_empty_count', 0), 'attempted_direct_urls': s.get('direct_url_attempts', []), 'current_task': s['results'][-1]['task'], 'current_source': s['results'][-1]['source'], 'prior_subtask_notes': s.get('subtask_notes', [])[-10:]}, Review)
-        except StructuredOutputError:
-            return {'review_failed': True}
-        except ModelServiceError:
-            if not (s.get('evidence') or s.get('evidence_pool')): raise
-            return {'review_failed': True}
-        allowed_ids = {item['id'] for item in s.get('evidence', [])}
-        excluded = set(s.get('excluded_evidence_ids', [])) | (set(result.irrelevant_evidence_ids) & allowed_ids)
-        working = [item for item in s.get('evidence', []) if item['id'] not in excluded]
-        if result.gaps or not working:
-            result = result.model_copy(update={'sufficient': False})
-        by_id = {item['id']: item for item in working}
-        findings = [item.model_dump() for item in result.subtask_findings if all(c in by_id for c in item.citations)]
-        latest = s['results'][-1]
-        result = result.model_copy(update={'subtask_findings': [SubtaskFinding.model_validate(item) for item in findings]})
-        note_ids = set(latest.get('new_evidence_ids', [])) | {citation for item in findings for citation in item['citations']}
-        sources = [{key: item.get(key) for key in ('id', 'title', 'original_url', 'source_level')} for item in working if item['id'] in note_ids]
-        note = {'index': s['delegations'], 'source': latest['source'], 'task': latest['task'], 'findings': findings,
-                'sources': sources, 'gap': result.subtask_gap, 'status': 'findings' if findings else ('sources_only' if sources else 'no_evidence')}
-        if on_subtask: on_subtask(note)
-        return {'review_result': result, 'evidence': working, 'excluded_evidence_ids': list(excluded), 'subtask_notes': (s.get('subtask_notes', []) + [note])[-10:]}
-
-    def answer(s):
-        if on_stage: on_stage('answering')
-        return {'content': '模型回答（未使用文献证据）：\n\n' + s['route'].answer}
-
-    report_graph = build_report_graph(model=_model, on_stage=on_stage)
-
-    def make_report(s):
-        result = report_graph.invoke(s)
-        gaps = result.get('research_gaps', [])
-        permitted = _allowed_routes(research['source'])
-        if not _web_actionable(s): permitted = [action for action in permitted if action != 'web_research']
-        attempted = {tuple(item) for item in s.get('attempted_plans', [])}
-        if gaps and not s.get('verification_attempted') and s.get('delegations', 0) < MAX_DELEGATIONS and s.get('decisions', 0) < MAX_DECISIONS:
-            for gap in gaps:
-                goal = (gap.get('query') or '').strip()
-                if not goal: continue
-                recommended = gap.get('route')
-                choices = [recommended] if recommended in permitted else (permitted if recommended is None else [])
-                choices = [action for action in choices if _plan_signature(action, goal) not in attempted]
-                if choices:
-                    retained = {'content': result['content'], 'evidence': result['evidence']} if result.get('evidence') and any(position[0] >= 0 for position in result.get('accepted', [])) else s.get('retained_verified', {})
-                    return {'verification_gaps': gaps, 'verification_attempted': True, 'feedback_pending': True, 'feedback_actions': choices, 'feedback_goal': goal, 'retained_verified': retained}
-        if not any(position[0] >= 0 for position in result.get('accepted', [])) and s.get('retained_verified'):
-            retained = _retained_partial(s)
-            if retained: return {**retained, 'feedback_pending': False}
-        return {'content': result['content'], 'evidence': result['evidence'], 'feedback_pending': False}
+def _safe_history(history, source):
+    if source == "collection":
+        return []
+    return list(history or [])
 
 
-    def _retained_partial(s):
-        retained = s.get('retained_verified') or {}
-        valid_ids = {item['id'] for item in s.get('evidence', []) + s.get('evidence_pool', [])} - set(s.get('excluded_evidence_ids', []))
-        if not retained.get('evidence') or any(item['id'] not in valid_ids for item in retained['evidence']): return None
-        content = retained['content'].replace('# 研究报告', '# 阶段性研究结果', 1)
-        return {'content': content + '\n\n补充研究未完成，以上已核验内容仍需结合未解决缺口使用。', 'evidence': retained['evidence']}
-
-    def partial(s):
-        retained = _retained_partial(s)
-        if retained: return retained
-        web_pool = s.get('pools', {}).get('web_research', {})
-        if (research['source'] == 'web' and s.get('web_failures', 0) and not s.get('web_search_blocked')
-                and not web_pool.get('query_results') and not web_pool.get('candidates') and not s.get('evidence_pool')):
-            raise RuntimeError('网页检索失败，无法获取证据，请检查搜索设置或稍后重试。')
-        return render_partial(s, s.get('forced_reason', '证据不足'))
-
-    graph = StateGraph(State)
-    for name, fn in [('partial', partial), ('supervisor', supervisor), ('delegate', delegate), ('review', review), ('answer', answer), ('report', make_report)]: graph.add_node(name, fn)
-    graph.add_edge(START, 'supervisor')
-    graph.add_conditional_edges('supervisor', lambda s: {'direct': 'answer', 'paper_research': 'delegate', 'web_research': 'delegate', 'review': 'review', 'report': 'report', 'partial': 'partial'}[s['route'].action])
-    graph.add_edge('delegate', 'supervisor')
-    graph.add_edge('review', 'supervisor')
-    graph.add_edge('answer', END)
-    graph.add_edge('partial', END)
-    graph.add_conditional_edges('report', lambda s: 'supervisor' if s.get('feedback_pending') else END)
-    result = _stream_bounded(graph.compile(), {'research': research, 'history': [] if research['source'] == 'collection' else list(history),
-        'candidates': [], 'query_results': {}, 'evidence': [], 'evidence_pool': [], 'evidence_facets': [research['query']], 'warnings': []})
-    if result.get('recursion_exhausted'):
-        result = _retained_partial(result) or render_partial(result, '研究流程达到运行上限')
-    return result['content'], result.get('evidence', [])
+def run(research, *, history, on_stage=None, on_subtask=None):
+    """Run the research graph and return the final Markdown and cited evidence."""
+    if not isinstance(research, dict):
+        raise TypeError("research must be a dict")
+    required = {"query", "project_id", "source"}
+    missing = required - set(research)
+    if missing:
+        raise ValueError("research input is missing required fields")
+    initial = {
+        "research": dict(research),
+        "history": _safe_history(history, research["source"]),
+        "background": {},
+        "plan": {},
+        "current_plan": [],
+        "current_source": "",
+        "current_round": 0,
+        "current_draft": {},
+        "current_review": {},
+        "candidate_pools": {"paper": [], "web": []},
+        "query_results": {},
+        "collected_web_blocks": [],
+        "evidence_pool": [],
+        "evidence": [],
+        "rounds": [],
+        "tool_results": [],
+        "errors": [],
+        "warnings": [],
+        "prepared_round": 0,
+    }
+    graph = _graph(on_stage, on_subtask)
+    result = graph.invoke(initial, config={"recursion_limit": 40})
+    if result.get("content") is None:
+        fallback = _reporter_fallback(result, "研究流程未能形成报告，以下为可核查资料及当前缺口。")
+        return fallback["content"], fallback["evidence"]
+    return result["content"], result.get("final_evidence", result.get("evidence", []))
