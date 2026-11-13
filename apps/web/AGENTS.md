@@ -9,7 +9,7 @@
 - `/workspace` 由 `workspace/WorkspacePage.tsx` 装配。它读取项目列表与全局平铺会话列表，默认使用首个项目；仅在没有项目且用户开始研究或打开本地文件时懒创建默认项目，不预建空会话。打开历史会话必须先切换到该会话的 `project_id`，本地文件和研究请求始终限定在当前项目。新研究保留当前项目范围。历史加载、项目加载及懒创建失败要分别显示并可重试，不能把请求失败当成空数据。历史抽屉通过指针悬停触发，离开触发区与抽屉后收起；点击触发区支持触屏和键盘操作。会话菜单支持置顶、解除置顶和带确认的删除，失败须向用户显示；删除当前会话后清空聊天状态。
 - `workspace/ResearchChat.tsx` 负责当前对话的真实消息、问题草稿、模式、引用、报告导出、任务阶段与子任务、失败重试。新问题只发送 `research_mode: "deep" | "quick"` 和本次模型选项；新建页面默认深度模式。模式决策和研究分支由 API/worker 实施，前端展示任务返回的真实模式与阶段，不模拟回答或任务状态。新会话只在首次提问时创建。
 - `app/hooks/useRunPolling.ts` 管理任务轮询。切换任务、会话或项目及卸载时取消旧请求，避免旧结果污染新上下文。收到终态后停止；请求失败有限重试，成功后重置连续失败计数。发送、重试和本地文件操作同样须防止过期响应、卸载后的顶层提示和回调更新。
-- `app/settings/SettingsPanel.tsx` 同时用于工作台模态框和直接访问的 `/settings` 页面。服务地址、密钥、搜索引擎、PDF 导入与文件列表使用现有本地 API；模型选项随每个问题提交。默认研究模式、Enter 发送方式、外观和密度保存在浏览器偏好中；研究偏好占位控件须明确标记为暂不生效，不能提交到后端。`workspace/PdfImport.tsx`、`PaperLibrary.tsx` 与 `PaperRow.tsx` 仅展示和操作当前项目文件。
+- `app/settings/SettingsPanel.tsx` 作为工作台上方的模态卡片，`/settings` 复用同一工作台背景和弹窗。服务地址、密钥和搜索引擎使用现有本地 API；模型选项随每个问题提交。设置中的本地目录预览只显示浏览器所选目录的文件名，不读取正文、不上传，也不改变研究项目范围。默认研究模式、Enter 发送方式、外观和密度保存在浏览器偏好中；研究偏好占位控件须明确标记为暂不生效，不能提交到后端。
 - `app/launch/LaunchPage.module.css`、`workspace/WorkspacePage.module.css`、`workspace/ResearchChat.module.css` 与设置面板 CSS Module 隔离各自页面样式；`app/globals.css` 只放确有跨路由用途的基础规则，不能让工作台深色主题污染开始页。
 - `app/layout.tsx` 与 `app/globals.css` 负责共用布局和样式；`next.config.ts` 管理 API 代理。组件职责和验证入口见 [前端说明](README.md)，修改设置页时继续读取 [设置页规则](app/settings/AGENTS.md)。
 - 页面通过本地 API 操作业务数据，不直接连接 SQLite 或携带服务密钥调用云端模型。生产构建的代理地址在构建时读取，验收前先配置 `TUFA_API_URL`。

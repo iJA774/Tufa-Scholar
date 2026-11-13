@@ -14,6 +14,10 @@ import {
 import styles from "./WorkspacePage.module.css";
 
 type ConversationGroup = "置顶" | "今天" | "最近 7 天" | "更早";
+type WorkspacePageProps = {
+  initialSettingsOpen?: boolean;
+  onSettingsClose?: () => void;
+};
 
 function timestamp(value: string | null) {
   if (!value) return 0;
@@ -32,7 +36,7 @@ function groupFor(value: string | null): ConversationGroup {
   return "更早";
 }
 
-export default function WorkspacePage() {
+export default function WorkspacePage({ initialSettingsOpen = false, onSettingsClose }: WorkspacePageProps = {}) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number>();
   const [projectLoading, setProjectLoading] = useState(true);
@@ -45,7 +49,7 @@ export default function WorkspacePage() {
   const [historySearch, setHistorySearch] = useState("");
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(initialSettingsOpen);
   const [menuConversationId, setMenuConversationId] = useState<number>();
   const [conversationActionBusy, setConversationActionBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Conversation>();
@@ -198,6 +202,11 @@ export default function WorkspacePage() {
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(""), 2600);
   }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    onSettingsClose?.();
+  }, [onSettingsClose]);
 
   const reportError = useCallback((message: string) => {
     setPageError(message);
@@ -573,13 +582,9 @@ export default function WorkspacePage() {
     />
 
     {settingsOpen && <SettingsPanel
-      onClose={() => setSettingsOpen(false)}
-      projectId={activeProject?.id}
-      projectName={activeProject?.name}
-      conversationId={conversationId}
+      onClose={closeSettings}
       preferences={preferences}
       onPreferencesChange={updatePreferences}
-      ensureProject={ensureProject}
       onNotice={notify}
     />}
     {toast && <div className={styles.toast} role="status" aria-live="polite">{toast}</div>}

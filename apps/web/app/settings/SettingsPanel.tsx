@@ -1,11 +1,8 @@
 "use client";
 
-import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
-import PdfImport from "../workspace/PdfImport";
-import PaperLibrary from "../workspace/PaperLibrary";
 import { api } from "../workspace/api";
-import type { Paper } from "../workspace/types";
 import type { WorkspacePreferences } from "../workspace/preferences";
 import WebSearchSettings from "./WebSearchSettings";
 import RuntimeLogsSettings from "./RuntimeLogsSettings";
@@ -13,16 +10,12 @@ import styles from "./SettingsPanel.module.css";
 
 type SettingsPanelProps = {
   onClose: () => void;
-  projectId?: number;
-  projectName?: string;
-  conversationId?: number;
   preferences: WorkspacePreferences;
   onPreferencesChange: (next: WorkspacePreferences) => void;
-  ensureProject: () => Promise<number>;
   onNotice: (message: string) => void;
 };
 
-type PanelTab = "general" | "research" | "appearance" | "services" | "search" | "files" | "about";
+type PanelTab = "general" | "research" | "appearance" | "services" | "search" | "files";
 const tabs: { id: PanelTab; label: string }[] = [
   { id: "general", label: "通用" },
   { id: "research", label: "研究偏好" },
@@ -30,85 +23,33 @@ const tabs: { id: PanelTab; label: string }[] = [
   { id: "services", label: "服务与模型" },
   { id: "search", label: "网页搜索" },
   { id: "files", label: "本地文件" },
-  { id: "about", label: "关于" },
 ];
 
 export default function SettingsPanel({
   onClose,
-  projectId,
-  projectName,
-  conversationId,
   preferences,
   onPreferencesChange,
-  ensureProject,
   onNotice,
 }: SettingsPanelProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const previousFocus = useRef<HTMLElement | null>(null);
-  const mounted = useRef(false);
-  const ensureProjectRef = useRef(ensureProject);
-  const pendingProject = useRef<Promise<number> | null>(null);
-  const fileRequest = useRef<AbortController | null>(null);
+  const directoryInput = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<PanelTab>("general");
   const [notice, setNotice] = useState("");
-  const [fileProjectId, setFileProjectId] = useState<number | undefined>(projectId);
-  const [papers, setPapers] = useState<Paper[]>([]);
-  const [papersScopeId, setPapersScopeId] = useState<number | undefined>();
-  const [filesLoading, setFilesLoading] = useState(false);
-  const [filesError, setFilesError] = useState("");
-
-  ensureProjectRef.current = ensureProject;
-  const fileScopeId = projectId ?? fileProjectId;
-  const fileScopeRef = useRef<number | undefined>(fileScopeId);
-  fileScopeRef.current = fileScopeId;
+  const [fileNames, setFileNames] = useState<string[]>([]);
 
   useEffect(() => {
     const element = dialog.current;
     if (!element) return;
-    mounted.current = true;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (!element.open) element.showModal();
     return () => {
-      mounted.current = false;
-      fileRequest.current?.abort();
       if (element.open) element.close();
       const target = previousFocus.current;
       if (target?.isConnected) requestAnimationFrame(() => target.focus());
     };
   }, []);
-
-  useEffect(() => {
-    setFileProjectId(projectId);
-    setPapers([]);
-    setFilesError("");
-  }, [projectId]);
-
-  const refreshFiles = useCallback(async (scopeId: number) => {
-    fileRequest.current?.abort();
-    const controller = new AbortController();
-    fileRequest.current = controller;
-    setFilesLoading(true);
-    setFilesError("");
-    try {
-      const data = await api<Paper[]>(`/projects/${scopeId}/papers`, { signal: controller.signal });
-      if (!controller.signal.aborted && fileScopeRef.current === scopeId) {
-        setPapers(data);
-        setPapersScopeId(scopeId);
-      }
-    } catch (reason) {
-      if (!controller.signal.aborted && fileScopeRef.current === scopeId) setFilesError(reason instanceof Error ? reason.message : "无法读取本地文件。");
-    } finally {
-      if (fileRequest.current === controller) fileRequest.current = null;
-      if (!controller.signal.aborted) setFilesLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeTab !== "files" || !fileScopeId) return;
-    void refreshFiles(fileScopeId);
-    return () => fileRequest.current?.abort();
-  }, [activeTab, fileScopeId, refreshFiles]);
 
   const notify = (message: string) => {
     setNotice(message);
@@ -118,19 +59,13 @@ export default function SettingsPanel({
   const selectTab = (tab: PanelTab) => {
     setActiveTab(tab);
     setNotice("");
-    if (tab !== "files" || projectId || fileProjectId) return;
-    setFilesLoading(true);
-    setFilesError("");
-    if (!pendingProject.current) pendingProject.current = Promise.resolve().then(() => ensureProjectRef.current());
-    void pendingProject.current.then(id => {
-      pendingProject.current = null;
-      if (mounted.current) setFileProjectId(id);
-    }).catch(reason => {
-      pendingProject.current = null;
-      if (!mounted.current) return;
-      setFilesLoading(false);
-      setFilesError(reason instanceof Error ? reason.message : "无法准备本地文件空间。");
-    });
+  };
+
+  const chooseDirectory = (event: ChangeEvent<HTMLInputElement>) => {
+    const names = Array.from(event.currentTarget.files ?? [])
+      .map(file => file.webkitRelativePath || file.name)
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+    setFileNames(names);
   };
 
   const updatePreference = <K extends keyof WorkspacePreferences>(key: K, value: WorkspacePreferences[K]) => {
@@ -152,52 +87,47 @@ export default function SettingsPanel({
   };
 
   const currentTab = tabs.find(tab => tab.id === activeTab)!;
-  const scopeTitle = projectName ? `“${projectName}”` : "当前研究空间";
-  const visiblePapers = papersScopeId === fileScopeId ? papers : [];
-  const retryFiles = () => {
-    if (fileScopeId) {
-      void refreshFiles(fileScopeId);
-      return;
-    }
-    selectTab("files");
-  };
-
   return (
     <dialog
       ref={dialog}
       className={styles.dialog}
       aria-labelledby="settings-title"
       onCancel={event => { event.preventDefault(); onClose(); }}
+      onClick={event => { if (event.target === dialog.current) onClose(); }}
     >
       <div className={styles.frame}>
         <header className={styles.header}>
           <div>
-            <div className={styles.eyebrow}>TUFA SCHOLAR / PREFERENCES</div>
             <h1 id="settings-title">设置</h1>
           </div>
           <button className={styles.closeButton} type="button" aria-label="关闭设置" onClick={onClose}>×</button>
         </header>
 
         <div className={styles.layout}>
-          <nav className={styles.tabs} role="tablist" aria-label="设置类别" aria-orientation="vertical">
-            {tabs.map((tab, index) => (
-              <button
-                key={tab.id}
-                ref={element => { tabButtons.current[index] = element; }}
-                id={`settings-tab-${tab.id}`}
-                className={`${styles.tab} ${activeTab === tab.id ? styles.activeTab : ""}`}
-                type="button"
-                role="tab"
-                aria-selected={activeTab === tab.id}
-                aria-controls="settings-content"
-                tabIndex={activeTab === tab.id ? 0 : -1}
-                onClick={() => selectTab(tab.id)}
-                onKeyDown={event => handleTabKeyDown(event, index)}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </nav>
+          <div className={styles.sidebar}>
+            <nav className={styles.tabs} role="tablist" aria-label="设置类别" aria-orientation="vertical">
+              {tabs.map((tab, index) => (
+                <button
+                  key={tab.id}
+                  ref={element => { tabButtons.current[index] = element; }}
+                  id={`settings-tab-${tab.id}`}
+                  className={`${styles.tab} ${activeTab === tab.id ? styles.activeTab : ""}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  aria-controls="settings-content"
+                  tabIndex={activeTab === tab.id ? 0 : -1}
+                  onClick={() => selectTab(tab.id)}
+                  onKeyDown={event => handleTabKeyDown(event, index)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </nav>
+            <a className={styles.aboutLink} href="https://github.com/iJA774/Tufa-Scholar" target="_blank" rel="noopener noreferrer">
+              关于 <span aria-hidden="true">↗</span>
+            </a>
+          </div>
 
           <main
             className={styles.content}
@@ -210,7 +140,6 @@ export default function SettingsPanel({
 
           {activeTab === "general" && <div className={styles.sectionStack}>
             <section className={styles.card}>
-              <div className={styles.sectionLabel}>DEFAULTS</div>
               <h2>新问题的默认模式</h2>
               <p>可在每次提问时切换。快速探索由分流模型直接回答；深度研究会检索并整理证据。</p>
               <div className={styles.modeChoices} role="radiogroup" aria-label="新问题的默认模式">
@@ -230,7 +159,6 @@ export default function SettingsPanel({
             </section>
 
             <section className={styles.card}>
-              <div className={styles.sectionLabel}>NEXT QUESTION</div>
               <h2>本次提问模型</h2>
               <p>选择会随下一次问题提交；它不会更改保存的服务地址、密钥或其他已提交任务。</p>
               <ModelControls value={preferences.modelChoice} onChange={value => updatePreference("modelChoice", value)} disabled={false} />
@@ -238,7 +166,6 @@ export default function SettingsPanel({
           </div>}
 
           {activeTab === "research" && <section className={styles.card}>
-            <div className={styles.sectionLabel}>RESEARCH PREFERENCES</div>
             <h2>研究偏好</h2>
             <p>以下偏好控件暂未接入后端，不会影响检索或研究预算。当前生效的模式和本次模型请在“通用”中设置。</p>
             <label className={styles.placeholderRow}>
@@ -260,7 +187,6 @@ export default function SettingsPanel({
           </section>}
 
           {activeTab === "appearance" && <section className={styles.card}>
-            <div className={styles.sectionLabel}>WORKSPACE VIEW</div>
             <h2>外观</h2>
             <p>这些偏好保存在此浏览器中，并立即应用到研究工作台。</p>
             <label className={styles.toggleRow}>
@@ -291,26 +217,28 @@ export default function SettingsPanel({
 
           {activeTab === "search" && <WebSearchSettings />}
 
-          {activeTab === "files" && <div className={styles.sectionStack}>
-            <section className={styles.card}>
-              <div className={styles.sectionLabel}>LOCAL FILES</div>
-              <h2>本地 PDF 与文献</h2>
-              <p>{conversationId
-                ? `当前是历史会话。文件属于${scopeTitle}，同一研究空间中的会话共享这些文献。`
-                : `当前是新研究。文件会保存到${scopeTitle}，并供该空间内的会话共享。`}</p>
-              {!fileScopeId && <p className={styles.infoNote}>打开此页签时会按需准备默认研究空间；服务设置不需要创建研究空间。</p>}
-              {filesError && <div className={styles.error} role="alert">{filesError} <button className={styles.actionButton} type="button" onClick={retryFiles}>重试</button></div>}
-              {filesLoading && !visiblePapers.length && <p className={styles.loading} role="status">{fileScopeId ? "正在读取本地文献…" : "正在准备本地文件范围…"}</p>}
-              {fileScopeId && <PdfImport projectId={fileScopeId} onImported={() => refreshFiles(fileScopeId)} notify={notify} />}
-            </section>
-            {fileScopeId && <PaperLibrary papers={visiblePapers} renderPaperAction={() => null} />}
-          </div>}
-
-          {activeTab === "about" && <section className={styles.card}>
-            <div className={styles.sectionLabel}>ABOUT</div>
-            <h2>TUFA Scholar</h2>
-            <p>本机科研助手。服务配置和研究资料由本机应用管理；浏览器偏好仅保存在当前浏览器中。</p>
-            <div className={styles.infoNote}>OpenAI 兼容模型、OpenAlex 和网页搜索密钥只显示配置状态，不会回显已保存的密钥。</div>
+          {activeTab === "files" && <section className={styles.card}>
+            <h2>本地文件</h2>
+            <p>浏览器需支持文件夹选择；仅列出文件路径，不读取或上传内容。刷新后需重新选择。</p>
+            <input
+              ref={element => {
+                directoryInput.current = element;
+                if (element) element.webkitdirectory = true;
+              }}
+              className={styles.directoryInput}
+              type="file"
+              multiple
+              aria-label="选择本地目录"
+              onChange={chooseDirectory}
+            />
+            <button className={styles.actionButton} type="button" onClick={() => directoryInput.current?.click()}>
+              打开目录
+            </button>
+            {fileNames.length > 0
+              ? <ul className={styles.fileList} aria-label="目录文件名">
+                {fileNames.map(name => <li key={name}>{name}</li>)}
+              </ul>
+              : <p className={styles.fileEmpty} role="status">尚未选择目录。</p>}
           </section>}
           </main>
         </div>
@@ -408,7 +336,6 @@ function ApiSettings() {
   };
 
   return <section className={`card settings-card ${styles.card}`} aria-busy={busy}>
-    <div className={styles.sectionLabel}>MODEL & API</div>
     <h2>模型与论文服务</h2>
     <p>模型和 OpenAlex 密钥只在显式保存后写入本机设置。已保存的密钥不会回显；环境变量来源只读。</p>
     {loadError && <p className={styles.error} role="alert">{loadError}</p>}

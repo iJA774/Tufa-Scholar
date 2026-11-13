@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
@@ -62,7 +62,7 @@ function stageLabel(run: Run) {
     if (run.research_mode === "deep") return "进入深度研究";
     return "判断是否需要研究";
   }
-  return run.stage ? stageText[run.stage] || run.stage : statusText[run.status] || run.status;
+  return run.stage ? stageText[run.stage] || "研究进行中" : statusText[run.status] || run.status;
 }
 
 function stageSuffix(run: Run) {
@@ -98,6 +98,41 @@ function ResearchActivity({ items }: { items?: Subtask[] }) {
       </section>)}
     </div>
   </details>;
+}
+
+function ResearchProgressPanel({ run, onClose, closeButtonRef }: { run: Run; onClose: () => void; closeButtonRef: RefObject<HTMLButtonElement | null> }) {
+  const active = ["queued", "pending", "running"].includes(run.status);
+  const status = statusText[run.status] || run.status;
+  const subtasks = run.subtasks || [];
+  return <aside className={styles.progressPanel} aria-label="研究进度">
+    <header className={styles.progressHeader}>
+      <div><h2>研究进度</h2><p>{modeText(run.research_mode)}</p></div>
+      <button ref={closeButtonRef} className={styles.progressClose} type="button" onClick={onClose} aria-label="收起研究进度">×</button>
+    </header>
+    <div className={styles.progressBody}>
+      <section className={styles.progressStage}>
+        <span className={`${styles.progressMarker} ${active ? styles.progressMarkerActive : ""}`} aria-hidden="true" />
+        <div><strong>{stageLabel(run)}</strong>{status !== stageLabel(run) && <small>{status}</small>}</div>
+      </section>
+      {run.error && <p className={styles.progressError}>{run.error}</p>}
+      {subtasks.length ? <ol className={styles.progressSteps}>
+        {subtasks.map(step => <li key={step.index}>
+          <span className={`${styles.progressMarker} ${styles.progressMarkerDone}`} aria-hidden="true" />
+          <div>
+            <strong>{step.index}. {step.task}</strong>
+            {step.findings?.map((finding, index) => <p key={index}>{finding.text}{finding.citations.length ? ` ${finding.citations.map(id => `[${id}]`).join(" ")}` : ""}</p>)}
+            {step.status === "sources_only" && <p>已找到相关资料，结论仍待核验。</p>}
+            {step.status === "no_evidence" && <p>本步暂无可用证据。</p>}
+            {step.sources?.map(source => {
+              const href = safeSourceUrl(source.original_url);
+              return <p className={styles.progressSource} key={source.id}>{href ? <a href={href} target="_blank" rel="noopener noreferrer">{source.title || source.id} ↗</a> : source.title || source.id} [{source.id}]</p>;
+            })}
+            {step.gap && <p>待查：{step.gap}</p>}
+          </div>
+        </li>)}
+      </ol> : <p className={styles.progressEmpty}>{active ? "正在等待研究步骤…" : "此任务没有返回研究步骤。"}</p>}
+    </div>
+  </aside>;
 }
 
 type Props = {
@@ -140,6 +175,8 @@ export default function ResearchChat({
   const [messages, setMessages] = useState<Message[]>([]);
   const [query, setQuery] = useState("");
   const [run, setRun] = useState<Run>();
+  const [loadedConversationId, setLoadedConversationId] = useState<number>();
+  const [researchPanelOpen, setResearchPanelOpen] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [historyRuns, setHistoryRuns] = useState<Record<number, Run>>({});
   const [busy, setBusy] = useState("");
@@ -148,11 +185,23 @@ export default function ResearchChat({
   const actionController = useRef<AbortController | null>(null);
   const selectionEpoch = useRef(0);
   const selected = useRef({ projectId, conversationId, resetKey });
+  const submittedConversationRef = useRef<number | undefined>(undefined);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const messagesElement = useRef<HTMLDivElement>(null);
+  const progressToggle = useRef<HTMLButtonElement>(null);
+  const progressCloseButton = useRef<HTMLButtonElement>(null);
   const activeRun = run && ["queued", "pending", "running"].includes(run.status);
   const hasConversation = conversationId !== undefined;
   const modeName = modeText(mode);
+  const progressRun = hasConversation && loadedConversationId === conversationId && run?.research_mode === "deep" ? run : undefined;
+  const openProgressPanel = () => {
+    setResearchPanelOpen(true);
+    requestAnimationFrame(() => progressCloseButton.current?.focus());
+  };
+  const closeProgressPanel = () => {
+    setResearchPanelOpen(false);
+    requestAnimationFrame(() => progressToggle.current?.focus());
+  };
 
   useEffect(() => {
     const previous = selected.current;
@@ -162,13 +211,23 @@ export default function ResearchChat({
     if (previous.projectId === projectId && previous.conversationId === conversationId && previous.resetKey === resetKey) return;
 
     const marker = ++selectionEpoch.current;
+    const retainingSubmittedConversation = previous.conversationId === undefined && conversationId !== undefined && submittedConversationRef.current === conversationId;
     actionController.current?.abort();
     actionController.current = null;
     requestedHistoryRuns.current.clear();
+    if (retainingSubmittedConversation) {
+      setLoadedConversationId(conversationId);
+      setLoadingConversation(false);
+      setBusy("");
+      submittedConversationRef.current = undefined;
+      return;
+    }
     setMessages([]);
     setRuns([]);
     setHistoryRuns({});
     setRun(undefined);
+    setLoadedConversationId(undefined);
+    setResearchPanelOpen(false);
     setQuery("");
     setBusy("");
     if (!projectId || conversationId === undefined) {
@@ -185,7 +244,10 @@ export default function ResearchChat({
       if (controller.signal.aborted || selectionEpoch.current !== marker) return;
       setMessages(nextMessages);
       setRuns(nextRuns);
-      setRun(nextRuns.find(item => item.conversation_id === conversationId));
+      const nextRun = nextRuns.find(item => item.conversation_id === conversationId);
+      setRun(nextRun);
+      setLoadedConversationId(conversationId);
+      setResearchPanelOpen(nextRun?.research_mode === "deep" && ["queued", "pending", "running"].includes(nextRun.status));
     }).catch(error => {
       if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
     }).finally(() => {
@@ -286,6 +348,9 @@ export default function ResearchChat({
       setMessages(nextMessages);
       setRuns(nextRuns);
       setRun(nextRun);
+      setLoadedConversationId(submitted.conversation_id);
+      setResearchPanelOpen(nextRun.research_mode === "deep");
+      submittedConversationRef.current = submitted.conversation_id;
       onConversationChange(submitted.conversation_id, targetProjectId);
     } catch (error) {
       if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
@@ -306,6 +371,7 @@ export default function ResearchChat({
       if (selectionEpoch.current !== marker) return;
       setRun(next);
       setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
+      if (run.research_mode === "deep" || next.research_mode === "deep") setResearchPanelOpen(true);
       onHistoryUpdated();
     }).catch(error => {
       if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
@@ -336,21 +402,32 @@ export default function ResearchChat({
     { text: "视觉语言模型在科研中有哪些新应用？", prompt: "总结视觉语言模型在科研工作中的典型应用与发展趋势。", tone: "pink", icon: "▤" },
   ];
 
-  return <main className={`${styles.workspace} ${hasConversation ? styles.workspaceConversation : ""} ${density === "compact" ? styles.compact : ""}`}>
+  return <main className={`${styles.workspace} ${hasConversation ? styles.workspaceConversation : ""} ${density === "compact" ? styles.compact : ""} ${progressRun && researchPanelOpen ? styles.workspaceWithPanel : ""}`}>
+    <div className={styles.chatColumn}>
     {!hasConversation ? <section className={styles.welcome} aria-label="开始一项新研究">
       <div className={`${styles.heroLight} ${!ambient ? styles.heroLightMuted : ""}`} aria-hidden="true" />
-      <div className={styles.heroEmblem} aria-hidden="true">
+      <div className={`${styles.heroEmblem} ${!ambient ? styles.heroEmblemMuted : ""}`} aria-hidden="true">
         <svg className={styles.emblemSvg} viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M19 2 23 14.6 36 19l-13 4.3L19 36l-4.2-12.7L2 19l12.8-4.4L19 2Z" stroke="url(#emblemGrad)" strokeWidth="1.5" />
-          <circle cx="19" cy="19" r="3.1" fill="#B7A6FF" /><circle cx="5" cy="5" r="1" fill="#68DCED" /><circle cx="34" cy="7" r="1.2" fill="#D47AFF" /><circle cx="31" cy="33" r="1" fill="#F5A1C7" />
-          <defs><linearGradient id="emblemGrad" x1="2" y1="13" x2="36" y2="26"><stop stopColor="#68DDEB" /><stop offset=".48" stopColor="#A89DFF" /><stop offset="1" stopColor="#F89AC3" /></linearGradient></defs>
+          <path className={styles.emblemStar} d="M19 2 23 14.6 36 19l-13 4.3L19 36l-4.2-12.7L2 19l12.8-4.4L19 2Z" stroke={ambient ? "url(#emblemGradFlow)" : "url(#emblemGradStatic)"} strokeWidth="1.5" />
+          <circle className={styles.emblemCore} cx="19" cy="19" r="3.1" fill="#B7A6FF" /><circle className={styles.emblemDotOne} cx="5" cy="5" r="1" fill="#68DCED" /><circle className={styles.emblemDotTwo} cx="34" cy="7" r="1.2" fill="#D47AFF" /><circle className={styles.emblemDotThree} cx="31" cy="33" r="1" fill="#F5A1C7" />
+          <defs>
+            <linearGradient id="emblemGradFlow" gradientUnits="userSpaceOnUse" x1="0" y1="19" x2="38" y2="19">
+              <stop stopColor="#68DDEB" /><stop offset=".33" stopColor="#A89DFF" /><stop offset=".66" stopColor="#F89AC3" /><stop offset="1" stopColor="#68DDEB" />
+              {ambient && <animateTransform attributeName="gradientTransform" type="rotate" from="0 19 19" to="360 19 19" dur="12s" repeatCount="indefinite" />}
+            </linearGradient>
+            <linearGradient id="emblemGradStatic" gradientUnits="userSpaceOnUse" x1="2" y1="13" x2="36" y2="26"><stop stopColor="#68DDEB" /><stop offset=".48" stopColor="#A89DFF" /><stop offset="1" stopColor="#F89AC3" /></linearGradient>
+          </defs>
         </svg>
+        <span className={`${styles.firefly} ${styles.fireflyOne}`} /><span className={`${styles.firefly} ${styles.fireflyTwo}`} /><span className={`${styles.firefly} ${styles.fireflyThree}`} /><span className={`${styles.firefly} ${styles.fireflyFour}`} />
       </div>
       <h1>今天，想<span>研究</span>什么？</h1>
     </section> : <section className={styles.conversation} aria-label="当前研究对话">
       <div className={styles.conversationTop}>
         <div><h2>{conversationTitle || "新的研究"}</h2></div>
-        <button className={styles.conversationNew} type="button" onClick={onNewStudy}><svg className={styles.iconSmall} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>新研究</button>
+        <div className={styles.conversationActions}>
+          {progressRun && !researchPanelOpen && <button ref={progressToggle} className={styles.progressOpen} type="button" onClick={openProgressPanel}><svg className={styles.iconSmall} viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h7" /></svg>研究进度</button>}
+          <button className={styles.conversationNew} type="button" onClick={onNewStudy}><svg className={styles.iconSmall} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>新研究</button>
+        </div>
       </div>
       <div ref={messagesElement} className={styles.messages} aria-live="polite">
         {loadingConversation && <p className={styles.loadingMessages}>正在读取研究记录…</p>}
@@ -429,5 +506,7 @@ export default function ResearchChat({
         </div>
       </>}
     </div>
+    </div>
+    {progressRun && researchPanelOpen && <ResearchProgressPanel run={progressRun} onClose={closeProgressPanel} closeButtonRef={progressCloseButton} />}
   </main>;
 }

@@ -1,7 +1,7 @@
 .dialog {
-  width: min(1060px, calc(100vw - 36px));
-  max-width: 1060px;
-  max-height: min(850px, calc(100dvh - 32px));
+  width: min(960px, calc(100vw - 36px));
+  max-width: 960px;
+  max-height: min(680px, 82dvh);
   padding: 0;
   overflow: hidden;
   border: 1px solid rgba(193, 174, 255, .22);
@@ -13,16 +13,16 @@
 }
 
 .dialog::backdrop {
-  background: rgba(3, 3, 8, .76);
-  backdrop-filter: blur(14px);
+  background: rgba(3, 3, 8, .62);
+  backdrop-filter: blur(3px);
 }
 
 .frame {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   width: 100%;
-  height: min(760px, calc(100dvh - 32px));
-  max-height: min(850px, calc(100dvh - 32px));
+  height: min(680px, 82dvh);
+  max-height: 82dvh;
 }
 
 .header {
@@ -32,15 +32,6 @@
   gap: 20px;
   padding: 23px 28px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, .09);
-}
-
-.eyebrow,
-.sectionLabel {
-  color: #a29ac0;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .15em;
-  text-transform: uppercase;
 }
 
 .header h1 {
@@ -74,6 +65,7 @@
 
 .closeButton:focus-visible,
 .tab:focus-visible,
+.aboutLink:focus-visible,
 .doneButton:focus-visible,
 .actionButton:focus-visible {
   outline: 2px solid #b9a3ff;
@@ -86,13 +78,41 @@
   grid-template-columns: 190px minmax(0, 1fr);
 }
 
+.sidebar {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .018);
+}
+
 .tabs {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 5px;
   padding: 20px 13px;
-  border-right: 1px solid rgba(255, 255, 255, .08);
-  background: rgba(255, 255, 255, .018);
+}
+
+.aboutLink {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 13px 18px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 10px;
+  color: #aaa7b8;
+  font-size: 13px;
+  text-decoration: none;
+  transition: color .16s, border-color .16s, background .16s;
+}
+
+.aboutLink:hover {
+  border-color: rgba(178, 146, 255, .2);
+  background: rgba(136, 98, 232, .1);
+  color: #eeeaff;
 }
 
 .tab {
@@ -286,7 +306,6 @@
   font-size: 11px;
 }
 
-.infoNote,
 .notice,
 .error,
 .loading {
@@ -392,6 +411,39 @@
   opacity: .65;
 }
 
+.directoryInput {
+  display: none;
+}
+
+.fileList {
+  display: grid;
+  max-height: min(48vh, 420px);
+  gap: 3px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 9px;
+  background: rgba(4, 4, 10, .28);
+  list-style: none;
+  scrollbar-color: rgba(183, 164, 226, .32) transparent;
+  scrollbar-width: thin;
+}
+
+.fileList li {
+  overflow-wrap: anywhere;
+  color: #c6c2d3;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.fileEmpty {
+  margin: 0;
+  color: #9995a8;
+  font-size: 12px;
+}
+
 .footer {
   display: flex;
   align-items: center;
@@ -466,141 +518,16 @@
   text-decoration: underline;
 }
 
-.dialog :global(.upload-form) {
-  display: grid;
-  gap: 8px;
-}
-
-.dialog :global(.upload-form label) {
-  color: #ddd9eb;
-}
-
-.dialog :global(.upload-form label span) {
-  color: #8f8a9d;
-}
-
-.dialog :global(.upload-form input:not([type="file"])) {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid rgba(255, 255, 255, .13);
-  border-radius: 8px;
-  background: rgba(4, 4, 10, .36);
-  color: #efedf8;
-}
-
-.dialog :global(.upload-form input[type="file"]) {
-  width: 100%;
-  color: #aaa7b8;
-  font-size: 11px;
-}
-
-.dialog :global(.upload-form input[type="file"]::file-selector-button) {
-  border: 1px solid rgba(177, 146, 255, .28);
-  border-radius: 6px;
-  background: rgba(139, 113, 211, .12);
-  color: #d6caff;
-  padding: 7px 9px;
-}
-
-.dialog :global(.compact-intro) {
-  margin: -12px 0 12px;
-  color: #aaa7b8;
-}
-
-.dialog :global(.source-level) {
-  background: rgba(71, 160, 139, .12);
-  color: #9bd8c1;
-}
-
-.dialog :global(.text-unavailable) {
-  color: #d4a985;
-}
-
-.dialog :global(.model-actions) {
-  display: flex;
-  gap: 16px;
-}
-
-.dialog :global(.model-action) {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: #c1adff;
-  font-size: 11px;
-  text-decoration: underline;
-}
-
-.dialog :global(.section-kicker) {
-  color: #a29ac0;
-}
-
-.dialog :global(.button.primary),
-.dialog :global(.button.secondary),
-.dialog :global(.button.danger) {
-  border: 1px solid rgba(177, 146, 255, .35);
-  background: rgba(139, 113, 211, .2);
-  color: #f0edfa;
-}
-
-.dialog :global(.button.danger) {
-  border-color: rgba(241, 124, 143, .32);
-  background: rgba(175, 58, 84, .2);
-}
-
-.dialog :global(.confirm-dialog) {
-  border-color: rgba(193, 174, 255, .22);
-  background: #15131e;
-  color: #eeedf7;
-}
-
-.dialog :global(.confirm-dialog h2),
-.dialog :global(.confirm-dialog p) {
-  color: #eeedf7;
-}
-
-.dialog :global(.confirm-dialog::backdrop) {
-  background: rgba(0, 0, 0, .74);
-}
-
-.dialog :global(.paper-row) {
-  border-color: rgba(255, 255, 255, .08);
-  background: rgba(255, 255, 255, .025);
-  color: #eeedf7;
-}
-
-.dialog :global(.paper-row h3),
-.dialog :global(.paper-row .metadata),
-.dialog :global(.paper-row .abstract),
-.dialog :global(.paper-row .paper-links) {
-  color: #b9b5c7;
-}
-
-.dialog :global(.paper-row a) {
-  color: #bda8ff;
-}
-
-.dialog :global(.library-card .empty-state) {
-  color: #aaa7b8;
-}
-
-.dialog :global(.library-card .empty-state strong) {
-  color: #c4c0d0;
-}
-
-.dialog :global(.library-card .empty-icon) {
-  color: #8c7cb8;
-}
-
 @media (max-width: 720px) {
   .dialog {
     width: calc(100vw - 18px);
-    max-height: calc(100dvh - 18px);
+    max-height: 82dvh;
     border-radius: 15px;
   }
 
   .frame {
-    height: calc(100dvh - 18px);
-    max-height: calc(100dvh - 18px);
+    height: 82dvh;
+    max-height: 82dvh;
   }
 
   .header {
@@ -613,6 +540,12 @@
 
   .tabs {
     padding: 13px 8px;
+  }
+
+  .aboutLink {
+    margin: 0 8px 12px;
+    padding: 0 9px;
+    font-size: 11px;
   }
 
   .tab {

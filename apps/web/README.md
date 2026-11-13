@@ -6,14 +6,16 @@
 
 工作区提供平铺历史导航和设置弹窗。初始研究模式为 deep；每次提问明确提交 `research_mode: deep|quick`。deep 强制进入研究流程，quick 强制直接回答并跳过背景调查与检索。API 仍接受旧客户端的 `auto`，省略模式也默认 auto；重试沿用原任务模式。设置中的“研究偏好”标签保留为不生效的占位，不影响后端；“通用”和“外观”偏好保存在本地，模型选择只用于下一次提问。
 
-设置弹窗与 `/settings` 页面共用 `SettingsPanel`，管理服务与模型、网页搜索、当前项目 PDF、研究偏好占位、外观和关于信息。导入后刷新文件列表，原文访问继续走本地 API。所有业务数据请求通过本机 `/api` 代理，不由浏览器直接访问数据库或携带服务密钥访问云端。
+设置按钮和 `/settings` 都在工作区上方打开 `SettingsPanel`。本地文件标签通过浏览器选择目录并预览文件相对路径，关于入口在新标签页打开 GitHub。所有业务数据请求通过本机 `/api` 代理，不由浏览器直接访问数据库或携带服务密钥访问云端。
+
+深度研究提交后自动展开右侧进度栏，通过已有任务轮询显示真实阶段和小结。关闭进度栏后仍可从聊天中打开，快速探索在聊天内显示状态。
 
 | 模块 | 职责 |
 |---|---|
 | `app/page.tsx`、`launch/LaunchPage.tsx`、`launch/LaunchPage.module.css` | 独立开始页路由、内容与 LED Canvas 动画 |
 | `app/workspace/page.tsx`、`workspace/WorkspacePage.tsx`、`WorkspacePage.module.css` | 工作区路由、项目范围、单层历史抽屉、设置弹窗及其深色样式 |
-| `workspace/ResearchChat.tsx`、`ResearchChat.module.css` | 当前会话消息、deep/quick 模式、任务阶段与小结、轮询、重试、证据和下载 |
-| `app/settings/SettingsPanel.tsx`、`SettingsPanel.module.css`、`app/settings/page.tsx` | 工作区弹窗与 `/settings` 共用的服务、模型、网页搜索、PDF、研究占位及外观设置 |
+| `workspace/ResearchChat.tsx`、`ResearchChat.module.css` | 当前会话消息、deep/quick 模式、研究进度栏、轮询、重试、证据和下载 |
+| `app/settings/SettingsPanel.tsx`、`SettingsPanel.module.css`、`app/settings/page.tsx` | 设置弹窗、直接访问入口、服务配置和本地目录预览 |
 | `workspace/PdfImport.tsx`、`workspace/PaperLibrary.tsx`、`workspace/PaperRow.tsx` | 当前项目 PDF 导入、刷新、列表和原文访问 |
 | `app/settings/WebSearchSettings.tsx`、`RuntimeLogsSettings.tsx` | 网页搜索设置及本地运行日志管理 |
 | `workspace/api.ts`、`workspace/types.ts`、`workspace/sourceLabels.ts` | 工作区请求辅助、API 数据类型及来源标签 |

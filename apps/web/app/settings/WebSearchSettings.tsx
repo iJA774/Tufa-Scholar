@@ -52,7 +52,7 @@ export default function WebSearchSettings() {
   };
   return <form className="settings-form web-search-settings" onSubmit={save}>
     <section className="card settings-card">
-      <div className="section-kicker">WEB SEARCH</div><h2>网页搜索</h2>
+      <h2>网页搜索</h2>
       <p>深度研究可按研究计划使用已保存的网页搜索引擎；快速探索不进行检索。搜索服务配置在这里保存。</p>
       {loadError && <p className="settings-alert error" role="alert">{loadError} <button className="model-action" type="button" onClick={() => setReload(value => value + 1)}>重试读取</button></p>}
       {error && <p className="settings-alert error" role="alert">{error}</p>}
