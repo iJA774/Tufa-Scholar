@@ -1,0 +1,328 @@
+.stage {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  min-width: 320px;
+  min-height: 100vh;
+  min-height: 100svh;
+  overflow: hidden;
+  color-scheme: dark;
+  color: #f1f2f8;
+  background:
+    radial-gradient(ellipse 53% 29% at 50% 52%, rgba(59, 48, 98, .17), transparent 75%),
+    radial-gradient(ellipse 31% 24% at 23% 57%, rgba(33, 122, 159, .065), transparent 85%),
+    radial-gradient(ellipse 30% 27% at 79% 57%, rgba(148, 43, 121, .078), transparent 85%),
+    #050508;
+  font-family: Inter, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.stage::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(169, 172, 206, .065) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(169, 172, 206, .065) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, transparent 1%, #000 25%, #000 85%, transparent 100%);
+  opacity: .19;
+  content: "";
+  pointer-events: none;
+}
+
+.stage::after {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(0, 0, 0, .15) 3px 4px);
+  mix-blend-mode: soft-light;
+  opacity: .15;
+  content: "";
+  pointer-events: none;
+}
+
+.topbar {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 37px clamp(24px, 4.6vw, 76px);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+  user-select: none;
+}
+
+.brandMonogram {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  color: #8799ff;
+  filter: drop-shadow(0 0 9px rgba(147, 114, 255, .18));
+  font-family: "Arial Black", "Segoe UI Black", sans-serif;
+  font-size: 22px;
+  font-weight: 950;
+  letter-spacing: -.065em;
+  line-height: 1;
+}
+
+.brandMonogram span:nth-child(1) { color: #60e4f4; }
+.brandMonogram span:nth-child(2) { color: #8799ff; }
+.brandMonogram span:nth-child(3) { color: #c18cff; }
+.brandMonogram span:nth-child(4) { color: #ff93be; }
+
+.brandRule {
+  width: 1px;
+  height: 29px;
+  background: linear-gradient(transparent, rgba(255, 255, 255, .36), transparent);
+}
+
+.brandName {
+  display: block;
+  color: #d0d0dd;
+  font-size: 12px;
+  font-weight: 570;
+  letter-spacing: .055em;
+  line-height: 1.5;
+}
+
+.headerIndex {
+  color: #646473;
+  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.headerIndex i {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 11px;
+  border-radius: 50%;
+  background: #61dac9;
+  box-shadow: 0 0 11px rgba(82, 226, 205, .75);
+  vertical-align: 2px;
+}
+
+.content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 30px 20px 65px;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  text-align: center;
+  transform: translateY(-4px);
+}
+
+.eyebrow {
+  margin: 0 0 19px;
+  color: #818394;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .36em;
+  text-transform: uppercase;
+  animation: rise .8s .1s both;
+}
+
+.claim {
+  margin: 0;
+  color: #f4f2fc;
+  font-size: clamp(23px, 2.5vw, 34px);
+  font-weight: 450;
+  letter-spacing: .25em;
+  text-indent: .25em;
+  text-shadow: 0 0 24px rgba(255, 255, 255, .13);
+  animation: rise .9s .22s both;
+}
+
+.logoArea {
+  position: relative;
+  width: min(1220px, 94vw);
+  height: clamp(176px, 25.5vw, 335px);
+  margin: 10px 0 11px;
+}
+
+.logoArea::before {
+  position: absolute;
+  z-index: -1;
+  top: 33%;
+  left: 12%;
+  width: 76%;
+  height: 39%;
+  background: linear-gradient(90deg, rgba(36, 186, 207, .12), rgba(106, 86, 244, .14) 43%, rgba(244, 85, 155, .12) 75%, rgba(238, 159, 76, .11));
+  filter: blur(42px);
+  opacity: .8;
+  content: "";
+  animation: ambient 6s ease-in-out infinite alternate;
+}
+
+.ledLogo {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.logoFallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(90deg, #40dce8, #758cff 35%, #be77ed 63%, #ff7cad 82%, #e9ae58);
+  background-clip: text;
+  color: transparent;
+  font-family: "Arial Black", "Segoe UI Black", sans-serif;
+  font-size: min(25vw, 250px);
+  font-weight: 950;
+  letter-spacing: -.08em;
+  -webkit-background-clip: text;
+}
+
+.logoSubtitle {
+  margin: 0;
+  color: #818190;
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: .32em;
+  text-indent: .32em;
+  animation: rise 1s 1.25s both;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: clamp(30px, 5vh, 52px);
+  animation: rise 1s 1.65s both;
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-width: 174px;
+  height: 49px;
+  padding: 0 28px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 620;
+  letter-spacing: .035em;
+  text-decoration: none;
+  transition: transform .25s ease, box-shadow .25s ease, background .25s ease, border-color .25s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.action:hover { transform: translateY(-2px); }
+.action:active { transform: translateY(0); }
+.action:focus-visible { outline: 2px solid #91bdff; outline-offset: 4px; }
+
+.actionPrimary {
+  border: 1px solid rgba(255, 255, 255, .89);
+  background: #f4f3fb;
+  box-shadow: 0 5px 38px rgba(216, 207, 255, .09);
+  color: #111016;
+}
+
+.actionPrimary:hover { background: #fff; box-shadow: 0 5px 35px rgba(216, 207, 255, .24); }
+
+.actionSecondary {
+  border: 1px solid rgba(235, 235, 255, .24);
+  background: rgba(255, 255, 255, .025);
+  color: #e4e3ee;
+}
+
+.actionSecondary:hover { border-color: rgba(235, 235, 255, .45); background: rgba(255, 255, 255, .07); }
+.actionSecondary svg { width: 20px; height: 20px; fill: currentColor; }
+
+.arrow {
+  margin-left: 9px;
+  font-size: 18px;
+  font-weight: 350;
+  line-height: 1;
+}
+
+.footer {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px clamp(24px, 4.6vw, 76px) 29px;
+  color: #50525e;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+.footerRight { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.footerRight::before { width: 5px; height: 5px; border: 1px solid #777d90; content: ""; transform: rotate(45deg); }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(11px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ambient {
+  from { opacity: .5; transform: scale(.94); }
+  to { opacity: 1; transform: scale(1.08); }
+}
+
+@media (max-width: 720px) {
+  .topbar { padding-top: 26px; padding-bottom: 24px; }
+  .headerIndex { display: none; }
+  .brand { gap: 13px; }
+  .brandMonogram { font-size: 20px; }
+  .brandName { font-size: 10px; letter-spacing: 0; }
+  .brandRule { height: 25px; }
+  .content { padding-bottom: 55px; }
+  .eyebrow { font-size: 8px; letter-spacing: .24em; }
+  .claim { letter-spacing: .16em; text-indent: .16em; }
+  .logoArea { width: 100%; height: clamp(135px, 29vw, 190px); margin: 18px 0 12px; }
+  .logoSubtitle { font-size: 9px; letter-spacing: clamp(.08em, .75vw, .22em); }
+  .actions { gap: 9px; margin-top: 38px; }
+  .action { width: 148px; min-width: 0; height: 47px; padding: 0 14px; font-size: 12px; }
+  .footer { padding-bottom: 22px; font-size: 8px; letter-spacing: .06em; }
+}
+
+@media (max-width: 390px) {
+  .brandName { font-size: 9px; }
+  .actions { width: 100%; }
+  .action { width: 45%; }
+  .footerRight { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage *,
+  .stage *::before,
+  .stage *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

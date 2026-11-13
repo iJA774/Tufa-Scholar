@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Tufa Scholar",
-  description: "本地科研助手",
+  title: "TUFA Scholar",
+  description: "Traceable Unified Fact-finding Agent。学术，触手可及。",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
