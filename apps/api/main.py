@@ -128,6 +128,7 @@ class QuestionInput(BaseModel):
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
     source: Literal['auto', 'all', 'local', 'openalex', 'collection', 'web'] = 'auto'
+    research_mode: Literal['auto', 'deep', 'quick'] = 'auto'
     conversation_id: int | None = None
     collection_id: int | None = None
 
@@ -234,6 +235,11 @@ def conversations(project_id: int):
     return repo.list_conversations(project_id)
 
 
+@app.get('/conversations')
+def all_conversations():
+    return repo.list_all_conversations()
+
+
 @app.post('/projects/{project_id}/conversations', status_code=201)
 def create_conversation(project_id: int, body: ConversationInput):
     require_project(project_id)
@@ -317,7 +323,10 @@ def ask_question(project_id: int, body: QuestionInput):
         levels = selected['reasoning_efforts'] if selected and selected['reasoning_efforts'] else ['low', 'medium', 'high']
         if effort not in levels:
             raise HTTPException(422, '所选模型未声明支持该思考强度，请刷新模型列表或使用供应商默认')
-    result = repo.create_question(project_id, body.conversation_id, body.question.strip(), body.source, body.collection_id, model_name, effort)
+    result = repo.create_question(
+        project_id, body.conversation_id, body.question.strip(), body.source,
+        body.collection_id, model_name, effort, research_mode=body.research_mode,
+    )
     if result is None:
         raise HTTPException(404, '项目或对话不存在')
     return result

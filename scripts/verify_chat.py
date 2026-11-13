@@ -1,6 +1,7 @@
 """Verify chat through the real API and worker with a local model fixture only."""
 
 import io
+import json
 import os
 import re
 import subprocess
@@ -101,23 +102,38 @@ def main():
             # Exercise the real failed-task/retry path before configuring a model.
             pending = call('POST', f'/projects/{project}/questions', json={
                 'question': 'accuracy', 'source': 'local', 'model_name': 'fixture-selected',
+                'research_mode': 'deep',
             })
             failed = wait(pending['run_id'])
             assert failed['status'] == 'failed' and '配置模型' in failed.get('error', ''), failed
+            failed_detail = call('GET', f"/runs/{pending['run_id']}")
+            assert failed_detail['research_mode'] == 'deep', failed_detail
 
             call('PUT', '/settings', json={
                 'openai_base_url': f'http://127.0.0.1:{fixture.server_port}/v1',
                 'openai_model': 'fixture-default',
             })
             retry = call('POST', f"/runs/{pending['run_id']}/retry")
+            assert retry['research_mode'] == 'deep', retry
             completed = wait(retry['id'])
             assert completed['status'] == 'succeeded', completed
+            assert completed['research_mode'] == 'deep', completed
             result = completed['result']
             assert '92%' in result['content']
             assert result['evidence'] and result['evidence'][0]['page'] == 1
             assert result['evidence'][0]['version_id'] == imported['versions'][0]['id']
             assert completed['stage'] == 'completed'
-            assert stages(retry['id'])[-1:] == ['reporter'], stages(retry['id'])
+            retry_stages = stages(retry['id'])
+            assert retry_stages[-1:] == ['reporter'], retry_stages
+            assert 'background_investigator' in retry_stages, retry_stages
+            retry_roles = [
+                line.split('运行节点标识：', 1)[1].splitlines()[0].strip()
+                for item in fixture.model_requests
+                if json.loads(item['messages'][1]['content']).get('question') == 'accuracy'
+                for line in item['messages'][0]['content'].splitlines()
+                if '运行节点标识：' in line
+            ]
+            assert retry_roles and retry_roles[0] == 'background_investigator' and 'dispatcher' not in retry_roles, retry_roles
             assert 'accuracy-fixture.pdf' in str([
                 item['messages'][0]['content'] for item in fixture.model_requests
                 if '运行节点标识：planner' in item['messages'][0]['content']
@@ -161,7 +177,7 @@ def main():
 
             messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
             assert len(messages) == 2
-            print('Simulated model: API, worker, failed-task retry, direct answer, PDF evidence, report and empty collection passed.')
+            print('Simulated model: API/worker, deep-mode retry persistence, direct answer, PDF evidence, report and empty collection passed.')
             print('Cloud model and real-provider quality were not exercised.')
     finally:
         try:

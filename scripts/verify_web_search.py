@@ -86,6 +86,51 @@ def main():
             assert failed_search.status_code == 503
             assert '网络搜索失败' in failed_search.text
 
+            # The fixture dispatcher deliberately asks for research in quick mode.
+            # The worker must honor the stored mode and finish without background/search tools.
+            searches_before_quick = len(fixture.search_requests)
+            requests_before_quick = len(fixture.model_requests)
+            quick = call('POST', f'/projects/{project}/questions', json={
+                'question': 'quick-mode contradiction accuracy', 'source': 'web', 'research_mode': 'quick',
+            })
+            quick_task = wait(quick['run_id'])
+            assert quick_task['status'] == 'succeeded', quick_task
+            assert quick_task['research_mode'] == 'quick', quick_task
+            assert quick_task['result']['evidence'] == []
+            assert 'quick 模式应返回的直接回答' in quick_task['result']['content']
+            quick_requests = fixture.model_requests[requests_before_quick:]
+            quick_roles = [
+                line.split('运行节点标识：', 1)[1].splitlines()[0].strip()
+                for item in quick_requests
+                for line in item['messages'][0]['content'].splitlines()
+                if '运行节点标识：' in line
+            ]
+            assert quick_roles == ['dispatcher'], quick_roles
+            assert stages(quick['run_id']) == ['dispatcher'], stages(quick['run_id'])
+            assert len(fixture.search_requests) == searches_before_quick, fixture.search_requests[searches_before_quick:]
+
+            # Deep mode must research even a greeting; production bypasses the dispatcher.
+            searches_before_deep = len(fixture.search_requests)
+            requests_before_deep = len(fixture.model_requests)
+            deep = call('POST', f'/projects/{project}/questions', json={
+                'question': 'hello', 'source': 'web', 'research_mode': 'deep',
+            })
+            deep_task = wait(deep['run_id'])
+            assert deep_task['status'] == 'succeeded', deep_task
+            assert deep_task['research_mode'] == 'deep', deep_task
+            deep_requests = fixture.model_requests[requests_before_deep:]
+            deep_roles = [
+                line.split('运行节点标识：', 1)[1].splitlines()[0].strip()
+                for item in deep_requests
+                for line in item['messages'][0]['content'].splitlines()
+                if '运行节点标识：' in line
+            ]
+            assert deep_roles and deep_roles[0] == 'background_investigator', deep_roles
+            assert 'dispatcher' not in deep_roles, deep_roles
+            deep_stages = stages(deep['run_id'])
+            assert 'background_investigator' in deep_stages and deep_stages[-1:] == ['reporter'], deep_stages
+            assert len(fixture.search_requests) > searches_before_deep, fixture.search_requests[searches_before_deep:]
+
             question = call('POST', f'/projects/{project}/questions', json={
                 'question': 'accuracy', 'source': 'web', 'model_name': 'fixture-web-selected',
             })
@@ -134,6 +179,8 @@ def main():
             assert '没有可核查证据' in failed_task['result']['content'] or '证据不足' in failed_task['result']['content']
             assert len(fixture.search_requests) - before_failure_searches >= 4, fixture.search_requests[before_failure_searches:]
 
+            print('Simulated HTTP: quick mode stayed direct despite a contradictory dispatcher, with zero searches.')
+            print('Simulated HTTP: deep mode researched a greeting through background search and reporting.')
             print('Simulated HTTP: API web search, background filtering, web evidence and cited report passed.')
             print('Provider failure: API reports a safe error; bounded researcher retries end in an explicit no-evidence report.')
             print('No real search provider or remote web page was contacted.')

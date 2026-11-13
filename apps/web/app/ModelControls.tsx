@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import type { ModelChoice } from "./workspace/preferences";
 
-export type ModelChoice = { model_name: string; reasoning_effort: string };
+export type { ModelChoice } from "./workspace/preferences";
 type Model = { id: string; reasoning_efforts: string[]; default_effort: string | null };
 const labels: Record<string, string> = { none: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" };
 

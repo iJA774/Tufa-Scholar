@@ -196,6 +196,7 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
     catalog = _catalog_for_mode(research, search_mode) if available_tools is None and search_mode in ("web", "paper") else (available_tools or [])
     template_context = {
         "search_mode": search_mode,
+        "research_mode": research.get("research_mode", "auto"),
         "available_tools": catalog,
         "local_papers": research.get("local_papers", []),
         "node_role": node_role,
@@ -1318,7 +1319,10 @@ def _reporter(state, on_stage):
 def _dispatch(state, on_stage):
     _emit(on_stage, "dispatcher")
     research = state["research"]
-    if research["source"] == "collection":
+    research_mode = research.get("research_mode", "auto")
+    if research_mode == "deep":
+        return {"needs_research": True}
+    if research_mode != "quick" and research["source"] == "collection":
         return {"needs_research": True}
     try:
         result = _model(
@@ -1330,10 +1334,16 @@ def _dispatch(state, on_stage):
             search_mode="none",
             available_tools=[],
         )
+        if research_mode == "quick":
+            if not result.answer.strip():
+                raise StructuredOutputError("快速探索模式未返回直接答案")
+            return {"needs_research": False, "content": result.answer, "evidence": []}
         if result.needs_research:
             return {"needs_research": True}
         return {"needs_research": False, "content": result.answer, "evidence": []}
     except (ModelServiceError, StructuredOutputError):
+        if research_mode == "quick":
+            raise
         return {
             "needs_research": True,
             "errors": list(state.get("errors", [])) + [_safe_error("dispatcher", "model_failed", "路由模型不可用，按有限研究流程继续。")],
@@ -1388,6 +1398,8 @@ def run(research, *, history, on_stage=None, on_subtask=None):
     missing = required - set(research)
     if missing:
         raise ValueError("research input is missing required fields")
+    if research.get("research_mode", "auto") not in {"auto", "deep", "quick"}:
+        raise ValueError("research_mode must be auto, deep, or quick")
     initial = {
         "research": dict(research),
         "history": _safe_history(history, research["source"]),

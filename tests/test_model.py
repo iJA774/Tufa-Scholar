@@ -24,10 +24,11 @@ class ModelTests(unittest.TestCase):
         self.addCleanup(self.diagnostics.stop)
 
     @staticmethod
-    def context(role='test node', mode='none', tools=None, local_papers=None):
+    def context(role='test node', mode='none', tools=None, local_papers=None, research_mode='auto'):
         return {
             'node_role': role,
             'search_mode': mode,
+            'research_mode': research_mode,
             'available_tools': tools or [],
             'local_papers': local_papers or [],
         }
@@ -268,6 +269,19 @@ class ModelTests(unittest.TestCase):
             self.assertIn('（无可调用工具）', system)
         finally:
             os.chdir(original_cwd)
+
+    def test_dispatcher_prompt_uses_trusted_research_mode_context(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+            structured(
+                'runtime/dispatcher', {'question': 'safe payload'}, Output,
+                template_context=self.context(research_mode='quick'),
+            )
+        system = post.call_args.kwargs['json']['messages'][0]['content']
+        user = post.call_args.kwargs['json']['messages'][1]['content']
+        self.assertIn('当前是快速探索模式', system)
+        self.assertIn('answer', system)
+        self.assertEqual(json.loads(user), {'question': 'safe payload'})
 
     def test_missing_config_never_calls_http(self):
         with patch('src.integrations.model.settings.model_config', return_value={}), patch('src.integrations.model.httpx.post') as post:

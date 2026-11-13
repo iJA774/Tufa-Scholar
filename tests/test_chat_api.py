@@ -1,5 +1,6 @@
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -42,6 +43,7 @@ class ChatApiTests(unittest.TestCase):
         repo.claim_task(); repo.fail_task(run['run_id'],'failure')
         retry=c.post(f"/runs/{run['run_id']}/retry").json()
         self.assertEqual(retry['source'], 'auto')
+        self.assertEqual(retry['research_mode'], 'auto')
         self.assertEqual(retry['kind'],'chat'); self.assertEqual(repo.claim_task()['id'],retry['id'])
         repo.finish_chat_task(retry['id'],'回答',[])
         self.assertEqual([m['role'] for m in c.get(f"/conversations/{run['conversation_id']}/messages").json()],['user','assistant'])
@@ -56,6 +58,89 @@ class ChatApiTests(unittest.TestCase):
         selected = c.post(f'/projects/{project}/questions', json={'question': 'q', 'source': 'collection', 'collection_id': collection})
         self.assertEqual(selected.status_code, 201)
         self.assertEqual(repo.get_task(selected.json()['run_id'])['source'], 'collection')
+        self.assertEqual(repo.get_task(selected.json()['run_id'])['research_mode'], 'auto')
+        quick = c.post(f'/projects/{project}/questions', json={
+            'question': 'q', 'source': 'collection', 'collection_id': collection, 'research_mode': 'quick',
+        })
+        self.assertEqual(quick.status_code, 201)
+        self.assertEqual(repo.get_task(quick.json()['run_id'])['research_mode'], 'quick')
+
+    def test_research_mode_validation_and_retry_persistence(self):
+        c = self.client
+        project = c.post('/projects', json={'name': 'research modes'}).json()['id']
+        invalid = c.post(f'/projects/{project}/questions', json={
+            'question': 'q', 'research_mode': 'fast',
+        })
+        self.assertEqual(invalid.status_code, 422)
+
+        created = c.post(f'/projects/{project}/questions', json={
+            'question': 'quick answer', 'research_mode': 'quick',
+        })
+        self.assertEqual(created.status_code, 201)
+        task = repo.get_task(created.json()['run_id'])
+        self.assertEqual(task['research_mode'], 'quick')
+        self.assertEqual(c.get(f"/runs/{task['id']}").json()['research_mode'], 'quick')
+        repo.claim_task()
+        repo.fail_task(task['id'], 'failed')
+        retry = c.post(f"/runs/{task['id']}/retry").json()
+        self.assertEqual(retry['research_mode'], 'quick')
+        self.assertEqual(repo.claim_task()['id'], retry['id'])
+
+        old_client = c.post(f'/projects/{project}/questions', json={'question': 'legacy request'})
+        self.assertEqual(old_client.status_code, 201)
+        self.assertEqual(repo.get_task(old_client.json()['run_id'])['research_mode'], 'auto')
+
+    def test_global_conversations_are_flat_sorted_and_keep_project_ids(self):
+        c = self.client
+        first_project = c.post('/projects', json={'name': 'project one'}).json()['id']
+        second_project = c.post('/projects', json={'name': 'project two'}).json()['id']
+        older = c.post(f'/projects/{first_project}/questions', json={'question': 'older'}).json()
+        newer = c.post(f'/projects/{second_project}/questions', json={'question': 'newer'}).json()
+        empty = c.post(f'/projects/{first_project}/conversations', json={'title': 'empty'}).json()
+
+        from src.persistence.storage import connect_database
+        with connect_database() as db:
+            db.execute("UPDATE messages SET created_at='2026-11-10 09:00:00' WHERE run_id=?", (repo.get_task(older['run_id'])['id'],))
+            db.execute("UPDATE messages SET created_at='2026-11-12 09:00:00' WHERE run_id=?", (repo.get_task(newer['run_id'])['id'],))
+            db.commit()
+
+        rows = c.get('/conversations').json()
+        self.assertEqual([item['id'] for item in rows], [newer['conversation_id'], older['conversation_id'], empty['id']])
+        self.assertEqual([item['project_id'] for item in rows], [second_project, first_project, first_project])
+        self.assertEqual(rows[0]['updated_at'], '2026-11-12 09:00:00')
+        self.assertIsNone(rows[-1]['updated_at'])
+        self.assertTrue(all(set(item) == {'id', 'project_id', 'title', 'updated_at'} for item in rows))
+        self.assertEqual(c.get(f'/projects/{first_project}/conversations').status_code, 200)
+
+    def test_existing_task_rows_migrate_to_auto_without_rebuilding_database(self):
+        from src.persistence.storage import initialize_storage
+
+        with tempfile.TemporaryDirectory() as legacy_dir:
+            path = os.path.join(legacy_dir, 'research.db')
+            db = sqlite3.connect(path)
+            db.executescript("""
+                CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE conversations (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), title TEXT NOT NULL);
+                CREATE TABLE tasks (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER REFERENCES conversations(id), query TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL, result TEXT, error TEXT);
+                CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id), role TEXT NOT NULL, content TEXT NOT NULL, run_id INTEGER REFERENCES tasks(id), metadata TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                INSERT INTO projects VALUES (1, 'legacy');
+                INSERT INTO conversations VALUES (1, 1, 'legacy conversation');
+                INSERT INTO tasks (id, project_id, conversation_id, query, source, status, stage) VALUES (1, 1, 1, 'q', 'auto', 'pending', 'pending');
+                INSERT INTO messages (id, conversation_id, role, content, run_id) VALUES (1, 1, 'user', 'legacy message', 1);
+            """)
+            db.close()
+
+            with patch.dict(os.environ, {'TUFA_DATA_DIR': legacy_dir}):
+                initialize_storage()
+                initialize_storage()
+                from src.persistence.storage import connect_database
+                with connect_database() as migrated:
+                    row = migrated.execute('SELECT query, research_mode FROM tasks WHERE id=1').fetchone()
+                    self.assertEqual(tuple(row), ('q', 'auto'))
+                    message = migrated.execute('SELECT content FROM messages WHERE id=1').fetchone()
+                    self.assertEqual(message[0], 'legacy message')
+                    migrated.execute("INSERT INTO tasks (project_id, query, source, status, stage, kind) VALUES (1, 'new', 'auto', 'pending', 'pending', 'chat')")
+                    self.assertEqual(migrated.execute('SELECT research_mode FROM tasks WHERE query=?', ('new',)).fetchone()[0], 'auto')
 
     def test_retry_keeps_original_history_boundary(self):
         c = self.client

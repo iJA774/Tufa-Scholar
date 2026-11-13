@@ -30,6 +30,7 @@ PROMPT_ENV = Environment(
 DEFAULT_TEMPLATE_CONTEXT = {
     'node_role': '',
     'search_mode': 'none',
+    'research_mode': 'auto',
     'available_tools': [],
     'local_papers': [],
 }

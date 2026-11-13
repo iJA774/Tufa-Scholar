@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+from src.integrations.model import ModelServiceError, StructuredOutputError
 
 
 def paper(identifier, title, abstract, doi=None):
@@ -181,6 +182,57 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(stages, ['dispatcher'])
         self.assertEqual([call[0] for call in fixture.calls], ['runtime/dispatcher'])
         invoke.assert_not_called()
+
+    def test_quick_mode_returns_dispatcher_answer_without_research_even_for_collection(self):
+        calls = []
+
+        def model(prompt_id, payload, schema, **kwargs):
+            calls.append((prompt_id, payload, kwargs))
+            return workflow.DispatcherOutput(needs_research=True, reason='模型建议深研', answer='快速探索直接回答。')
+
+        research = {
+            'project_id': 1, 'query': 'quick question', 'source': 'collection',
+            'paper_ids': [7], 'research_mode': 'quick',
+        }
+        with patch.object(workflow, 'structured', side_effect=model), patch.object(workflow.registry, 'invoke') as invoke:
+            content, evidence = workflow.run(research, history=[{'role': 'user', 'content': 'PRIVATE_HISTORY'}])
+
+        self.assertEqual(content, '快速探索直接回答。')
+        self.assertEqual(evidence, [])
+        self.assertEqual([item[0] for item in calls], ['runtime/dispatcher'])
+        self.assertEqual(calls[0][1]['history'], [])
+        self.assertEqual(calls[0][2]['template_context']['research_mode'], 'quick')
+        invoke.assert_not_called()
+
+    def test_quick_mode_dispatcher_failures_raise_without_falling_back_to_research(self):
+        research = {'project_id': 1, 'query': 'q', 'source': 'auto', 'research_mode': 'quick'}
+        for failure in (
+            ModelServiceError('service error'),
+            StructuredOutputError('invalid response'),
+        ):
+            with self.subTest(failure=type(failure).__name__), \
+                 patch.object(workflow, 'structured', side_effect=failure), \
+                 patch.object(workflow.registry, 'invoke') as invoke:
+                with self.assertRaises(type(failure)):
+                    workflow.run(research, history=[])
+                invoke.assert_not_called()
+
+        with patch.object(workflow, 'structured', return_value=workflow.DispatcherOutput(
+            needs_research=True, reason='研究', answer=''
+        )), patch.object(workflow.registry, 'invoke') as invoke:
+            with self.assertRaises(StructuredOutputError):
+                workflow.run(research, history=[])
+            invoke.assert_not_called()
+
+    def test_deep_mode_skips_dispatcher_model_and_enters_background(self):
+        fixture = ModelFixture(initial_source='paper')
+        stages = []
+        research = {'project_id': 1, 'query': 'accuracy', 'source': 'local', 'research_mode': 'deep'}
+        self.run_with_fixture(fixture, research, on_stage=stages.append)
+        prompt_ids = [call[0] for call in fixture.calls]
+        self.assertNotIn('runtime/dispatcher', prompt_ids)
+        self.assertIn('literature/background_investigator', prompt_ids)
+        self.assertEqual(stages[0:2], ['dispatcher', 'background_investigator'])
 
     def test_background_search_filters_candidates_and_single_round_finishes(self):
         wanted = paper(7, 'Accuracy study', 'Accuracy was 92%.')
