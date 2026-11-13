@@ -274,18 +274,15 @@ export default function LaunchPage() {
           <span className={styles.brandRule} aria-hidden="true" />
           <span className={styles.brandName}>Traceable Unified<br />Fact-finding Agent</span>
         </div>
-        <div className={styles.headerIndex}><i aria-hidden="true" />INTELLIGENT RESEARCH SYSTEM&nbsp; / &nbsp;01</div>
       </header>
 
       <main className={styles.content}>
         <section className={styles.hero} aria-labelledby="hero-title">
-          <p className={styles.eyebrow}>DISCOVER <span aria-hidden="true">/</span> VERIFY <span aria-hidden="true">/</span> UNDERSTAND</p>
           <h1 className={styles.claim} id="hero-title">学术，触手可及</h1>
           <div className={styles.logoArea} role="img" aria-label="由彩色 LED 灯珠组成的 TUFA 字样，从左向右点亮并缓慢呼吸">
             <canvas ref={canvasRef} className={styles.ledLogo} aria-hidden="true" />
             {canvasUnavailable && <span className={styles.logoFallback} aria-hidden="true">TUFA</span>}
           </div>
-          <p className={styles.logoSubtitle}>TRACEABLE · UNIFIED · FACT-FINDING · AGENT</p>
           <div className={styles.actions}>
             <Link className={`${styles.action} ${styles.actionPrimary}`} href="/workspace">
               开始使用<span className={styles.arrow} aria-hidden="true">↗</span>
@@ -298,10 +295,6 @@ export default function LaunchPage() {
         </section>
       </main>
 
-      <footer className={styles.footer}>
-        <span>DESIGNED FOR THE CURIOUS MIND</span>
-        <span className={styles.footerRight}>RESEARCH BEYOND BOUNDARIES</span>
-      </footer>
     </div>
   );
 }

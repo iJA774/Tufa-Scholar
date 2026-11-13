@@ -52,7 +52,7 @@ pnpm dev:web
 
 ## 使用
 
-打开首页后点击“开始使用”进入研究工作区；GitHub 入口会在新标签页打开 [Tufa Scholar 仓库](https://github.com/iJA774/Tufa-Scholar)。首页不依赖 API。研究工作区使用本机 `/api` 代理。历史以跨项目的平铺列表展示；打开历史时工作区切换至其所属项目。
+打开首页后点击“开始使用”进入研究工作区；GitHub 入口会在新标签页打开 [Tufa Scholar 仓库](https://github.com/iJA774/Tufa-Scholar)。首页不依赖 API。研究工作区使用本机 `/api` 代理。将光标移到左上角标志可展开研究历史，移出标志和抽屉会收起。悬浮在会话上时，可用右侧“…”置顶、解除置顶或删除。置顶状态保存在本机；删除需确认，且有待处理或正在运行任务的会话暂不能删除。打开历史时工作区切换至其所属项目。
 
 在提问框切换“深度研究”或“快速探索”并输入问题。深度研究无条件进入研究流程；快速探索无条件直接回答，不调用检索工具。重试沿用原任务模式。设置中的“通用”可选择本次模型、思考强度及发送快捷键；“研究偏好”仅展示禁用的占位控件，不影响后端。
 
@@ -71,7 +71,9 @@ pnpm dev:web
 | `GET/PUT /settings` | 读取配置状态或保存本机配置，不返回密钥原文 |
 | `POST /settings/models`、`GET /models` | 发现或列出模型 |
 | `GET/POST /projects/{project_id}/conversations` | 列出、创建对话 |
-| `GET /conversations` | 跨项目平铺列出历史会话，按更新时间倒序并返回所属 `project_id` |
+| `GET /conversations` | 跨项目平铺列出历史会话，置顶优先，其余按更新时间倒序，返回 `project_id` 与 `pinned` |
+| `PATCH /conversations/{conversation_id}` | 设置 `pinned` 布尔值，返回更新后的会话 |
+| `DELETE /conversations/{conversation_id}` | 删除该会话、消息、报告及其任务；若有待处理或正在运行的任务则返回 409 |
 | `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
 | `POST /projects/{project_id}/papers/import` | 上传 PDF |
 | `GET /projects/{project_id}/web-search?q=...` | 独立网页搜索 |
@@ -143,3 +145,10 @@ pnpm build:web
 - `pnpm check:web`、未设置 `TUFA_API_URL` 时的 `pnpm build:web`：最终通过；构建产物的 `/api` 代理恢复为 `http://127.0.0.1:8000`。
 - `pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck` 与 `node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)`：通过，轮询回归 5/5；`git diff --check` 通过。
 - 本轮只验收桌面 1280×720，没有执行移动端 viewport 验收。自启的前端、模拟 API 与参考服务已停止；用户原有 `next-env.d.ts` 和 `.idea/` 改动保留，未操作默认用户数据库。
+
+### 研究历史操作验收（2026-11-13）
+
+- `pnpm check:web`、`pnpm build:web`：通过。
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q`：148 项通过。覆盖置顶排序、删除任务冲突、重试链和会话关联数据清理。
+- 使用 `pnpm` 工作区的 Next.js 开发入口与 `scripts.fixture_api --local-config`，以隔离 SQLite 验证 `/`、`/workspace`。1280×720 桌面浏览器验证开始页导航、指定文案移除、指针进出抽屉、悬浮行显示操作、置顶后刷新保留、解除置顶、删除确认弹窗及取消后保留会话。
+- 确认删除的持久化结果通过同一隔离 fixture 的 HTTP `DELETE` 验证：返回 204，目标消息和报告返回 404，其他两条会话保留。浏览器未点击最终删除确认；未测试触屏或真实模型、搜索服务，未操作默认用户数据库。

@@ -34,7 +34,7 @@ def initialize_storage() -> dict:
         connection.executescript("""
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), title TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), title TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS papers (id INTEGER PRIMARY KEY, title TEXT NOT NULL, doi TEXT UNIQUE, arxiv_id TEXT UNIQUE, abstract TEXT, year INTEGER, authors TEXT NOT NULL DEFAULT '[]', source TEXT, open_access INTEGER, pdf_url TEXT, original_url TEXT);
         CREATE TABLE IF NOT EXISTS project_papers (project_id INTEGER NOT NULL REFERENCES projects(id), paper_id INTEGER NOT NULL REFERENCES papers(id), PRIMARY KEY(project_id, paper_id));
         CREATE TABLE IF NOT EXISTS paper_versions (id INTEGER PRIMARY KEY, paper_id INTEGER NOT NULL REFERENCES papers(id), filename TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, path TEXT NOT NULL, text TEXT NOT NULL, text_status TEXT NOT NULL);
@@ -42,6 +42,8 @@ def initialize_storage() -> dict:
         CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER REFERENCES conversations(id), query TEXT NOT NULL, source TEXT NOT NULL, research_mode TEXT NOT NULL DEFAULT 'auto', status TEXT NOT NULL, stage TEXT NOT NULL, result TEXT, error TEXT);
         """)
         connection.execute("BEGIN IMMEDIATE")
+        if 'pinned' not in {row[1] for row in connection.execute('PRAGMA table_info(conversations)')}:
+            connection.execute('ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0')
         if 'pages_indexed' not in {row[1] for row in connection.execute('PRAGMA table_info(paper_versions)')}:
             connection.execute('ALTER TABLE paper_versions ADD COLUMN pages_indexed INTEGER NOT NULL DEFAULT 0')
         connection.execute('CREATE TABLE IF NOT EXISTS paper_pages (version_id INTEGER NOT NULL REFERENCES paper_versions(id), page INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(version_id, page))')

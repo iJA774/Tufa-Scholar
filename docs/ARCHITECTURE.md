@@ -24,7 +24,7 @@
 
 Next.js `/` 是独立开始页，只提供“开始使用”和 GitHub 两个入口；“开始使用”进入 `/workspace`，GitHub 在新标签页打开 `https://github.com/iJA774/Tufa-Scholar`。开始页及其黑色 LED Canvas 动画不请求 API，也不持有科研工作台状态。
 
-`/workspace` 是桌面研究工作区入口。工作区按全局更新时间排列跨项目历史，不在历史列表按项目分组；每个历史项保留 `project_id`，打开时先切换项目再加载会话。当前项目仍限定可用 PDF、文献和新研究范围。设置界面既可从工作区弹窗打开，也可由 `/settings` 直接访问；两处共用设置主体，管理模型 API 和搜索引擎。工作区的“研究偏好”是展示占位，不控制请求。
+`/workspace` 是桌面研究工作区入口。工作区以悬浮抽屉展示跨项目历史，不按项目分组。`GET /conversations` 将置顶会话排在前面，同组按更新时间排序；每项保留 `project_id`，打开时先切换项目再加载会话。当前项目仍限定可用 PDF、文献和新研究范围。设置界面既可从工作区弹窗打开，也可由 `/settings` 直接访问；两处共用设置主体，管理模型 API 和搜索引擎。工作区的“研究偏好”是展示占位，不控制请求。
 
 工作区提问使用 `research_mode`：`deep` 强制进入研究流程，哪怕问题看起来可直接回答；`quick` 仍让 dispatcher 生成简答，但代码强制采用直接答复分支，即使 dispatcher 输出要求研究也不进入研究；`auto` 保留旧 API 客户端的 dispatcher 分流行为，也是省略字段时的默认值。API 路径与单机 `/api` 代理仍由前后端共用。
 
@@ -33,6 +33,8 @@ Next.js `/` 是独立开始页，只提供“开始使用”和 GitHub 两个入
 ## 任务与持久化
 
 API 创建任务并返回 ID，单 worker 领取后准备范围数据和对话历史。Agent 只接收研究输入与显式历史，不读写任务表；`on_stage(stage)` 将节点阶段交给 worker 持久化，`on_subtask(note)` 将轮次小结交给 worker 展示和保存。Agent 返回最终正文与引用证据，worker 与消息、报告在任务完成时提交结果。worker 重启时将遗留运行任务标为中断，用户可显式重试。
+
+会话的置顶状态通过 `PATCH /conversations/{conversation_id}` 写入 SQLite；既有会话迁移后默认不置顶。历史删除在用户确认后调用 `DELETE /conversations/{conversation_id}`。仓储在同一写事务中检查任务状态和删除会话、消息、报告及其任务，保留项目与文献；有待处理或正在运行的任务时返回 409。
 
 `research_mode` 与来源范围独立保存于任务中。缺省 `auto` 维持旧请求行为；在 auto 下 collection 强制进入研究流程，显式 `quick` 优先并直接回答、不读取收藏夹；`deep` 由代码强制研究，不能由模型输出反转。新增数据库字段通过 additive migration 添加，既有任务按 `auto` 处理，显式重试保留原模式。
 

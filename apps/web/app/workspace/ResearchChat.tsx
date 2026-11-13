@@ -346,12 +346,10 @@ export default function ResearchChat({
           <defs><linearGradient id="emblemGrad" x1="2" y1="13" x2="36" y2="26"><stop stopColor="#68DDEB" /><stop offset=".48" stopColor="#A89DFF" /><stop offset="1" stopColor="#F89AC3" /></linearGradient></defs>
         </svg>
       </div>
-      <p className={styles.heroEyebrow}>T U F A　/　I N T E L L I G E N T　R E S E A R C H</p>
       <h1>今天，想<span>研究</span>什么？</h1>
-      <p className={styles.welcomeSub}>从一个问题出发，发现可追溯的答案。<span>学术，触手可及。</span></p>
     </section> : <section className={styles.conversation} aria-label="当前研究对话">
       <div className={styles.conversationTop}>
-        <div><p>RESEARCH CONVERSATION</p><h2>{conversationTitle || "新的研究"}</h2></div>
+        <div><h2>{conversationTitle || "新的研究"}</h2></div>
         <button className={styles.conversationNew} type="button" onClick={onNewStudy}><svg className={styles.iconSmall} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>新研究</button>
       </div>
       <div ref={messagesElement} className={styles.messages} aria-live="polite">
@@ -430,7 +428,6 @@ export default function ResearchChat({
           </button>)}
         </div>
       </>}
-      <div className={styles.workspaceFooter}><span>TRACEABLE</span><span className={styles.separator}>·</span><span>VERIFIABLE</span><span className={styles.separator}>·</span><span>RESEARCH-READY</span></div>
     </div>
   </main>;
 }

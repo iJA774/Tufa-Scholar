@@ -58,10 +58,8 @@
 }
 
 .emblemSvg { width: 32px; height: 32px; overflow: visible; filter: drop-shadow(0 0 6px rgba(155, 136, 255, .4)); }
-.heroEyebrow { margin: 0 0 12px; color: #87839a; font: 10px/1.5 ui-monospace, Consolas, monospace; letter-spacing: .33em; }
-
 .welcome h1 {
-  margin: 0 0 14px;
+  margin: 0;
   color: #f3f2fb;
   font-size: clamp(30px, 3.25vw, 43px);
   font-weight: 570;
@@ -76,9 +74,6 @@
   text-shadow: none;
   -webkit-background-clip: text;
 }
-
-.welcomeSub { margin: 0; color: #858496; font-size: 13px; font-weight: 400; letter-spacing: .06em; line-height: 1.8; }
-.welcomeSub span { color: #a59eb9; }
 
 .chatBottom { flex: none; width: 100%; max-width: 770px; animation: fadeRise .72s .1s both; }
 .chatBottomConversation { margin-top: auto; }
@@ -183,14 +178,11 @@
 .pink { color: #e8a0c5; background: rgba(226, 107, 165, .08); }
 .presetArrow { flex: none; width: 14px; height: 14px; fill: none; stroke: #5d596d; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
-.workspaceFooter { display: flex; align-items: center; justify-content: center; gap: 11px; margin-top: 20px; color: #585768; font: 10px ui-monospace, Consolas, monospace; letter-spacing: .095em; }
-.separator { color: #464453; }
 .visuallyHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 
 .workspaceConversation { justify-content: flex-start; padding-top: 16px; }
 .conversation { display: flex; flex: 1; flex-direction: column; width: 100%; max-width: 770px; min-height: 0; overflow: hidden; }
 .conversationTop { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 15px; padding: 16px 4px 20px; border-bottom: 1px solid rgba(255, 255, 255, .08); }
-.conversationTop p { margin: 0 0 8px; color: #7b788c; font: 10px ui-monospace, Consolas, monospace; letter-spacing: .17em; }
 .conversationTop h2 { max-width: 560px; margin: 0; overflow: hidden; font-size: 18px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
 .conversationNew { display: flex; flex: none; align-items: center; gap: 7px; padding: 9px 12px; border: 1px solid rgba(255, 255, 255, .12); border-radius: 8px; background: rgba(255, 255, 255, .035); color: #b6b3c9; font-size: 12px; }
 .conversationNew:hover { border-color: rgba(255, 255, 255, .28); color: white; }
@@ -238,7 +230,6 @@
   .welcome { margin-top: -15px; margin-bottom: 28px; }
   .heroEmblem { width: 50px; height: 50px; margin-bottom: 23px; }
   .welcome h1 { font-size: clamp(27px, 6vw, 38px); }
-  .welcomeSub { font-size: 12px; }
   .composer textarea { min-height: 88px; }
   .workspaceConversation { padding-top: 8px; }
 }
@@ -246,9 +237,7 @@
 @media (max-width: 520px) {
   .workspace { padding: 0 17px 17px; }
   .welcome { margin-top: -10px; margin-bottom: 26px; }
-  .heroEyebrow { font-size: 9px; letter-spacing: .23em; }
   .welcome h1 { font-size: 29px; }
-  .welcomeSub { font-size: 11px; letter-spacing: .015em; }
   .presets { grid-template-columns: 1fr; gap: 8px; }
   .preset { min-height: 51px; padding: 9px 12px; }
   .presetIcon { width: 26px; height: 26px; }
@@ -256,18 +245,15 @@
   .presetsHeading span:last-child, .shortcut { display: none; }
   .composer textarea { min-height: 76px; padding: 16px 16px 6px; font-size: 14px; }
   .composerToolbar { padding: 6px 9px 9px; }
-  .workspaceFooter { margin-top: 14px; font-size: 9px; letter-spacing: .035em; }
 }
 
 @media (max-height: 735px) {
   .welcome { margin-top: 0; margin-bottom: 22px; }
   .heroEmblem { width: 46px; height: 46px; margin-bottom: 15px; }
-  .heroEyebrow { margin-bottom: 8px; }
-  .welcome h1 { margin-bottom: 8px; font-size: clamp(27px, 3vw, 36px); }
+  .welcome h1 { font-size: clamp(27px, 3vw, 36px); }
   .composer textarea { min-height: 67px; }
   .preset { min-height: 52px; }
   .presetsHeading { margin-top: 18px; }
-  .workspaceFooter { margin-top: 13px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -69,25 +69,67 @@ def project_exists(project_id):
 
 def list_conversations(project_id):
     with connect_database() as db:
-        return _all(db, 'SELECT * FROM conversations WHERE project_id=? ORDER BY id', (project_id,))
+        conversations = _all(db, 'SELECT * FROM conversations WHERE project_id=? ORDER BY id', (project_id,))
+        for conversation in conversations:
+            conversation['pinned'] = bool(conversation['pinned'])
+        return conversations
 
 
 def list_all_conversations():
     with connect_database() as db:
-        return _all(db, """
-            SELECT c.id, c.project_id, c.title, MAX(m.created_at) AS updated_at
+        conversations = _all(db, """
+            SELECT c.id, c.project_id, c.title, c.pinned, MAX(m.created_at) AS updated_at
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id=c.id
             GROUP BY c.id
-            ORDER BY MAX(m.created_at) DESC, MAX(m.id) DESC, c.id DESC
+            ORDER BY c.pinned DESC, MAX(m.created_at) DESC, MAX(m.id) DESC, c.id DESC
         """)
+        for conversation in conversations:
+            conversation['pinned'] = bool(conversation['pinned'])
+        return conversations
 
 
 def create_conversation(project_id, title):
     with connect_database() as db:
         cur = db.execute('INSERT INTO conversations(project_id,title) VALUES (?,?)', (project_id,title))
         db.commit()
-        return {'id': cur.lastrowid, 'project_id': project_id, 'title': title}
+        return {'id': cur.lastrowid, 'project_id': project_id, 'title': title, 'pinned': False}
+
+
+def update_conversation_pinned(conversation_id, pinned):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('UPDATE conversations SET pinned=? WHERE id=?', (int(pinned), conversation_id))
+        conversation = _one(db, """
+            SELECT c.id, c.project_id, c.title, c.pinned, MAX(m.created_at) AS updated_at
+            FROM conversations c
+            LEFT JOIN messages m ON m.conversation_id=c.id
+            WHERE c.id=?
+            GROUP BY c.id
+        """, (conversation_id,))
+        db.commit()
+        if conversation:
+            conversation['pinned'] = bool(conversation['pinned'])
+        return conversation
+
+
+def delete_conversation(conversation_id):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if not _one(db, 'SELECT id FROM conversations WHERE id=?', (conversation_id,)):
+            return 'missing'
+        if _one(db, "SELECT id FROM tasks WHERE conversation_id=? AND status IN ('pending','running') LIMIT 1", (conversation_id,)):
+            return 'active'
+
+        # Retries point to an earlier task in the same conversation. Clear these
+        # nullable self-references before removing the conversation's task rows.
+        db.execute('UPDATE tasks SET origin_run_id=NULL WHERE conversation_id=?', (conversation_id,))
+        db.execute('DELETE FROM reports WHERE conversation_id=?', (conversation_id,))
+        db.execute('DELETE FROM messages WHERE conversation_id=?', (conversation_id,))
+        db.execute('DELETE FROM tasks WHERE conversation_id=?', (conversation_id,))
+        db.execute('DELETE FROM conversations WHERE id=?', (conversation_id,))
+        db.commit()
+        return 'deleted'
 
 
 def conversation_exists(project_id, conversation_id):

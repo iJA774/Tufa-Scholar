@@ -2,7 +2,7 @@
 
 `app/page.tsx` 是独立开始页入口，只装配 `launch/LaunchPage.tsx`；LED Canvas 动画和样式单独封装，不请求 API、不装载研究状态。“开始使用”进入 `/workspace`，GitHub 链接在新标签页打开仓库。
 
-`app/workspace/page.tsx` 是研究工作区入口，装配 `workspace/WorkspacePage.tsx`。工作区通过 `GET /conversations` 加载单层历史抽屉；历史项带 `project_id`，打开时切换到对应项目，再加载该会话。项目仍用于限定可用 PDF、文献与新研究范围，不在历史列表中形成项目分组。
+`app/workspace/page.tsx` 是研究工作区入口，装配 `workspace/WorkspacePage.tsx`。光标悬浮在左上角标志时展开历史抽屉，移出标志和抽屉后收起。工作区通过 `GET /conversations` 加载跨项目历史，打开会话时根据 `project_id` 切换项目。历史项菜单支持置顶、解除置顶和确认删除，置顶状态由本机 API 保存。项目仍限定可用 PDF、文献与新研究范围。
 
 工作区提供平铺历史导航和设置弹窗。初始研究模式为 deep；每次提问明确提交 `research_mode: deep|quick`。deep 强制进入研究流程，quick 强制直接回答并跳过背景调查与检索。API 仍接受旧客户端的 `auto`，省略模式也默认 auto；重试沿用原任务模式。设置中的“研究偏好”标签保留为不生效的占位，不影响后端；“通用”和“外观”偏好保存在本地，模型选择只用于下一次提问。
 

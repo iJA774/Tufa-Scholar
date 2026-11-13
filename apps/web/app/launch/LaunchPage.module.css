@@ -94,27 +94,6 @@
   line-height: 1.5;
 }
 
-.headerIndex {
-  color: #646473;
-  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: .2em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.headerIndex i {
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  margin-right: 11px;
-  border-radius: 50%;
-  background: #61dac9;
-  box-shadow: 0 0 11px rgba(82, 226, 205, .75);
-  vertical-align: 2px;
-}
-
 .content {
   position: relative;
   z-index: 2;
@@ -133,17 +112,6 @@
   width: 100%;
   text-align: center;
   transform: translateY(-4px);
-}
-
-.eyebrow {
-  margin: 0 0 19px;
-  color: #818394;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: .36em;
-  text-transform: uppercase;
-  animation: rise .8s .1s both;
 }
 
 .claim {
@@ -197,16 +165,6 @@
   font-weight: 950;
   letter-spacing: -.08em;
   -webkit-background-clip: text;
-}
-
-.logoSubtitle {
-  margin: 0;
-  color: #818190;
-  font-size: 11px;
-  font-weight: 550;
-  letter-spacing: .32em;
-  text-indent: .32em;
-  animation: rise 1s 1.25s both;
 }
 
 .actions {
@@ -265,24 +223,6 @@
   line-height: 1;
 }
 
-.footer {
-  position: relative;
-  z-index: 4;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 20px clamp(24px, 4.6vw, 76px) 29px;
-  color: #50525e;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 10px;
-  letter-spacing: .13em;
-  text-transform: uppercase;
-}
-
-.footerRight { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
-.footerRight::before { width: 5px; height: 5px; border: 1px solid #777d90; content: ""; transform: rotate(45deg); }
-
 @keyframes rise {
   from { opacity: 0; transform: translateY(11px); }
   to { opacity: 1; transform: translateY(0); }
@@ -295,26 +235,21 @@
 
 @media (max-width: 720px) {
   .topbar { padding-top: 26px; padding-bottom: 24px; }
-  .headerIndex { display: none; }
   .brand { gap: 13px; }
   .brandMonogram { font-size: 20px; }
   .brandName { font-size: 10px; letter-spacing: 0; }
   .brandRule { height: 25px; }
   .content { padding-bottom: 55px; }
-  .eyebrow { font-size: 8px; letter-spacing: .24em; }
   .claim { letter-spacing: .16em; text-indent: .16em; }
   .logoArea { width: 100%; height: clamp(135px, 29vw, 190px); margin: 18px 0 12px; }
-  .logoSubtitle { font-size: 9px; letter-spacing: clamp(.08em, .75vw, .22em); }
   .actions { gap: 9px; margin-top: 38px; }
   .action { width: 148px; min-width: 0; height: 47px; padding: 0 14px; font-size: 12px; }
-  .footer { padding-bottom: 22px; font-size: 8px; letter-spacing: .06em; }
 }
 
 @media (max-width: 390px) {
   .brandName { font-size: 9px; }
   .actions { width: 100%; }
   .action { width: 45%; }
-  .footerRight { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
