@@ -43,7 +43,7 @@ def run_once():
         if task.get('kind') == 'chat':
             from src.agents.literature import run
             research = {key: task.get(key) for key in (
-                'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort'
+                'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode'
             )}
             research['local_papers'] = _local_papers(task['project_id'], task['source'], task.get('paper_ids') or [])
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])

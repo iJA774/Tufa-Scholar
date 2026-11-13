@@ -72,6 +72,17 @@ def list_conversations(project_id):
         return _all(db, 'SELECT * FROM conversations WHERE project_id=? ORDER BY id', (project_id,))
 
 
+def list_all_conversations():
+    with connect_database() as db:
+        return _all(db, """
+            SELECT c.id, c.project_id, c.title, MAX(m.created_at) AS updated_at
+            FROM conversations c
+            LEFT JOIN messages m ON m.conversation_id=c.id
+            GROUP BY c.id
+            ORDER BY MAX(m.created_at) DESC, MAX(m.id) DESC, c.id DESC
+        """)
+
+
 def create_conversation(project_id, title):
     with connect_database() as db:
         cur = db.execute('INSERT INTO conversations(project_id,title) VALUES (?,?)', (project_id,title))
@@ -195,7 +206,7 @@ def retry_task(task_id):
         return None
 
     with connect_database() as db:
-        cur = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,origin_run_id,collection_id,paper_ids) VALUES (?,?,?,?, 'pending','pending',?,?,?,?)", (task['project_id'],task['conversation_id'],task['query'],task['source'],task['kind'],task.get('origin_run_id') or task_id,task.get('collection_id'),json.dumps(task['paper_ids']) if task.get('paper_ids') is not None else None))
+        cur = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,origin_run_id,collection_id,paper_ids,research_mode) VALUES (?,?,?,?,'pending','pending',?,?,?,?,?)", (task['project_id'],task['conversation_id'],task['query'],task['source'],task['kind'],task.get('origin_run_id') or task_id,task.get('collection_id'),json.dumps(task['paper_ids']) if task.get('paper_ids') is not None else None,task.get('research_mode') or 'auto'))
         db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (task.get('model_name'),task.get('reasoning_effort'),cur.lastrowid))
         db.commit()
         return get_task(cur.lastrowid)
@@ -230,7 +241,7 @@ def interrupt_running_tasks():
         db.commit()
 
 
-def create_question(project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None):
+def create_question(project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None, research_mode='auto'):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
         if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
@@ -244,7 +255,7 @@ def create_question(project_id, conversation_id, question, source, collection_id
             conversation_id = db.execute('INSERT INTO conversations(project_id,title) VALUES (?,?)', (project_id,question[:80])).lastrowid
         elif not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id=?', (conversation_id,project_id)):
             return None
-        run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,collection_id,paper_ids) VALUES (?,?,?,?, 'pending','pending','chat',?,?)", (project_id,conversation_id,question,source,collection_id,json.dumps(paper_ids) if paper_ids is not None else None)).lastrowid
+        run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,collection_id,paper_ids,research_mode) VALUES (?,?,?,?, 'pending','pending','chat',?,?,?)", (project_id,conversation_id,question,source,collection_id,json.dumps(paper_ids) if paper_ids is not None else None,research_mode)).lastrowid
         db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (model_name, reasoning_effort, run_id))
         db.execute("INSERT INTO messages(conversation_id,role,content,run_id) VALUES (?,'user',?,?)", (conversation_id,question,run_id))
         db.commit()

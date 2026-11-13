@@ -1,136 +1,249 @@
 "use client";
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import ModelControls, { ModelChoice } from "../ModelControls";
-import { webSourceLabel } from "../WebSearchPanel";
+
+import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { api, json, messageOf } from "./api";
-import type { Collection, Conversation, Message, Paper, Run, Subtask } from "./types";
-const statusText: Record<string, string> = { queued: "等待处理", pending: "等待处理", running: "正在处理", succeeded: "回答完成", success: "回答完成", completed: "回答完成", failed: "任务失败", interrupted: "任务已中断" };
-const stageText: Record<string, string> = { queued: "等待处理", pending: "等待处理", searching: "检索文献", searching_web: "搜索网页", search: "检索文献", local: "搜索项目文献", openalex: "搜索 OpenAlex", completed: "回答完成", done: "回答完成", retrieving: "检索文献", generating: "生成回答", synthesizing: "整理证据", planning: "规划问题", evidence: "提取证据", assessing: "检查证据缺口", verifying: "核验结论", answering: "生成回答", dispatcher: "判断是否需要研究", background_investigator: "检索背景资料", planner: "制定研究计划", supervisor: "统筹研究步骤", researcher: "搜索与整理证据", analyst: "分析研究证据", coder: "代码节点", reporter: "整理最终报告" };
-function safeSourceUrl(value?: string | null) {
-  try { const url = new URL(value || ""); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined; } catch { return undefined; }
+import type { Message, ResearchMode, Run, Subtask } from "./types";
+import type { ModelChoice } from "./preferences";
+import { webSourceLabel } from "./sourceLabels";
+import styles from "./ResearchChat.module.css";
+
+const statusText: Record<string, string> = {
+  queued: "等待处理",
+  pending: "等待处理",
+  running: "正在处理",
+  succeeded: "回答完成",
+  success: "回答完成",
+  completed: "回答完成",
+  failed: "任务失败",
+  interrupted: "任务已中断",
+};
+
+const stageText: Record<string, string> = {
+  queued: "等待处理",
+  pending: "等待处理",
+  searching: "检索文献",
+  searching_web: "搜索网页",
+  search: "检索文献",
+  local: "搜索项目文献",
+  openalex: "搜索 OpenAlex",
+  completed: "回答完成",
+  done: "回答完成",
+  retrieving: "检索文献",
+  generating: "生成回答",
+  synthesizing: "整理证据",
+  planning: "规划问题",
+  evidence: "提取证据",
+  assessing: "检查证据缺口",
+  verifying: "核验结论",
+  answering: "生成回答",
+  failed: "任务失败",
+  interrupted: "任务已中断",
+  dispatcher: "",
+  background_investigator: "检索背景资料",
+  planner: "制定研究计划",
+  supervisor: "统筹研究步骤",
+  researcher: "搜索与整理证据",
+  analyst: "分析研究证据",
+  coder: "",
+  reporter: "整理最终报告",
+};
+
+function modeText(mode?: ResearchMode | "auto") {
+  if (mode === "quick") return "快速探索";
+  if (mode === "deep") return "深度研究";
+  if (mode === "auto") return "自动判断";
+  return "研究任务";
 }
+
+function stageLabel(run: Run) {
+  if (run.stage === "dispatcher") {
+    if (run.research_mode === "quick") return "生成快速回答";
+    if (run.research_mode === "deep") return "进入深度研究";
+    return "判断是否需要研究";
+  }
+  return run.stage ? stageText[run.stage] || run.stage : statusText[run.status] || run.status;
+}
+
+function stageSuffix(run: Run) {
+  const stage = stageLabel(run);
+  const status = statusText[run.status] || run.status;
+  return stage && stage !== status ? ` · ${stage}` : "";
+}
+
+function safeSourceUrl(value?: string | null) {
+  try {
+    const url = new URL(value || "");
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function ResearchActivity({ items }: { items?: Subtask[] }) {
   if (!items?.length) return null;
-  return <details className="research-activity"><summary>研究过程 · {items.length} 步（初步结果）</summary>
-    {items.map(step => <div key={step.index}><strong>{step.index}. {step.task}</strong>
-      {step.findings?.map((finding, i) => <p key={i}>{finding.text} {finding.citations.map(id => `[${id}]`).join(" ")}</p>)}
-      {step.status === "sources_only" && <p>已找到相关资料，结论仍待核验。</p>}
-      {step.status === "no_evidence" && <p>本步暂无可用证据。</p>}
-      {step.sources?.map(source => { const href = safeSourceUrl(source.original_url); return <div key={source.id}>{href ? <a href={href} target="_blank" rel="noreferrer">{source.title || source.id} ↗</a> : <span>{source.title || source.id}</span>} [{source.id}]</div>; })}
-      {step.gap && <p>待查：{step.gap}</p>}
-    </div>)}
+  return <details className={styles.activity}>
+    <summary>研究过程 · {items.length} 步</summary>
+    <div className={styles.activityBody}>
+      {items.map(step => <section key={step.index}>
+        <strong>{step.index}. {step.task}</strong>
+        {step.findings?.map((finding, index) => <p key={index}>{finding.text} {finding.citations.map(id => `[${id}]`).join(" ")}</p>)}
+        {step.status === "sources_only" && <p>已找到相关资料，结论仍待核验。</p>}
+        {step.status === "no_evidence" && <p>本步暂无可用证据。</p>}
+        {step.sources?.map(source => {
+          const href = safeSourceUrl(source.original_url);
+          return <div key={source.id}>{href ? <a href={href} target="_blank" rel="noopener noreferrer">{source.title || source.id} ↗</a> : <span>{source.title || source.id}</span>} [{source.id}]</div>;
+        })}
+        {step.gap && <p>待查：{step.gap}</p>}
+      </section>)}
+    </div>
   </details>;
 }
+
 type Props = {
-  projectId: number;
-  collections: Collection[];
-  collectionId: number | undefined;
-  onCollectionChange: (id: number | undefined) => void;
-  collectionPapers: Paper[];
-  folderLoading: boolean;
+  projectId?: number;
+  projectLoading: boolean;
+  conversationId?: number;
+  conversationTitle?: string;
+  resetKey: number;
+  mode: ResearchMode;
+  enterToSend: boolean;
+  modelChoice: ModelChoice;
+  ambient: boolean;
+  density: "default" | "compact";
+  onModeChange: (mode: ResearchMode) => void;
+  onEnsureProject: () => Promise<number>;
+  onConversationChange: (id: number, projectId: number) => void;
+  onNewStudy: () => void;
+  onHistoryUpdated: () => void;
   onError: (message: string) => void;
-  openConversationId?: number;
-  library: ReactNode;
-  importPanel: ReactNode;
 };
-export default function ResearchChat({ projectId, collections, collectionId, onCollectionChange, collectionPapers, folderLoading, onError, openConversationId, library, importPanel }: Props) {
+
+export default function ResearchChat({
+  projectId,
+  projectLoading,
+  conversationId,
+  conversationTitle,
+  resetKey,
+  mode,
+  enterToSend,
+  modelChoice,
+  ambient,
+  density,
+  onModeChange,
+  onEnsureProject,
+  onConversationChange,
+  onNewStudy,
+  onHistoryUpdated,
+  onError,
+}: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [conversationId, setConversationId] = useState<number>();
-  const [conversationName, setConversationName] = useState("");
   const [query, setQuery] = useState("");
-  const [modelChoice, setModelChoice] = useState<ModelChoice>({ model_name: "", reasoning_effort: "" });
-  const [source, setSource] = useState("auto");
   const [run, setRun] = useState<Run>();
   const [runs, setRuns] = useState<Run[]>([]);
   const [historyRuns, setHistoryRuns] = useState<Record<number, Run>>({});
-  const requestedHistoryRuns = useRef(new Set<number>());
   const [busy, setBusy] = useState("");
-  const epoch = useRef(0);
-  const currentConversation = useRef<number | undefined>(undefined);
-  const selectConversation = (id: number | undefined) => {
-    if (currentConversation.current === id) return;
-    epoch.current++;
-    currentConversation.current = id;
-    setConversationId(id);
-    setRun(runs.find(r => r.conversation_id === id));
-    setMessages([]);
-    setBusy("");
-  };
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const requestedHistoryRuns = useRef(new Set<number>());
+  const actionController = useRef<AbortController | null>(null);
+  const selectionEpoch = useRef(0);
+  const selected = useRef({ projectId, conversationId, resetKey });
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const messagesElement = useRef<HTMLDivElement>(null);
+  const activeRun = run && ["queued", "pending", "running"].includes(run.status);
+  const hasConversation = conversationId !== undefined;
+  const modeName = modeText(mode);
+
   useEffect(() => {
-    const marker = ++epoch.current;
-    const controller = new AbortController();
-    setConversations([]);
+    const previous = selected.current;
+    const projectChangedInNewStudy = previous.conversationId === undefined && conversationId === undefined && previous.projectId !== projectId && previous.resetKey === resetKey;
+    selected.current = { projectId, conversationId, resetKey };
+    if (projectChangedInNewStudy) return;
+    if (previous.projectId === projectId && previous.conversationId === conversationId && previous.resetKey === resetKey) return;
+
+    const marker = ++selectionEpoch.current;
+    actionController.current?.abort();
+    actionController.current = null;
+    requestedHistoryRuns.current.clear();
+    setMessages([]);
     setRuns([]);
     setHistoryRuns({});
-    requestedHistoryRuns.current.clear();
     setRun(undefined);
-    setMessages([]);
-    setConversationId(undefined);
-    currentConversation.current = undefined;
+    setQuery("");
     setBusy("");
-    Promise.all([api<Conversation[]>(`/projects/${projectId}/conversations`, { signal: controller.signal }), api<Run[]>(`/projects/${projectId}/runs`, { signal: controller.signal })]).then(([cs, rs]) => {
-      if (epoch.current !== marker)
-        return;
-      setConversations(cs);
-      setRuns(rs);
-      const id = openConversationId ?? cs[0]?.id;
-      currentConversation.current = id;
-      setConversationId(id);
-      setRun(rs.find(r => r.conversation_id === id));
-    }).catch(e => {
-      if (!controller.signal.aborted && epoch.current === marker)
-        onError(messageOf(e));
-    });
-    return () => { epoch.current++; controller.abort(); };
-  }, [projectId]);
-  useEffect(() => {
-    if (openConversationId !== undefined && conversations.length)
-      selectConversation(openConversationId);
-  }, [openConversationId]);
-  useEffect(() => {
-    if (conversationId === undefined)
+    if (!projectId || conversationId === undefined) {
+      setLoadingConversation(false);
       return;
+    }
+
     const controller = new AbortController();
-    const marker = epoch.current;
-    api<Message[]>(`/conversations/${conversationId}/messages`, { signal: controller.signal }).then(data => {
-      if (!controller.signal.aborted && epoch.current === marker && currentConversation.current === conversationId)
-        setMessages(data);
-    }).catch(e => {
-      if (!controller.signal.aborted && epoch.current === marker)
-        onError(messageOf(e));
+    setLoadingConversation(true);
+    Promise.all([
+      api<Message[]>(`/conversations/${conversationId}/messages`, { signal: controller.signal }),
+      api<Run[]>(`/projects/${projectId}/runs?conversation_id=${conversationId}`, { signal: controller.signal }),
+    ]).then(([nextMessages, nextRuns]) => {
+      if (controller.signal.aborted || selectionEpoch.current !== marker) return;
+      setMessages(nextMessages);
+      setRuns(nextRuns);
+      setRun(nextRuns.find(item => item.conversation_id === conversationId));
+    }).catch(error => {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
+    }).finally(() => {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) setLoadingConversation(false);
     });
     return () => controller.abort();
-  }, [conversationId, projectId]);
-  useEffect(() => {
-    if (run?.status !== "succeeded" || conversationId === undefined)
-      return;
-    const controller = new AbortController();
-    const marker = epoch.current;
-    api<Message[]>(`/conversations/${conversationId}/messages`, { signal: controller.signal }).then(data => {
-      if (!controller.signal.aborted && epoch.current === marker && currentConversation.current === conversationId)
-        setMessages(data);
-    }).catch(e => {
-      if (!controller.signal.aborted && epoch.current === marker)
-        onError(messageOf(e));
-    });
-    return () => controller.abort();
-  }, [run?.id, run?.status, conversationId, projectId]);
+  }, [projectId, conversationId, resetKey, onError]);
+
+  useEffect(() => () => {
+    selectionEpoch.current++;
+    actionController.current?.abort();
+    actionController.current = null;
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
-    const ids = [...new Set(messages.filter(m => m.role === "assistant" && m.run_id).map(m => m.run_id as number))];
-    const missing = ids.filter(id => !runs.some(r => r.id === id) && !requestedHistoryRuns.current.has(id));
+    const ids = [...new Set(messages.filter(message => message.role === "assistant" && message.run_id).map(message => message.run_id as number))];
+    const missing = ids.filter(id => !runs.some(item => item.id === id) && !requestedHistoryRuns.current.has(id));
     if (!missing.length) return;
     missing.forEach(id => requestedHistoryRuns.current.add(id));
-    Promise.all(missing.map(id => api<Run>(`/runs/${id}`).catch(() => undefined))).then(values => {
+    Promise.all(missing.map(id => api<Run>(`/runs/${id}`, { signal: controller.signal }).catch(() => undefined))).then(values => {
       if (!controller.signal.aborted) setHistoryRuns(previous => ({ ...previous, ...Object.fromEntries(values.filter((value): value is Run => !!value).map(value => [value.id, value])) }));
     });
-    return () => { controller.abort(); missing.forEach(id => requestedHistoryRuns.current.delete(id)); };
-  }, [messages, projectId]);
+    return () => {
+      controller.abort();
+      missing.forEach(id => requestedHistoryRuns.current.delete(id));
+    };
+  }, [messages, runs, projectId]);
+
+  useEffect(() => {
+    if (run?.status !== "succeeded" && run?.status !== "success" && run?.status !== "completed") return;
+    if (conversationId === undefined) return;
+    const controller = new AbortController();
+    const marker = selectionEpoch.current;
+    api<Message[]>(`/conversations/${conversationId}/messages`, { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) setMessages(data);
+    }).catch(error => {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
+    });
+    onHistoryUpdated();
+    return () => controller.abort();
+  }, [run?.id, run?.status, conversationId, projectId, onError, onHistoryUpdated]);
+
+  useEffect(() => {
+    if (messagesElement.current) messagesElement.current.scrollTop = messagesElement.current.scrollHeight;
+  }, [messages, run?.status]);
+
+  useEffect(() => {
+    const element = textarea.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
+  }, [query]);
+
   useRunPolling({
-    run, projectId, conversationId,
+    run,
+    projectId,
+    conversationId,
     fetchRun: (id, signal) => api<Run>(`/runs/${id}`, { signal }),
     onUpdate: next => {
       setRun(next);
@@ -139,164 +252,185 @@ export default function ResearchChat({ projectId, collections, collectionId, onC
     onError: error => onError(messageOf(error)),
   });
 
-  const act = async (key: string, fn: (marker: number) => Promise<void>) => {
-    const marker = epoch.current;
-    setBusy(key);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!query.trim() || busy || projectLoading || activeRun) return;
+    const question = query.trim();
+    const submittedConversation = conversationId;
+    const marker = selectionEpoch.current;
+    actionController.current?.abort();
+    const controller = new AbortController();
+    actionController.current = controller;
+    setBusy("send");
     try {
-      await fn(marker);
+      const targetProjectId = projectId ?? await onEnsureProject();
+      if (controller.signal.aborted || selectionEpoch.current !== marker || selected.current.conversationId !== submittedConversation) return;
+      const submitted = await api<{ run_id: number; conversation_id: number }>(
+        `/projects/${targetProjectId}/questions`,
+        { ...json({
+          question,
+          conversation_id: submittedConversation ?? null,
+          research_mode: mode,
+          model_name: modelChoice.model_name.trim() || undefined,
+          reasoning_effort: modelChoice.reasoning_effort || undefined,
+        }), signal: controller.signal },
+      );
+      const [nextRun, nextMessages, nextRuns] = await Promise.all([
+        api<Run>(`/runs/${submitted.run_id}`, { signal: controller.signal }),
+        api<Message[]>(`/conversations/${submitted.conversation_id}/messages`, { signal: controller.signal }),
+        api<Run[]>(`/projects/${targetProjectId}/runs?conversation_id=${submitted.conversation_id}`, { signal: controller.signal }),
+      ]);
+      onHistoryUpdated();
+      if (controller.signal.aborted || selectionEpoch.current !== marker || selected.current.conversationId !== submittedConversation) return;
+      setQuery("");
+      setMessages(nextMessages);
+      setRuns(nextRuns);
+      setRun(nextRun);
+      onConversationChange(submitted.conversation_id, targetProjectId);
     } catch (error) {
-      if (epoch.current === marker) onError(messageOf(error));
+      if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
     } finally {
-      if (epoch.current === marker) setBusy("");
+      if (actionController.current === controller) actionController.current = null;
+      if (selectionEpoch.current === marker) setBusy("");
     }
   };
 
-  const createConversation = (event: FormEvent) => {
-    event.preventDefault();
-    if (!conversationName.trim() || busy) return;
-    void act("conversation", async marker => {
-      const created = await api<Conversation>(`/projects/${projectId}/conversations`, json({ title: conversationName.trim() }));
-      const updated = await api<Conversation[]>(`/projects/${projectId}/conversations`);
-      if (marker !== epoch.current) return;
-      setConversations(updated);
-      setConversationName("");
-      selectConversation(created.id);
+  const retry = () => {
+    if (!run || busy) return;
+    const marker = selectionEpoch.current;
+    actionController.current?.abort();
+    const controller = new AbortController();
+    actionController.current = controller;
+    setBusy("retry");
+    void api<Run>(`/runs/${run.id}/retry`, { method: "POST", signal: controller.signal }).then(next => {
+      if (selectionEpoch.current !== marker) return;
+      setRun(next);
+      setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
+      onHistoryUpdated();
+    }).catch(error => {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
+    }).finally(() => {
+      if (actionController.current === controller) actionController.current = null;
+      if (selectionEpoch.current === marker) setBusy("");
     });
   };
 
-  const search = (event: FormEvent) => {
-    event.preventDefault();
-    if (!query.trim() || busy ||
-      (source === "collection" && (folderLoading || !collectionId || !collectionPapers.length)) ||
-      (run && ["queued", "pending", "running"].includes(run.status))) return;
-    void act("search", async marker => {
-      const submitted = await api<{ run_id: number; conversation_id: number }>(
-        `/projects/${projectId}/questions`, json({
-          question: query.trim(),
-          model_name: modelChoice.model_name.trim() || undefined,
-          reasoning_effort: modelChoice.reasoning_effort || undefined,
-          source,
-          collection_id: source === "collection" ? collectionId : undefined,
-          conversation_id: conversationId ?? null,
-        }),
-      );
-      const [cs, next, rs, ms] = await Promise.all([
-        api<Conversation[]>(`/projects/${projectId}/conversations`),
-        api<Run>(`/runs/${submitted.run_id}`),
-        api<Run[]>(`/projects/${projectId}/runs`),
-        api<Message[]>(`/conversations/${submitted.conversation_id}/messages`),
-      ]);
-      if (marker !== epoch.current) return;
-      setQuery("");
-      setConversations(cs);
-      currentConversation.current = submitted.conversation_id;
-      setConversationId(submitted.conversation_id);
-      setMessages(ms);
-      setRun(next);
-      setRuns(rs);
-    });
+  const choosePreset = (value: string) => {
+    setQuery(value);
+    textarea.current?.focus();
+    requestAnimationFrame(() => textarea.current?.setSelectionRange(value.length, value.length));
   };
-  return <div className="content-grid">
-    <div className="primary-column">
-      <section className="card chat-card">
-        <div className="section-kicker">RESEARCH CONVERSATION</div>
-        <div className="section-heading">
-          <div>
-            <h2>科研问答</h2>
-            <p>围绕问题探索文献与证据。</p>
-          </div>
-        </div>
-        <div className="messages">
-          {messages.length ? messages.map(m => <article className={`message ${m.role === "user" ? "user-message" : "assistant-message"}`} key={m.id}>
-            <div className="message-label">
-              {m.role === "user" ? "你" : "TUFA"}
+
+  const submitOnEnter = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    const shouldSubmit = enterToSend ? !event.shiftKey : event.ctrlKey || event.metaKey;
+    if (!shouldSubmit) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  };
+
+  const presets = [
+    { text: "2026 年 AI Agent 有哪些值得关注的研究方向？", prompt: "2026 年 AI Agent 领域有哪些值得关注的研究方向？", tone: "cyan", icon: "✧" },
+    { text: "梳理 GraphRAG 的关键技术与代表论文", prompt: "梳理 GraphRAG 的关键技术、代表论文与应用场景。", tone: "blue", icon: "⌘" },
+    { text: "比较 Transformer 与 Mamba 的架构优劣", prompt: "系统比较 Transformer 与 Mamba 的架构特点、性能和适用场景。", tone: "violet", icon: "◇" },
+    { text: "视觉语言模型在科研中有哪些新应用？", prompt: "总结视觉语言模型在科研工作中的典型应用与发展趋势。", tone: "pink", icon: "▤" },
+  ];
+
+  return <main className={`${styles.workspace} ${hasConversation ? styles.workspaceConversation : ""} ${density === "compact" ? styles.compact : ""}`}>
+    {!hasConversation ? <section className={styles.welcome} aria-label="开始一项新研究">
+      <div className={`${styles.heroLight} ${!ambient ? styles.heroLightMuted : ""}`} aria-hidden="true" />
+      <div className={styles.heroEmblem} aria-hidden="true">
+        <svg className={styles.emblemSvg} viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M19 2 23 14.6 36 19l-13 4.3L19 36l-4.2-12.7L2 19l12.8-4.4L19 2Z" stroke="url(#emblemGrad)" strokeWidth="1.5" />
+          <circle cx="19" cy="19" r="3.1" fill="#B7A6FF" /><circle cx="5" cy="5" r="1" fill="#68DCED" /><circle cx="34" cy="7" r="1.2" fill="#D47AFF" /><circle cx="31" cy="33" r="1" fill="#F5A1C7" />
+          <defs><linearGradient id="emblemGrad" x1="2" y1="13" x2="36" y2="26"><stop stopColor="#68DDEB" /><stop offset=".48" stopColor="#A89DFF" /><stop offset="1" stopColor="#F89AC3" /></linearGradient></defs>
+        </svg>
+      </div>
+      <p className={styles.heroEyebrow}>T U F A　/　I N T E L L I G E N T　R E S E A R C H</p>
+      <h1>今天，想<span>研究</span>什么？</h1>
+      <p className={styles.welcomeSub}>从一个问题出发，发现可追溯的答案。<span>学术，触手可及。</span></p>
+    </section> : <section className={styles.conversation} aria-label="当前研究对话">
+      <div className={styles.conversationTop}>
+        <div><p>RESEARCH CONVERSATION</p><h2>{conversationTitle || "新的研究"}</h2></div>
+        <button className={styles.conversationNew} type="button" onClick={onNewStudy}><svg className={styles.iconSmall} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>新研究</button>
+      </div>
+      <div ref={messagesElement} className={styles.messages} aria-live="polite">
+        {loadingConversation && <p className={styles.loadingMessages}>正在读取研究记录…</p>}
+        {messages.map(message => {
+          const messageRun = message.run_id ? runs.find(item => item.id === message.run_id) || historyRuns[message.run_id] : undefined;
+          return <article className={`${styles.message} ${message.role === "user" ? styles.messageUser : styles.messageAssistant}`} key={message.id}>
+            {message.role !== "user" && <div className={styles.avatar} aria-hidden="true">✧</div>}
+            <div className={styles.messageBubble}>
+              <div className={styles.messageLabel}>{message.role === "user" ? "你" : `TUFA · ${modeText(messageRun?.research_mode)}`}</div>
+              {message.role === "assistant" && message.run_id && <ResearchActivity items={messageRun?.subtasks} />}
+              <div className={styles.messageContent}>{message.content}</div>
+              {message.metadata?.evidence?.map((citation, index) => {
+                const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
+                return <div className={styles.citation} key={`${citation.id || index}-${index}`}>
+                  {href ? <a href={href} target="_blank" rel="noopener noreferrer">{citation.title || `参考文献 ${index + 1}`} ↗</a> : <span>{citation.title || `参考文献 ${index + 1}`}</span>}
+                  {citation.id && ` [${citation.id}]`}{citation.page && ` · 第 ${citation.page} 页`}{citation.source_level && ["abstract", "web_snippet", "web_content"].includes(citation.source_level) && ` · ${webSourceLabel(citation.source_level)}`}{citation.provider && ` · ${citation.provider}`}{citation.retrieved_at && ` · 检索于 ${new Date(citation.retrieved_at).toLocaleString("zh-CN")}`}
+                </div>;
+              })}
+              {message.metadata?.report_id && <div className={styles.reportLinks}>
+                <a href={`/api/reports/${message.metadata.report_id}/markdown`}>下载研究报告</a>
+                <a href={`/api/reports/${message.metadata.report_id}/evidence.csv`}>下载证据表</a>
+              </div>}
             </div>
-            {m.role === "assistant" && m.run_id && <ResearchActivity items={(runs.find(r => r.id === m.run_id) || historyRuns[m.run_id])?.subtasks} />}
-            <div className="message-content">
-              {m.content}
-            </div>
-            {m.metadata?.evidence?.map((c, i) => <div className="citation" key={i}>
-              {c.version_id ? <a href={`/api/paper-versions/${c.version_id}/file${c.page ? `#page=${c.page}` : ""}`} target="_blank" rel="noreferrer">
-                {c.title || `参考文献 ${i + 1}`} ↗</a> : safeSourceUrl(c.original_url) ? <a href={safeSourceUrl(c.original_url)} target="_blank" rel="noreferrer">
-                  {c.title || `参考文献 ${i + 1}`} ↗</a> : <span>
-                {c.title || `参考文献 ${i + 1}`}
-              </span>}{c.id && ` [${c.id}]`}{c.page && ` · 第 ${c.page} 页`}{c.source_level && ["abstract", "web_snippet", "web_content"].includes(c.source_level) && ` · ${webSourceLabel(c.source_level)}`}{c.provider && ` · ${c.provider}`}{c.retrieved_at && ` · 检索于 ${new Date(c.retrieved_at).toLocaleString("zh-CN")}`}
-            </div>)}{m.metadata?.report_id && <div className="paper-links">
-              <a href={`/api/reports/${m.metadata.report_id}/markdown`}>下载报告</a>
-              <a href={`/api/reports/${m.metadata.report_id}/evidence.csv`}>下载证据表</a>
-            </div>}
-          </article>) : <div className="chat-empty">
-            <span>✳</span>
-            <strong>从一个问题开始</strong>
-            <p>提出你的研究问题，一起寻找相关证据。</p>
-          </div>}
-        </div>
-        {run && !["succeeded", "success", "completed"].includes(run.status) && <ResearchActivity items={run.subtasks} />}
-        {run && <div className="chat-status" role="status">
-          {statusText[run.status] || run.status}{run.stage && (stageText[run.stage] || run.stage) !== (statusText[run.status] || run.status) && ` · ${stageText[run.stage] || run.stage}`}{run.error && <p>
-            {run.error} <Link href="/settings">检查服务设置</Link>
-          </p>}{["failed", "interrupted"].includes(run.status) && <button className="button secondary" disabled={!!busy} onClick={() => void act("retry", async (marker) => {
-            const next = await api<Run>(`/runs/${run.id}/retry`, { method: "POST" }); if (marker !== epoch.current)
-              return; setRun(next); setRuns(previous => [next, ...previous]);
-          })}>重新执行</button>}
+          </article>;
+        })}
+        {!loadingConversation && messages.length === 0 && <p className={styles.loadingMessages}>此会话暂无消息。</p>}
+        {activeRun && <div className={styles.liveStatus} role="status"><span className={styles.spinner} />
+          <span>{statusText[run.status] || run.status}{stageSuffix(run)}</span>
+          <small>{modeText(run.research_mode)}</small>
         </div>}
-        <form onSubmit={search}>
-          <label htmlFor="query">研究问题</label>
-          <textarea id="query" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              e.currentTarget.form?.requestSubmit();
-            }
-          }} placeholder="输入你的研究问题，Shift + Enter 换行" rows={3} />
-          <div className="search-actions">
-            <div className="select-group">
-              <label htmlFor="source">检索范围</label>
-              <select disabled={!!busy} id="source" value={source} onChange={e => setSource(e.target.value)}>
-                <option value="auto">自动</option>
-                <option value="all">优先论文（本地和 OpenAlex）</option>
-                <option value="local">仅项目文献</option>
-                <option value="openalex">优先 OpenAlex</option>
-                <option value="web">优先网页搜索</option>
-                <option value="collection">收藏夹</option>
-              </select>
-            </div>
-            <ModelControls value={modelChoice} onChange={setModelChoice} disabled={!!busy} />
-            {source === "collection" && <select disabled={!!busy || folderLoading} aria-label="选择问答收藏夹" value={collectionId ?? ""} onChange={e => onCollectionChange(e.target.value ? Number(e.target.value) : undefined)}>
-              <option value="">选择收藏夹</option>
-              {collections.map(c => <option key={c.id} value={c.id}>
-                {c.name}
-              </option>)}
-            </select>}
-            <button className="button primary" disabled={(source === "collection" && (folderLoading || !collectionId || !collectionPapers.length)) || !query.trim() || !!busy || !!(run && ["queued", "pending", "running"].includes(run.status))}>发送 <span>↑</span>
+      </div>
+    </section>}
+
+    <div className={`${styles.chatBottom} ${hasConversation ? styles.chatBottomConversation : ""}`}>
+      {run && !["succeeded", "success", "completed"].includes(run.status) && !activeRun && <div className={styles.runNotice} role="status">
+        <div><strong>{statusText[run.status] || run.status}</strong>{stageSuffix(run) && <span>{stageSuffix(run)}</span>}{run.research_mode && <span> · {modeText(run.research_mode)}</span>}{run.error && <p>{run.error}</p>}</div>
+        {(["failed", "interrupted"].includes(run.status)) && <button type="button" disabled={!!busy} onClick={retry}>{busy === "retry" ? "重新执行中…" : "重新执行"}</button>}
+      </div>}
+      {run && activeRun && run.subtasks?.length ? <div className={styles.currentActivity}><ResearchActivity items={run.subtasks} /></div> : null}
+      <form className={styles.composer} onSubmit={submit} autoComplete="off">
+        <label className={styles.visuallyHidden} htmlFor="promptInput">输入你的研究问题</label>
+        <textarea
+          ref={textarea}
+          id="promptInput"
+          rows={2}
+          value={query}
+          disabled={projectLoading || !!busy || !!activeRun}
+          onChange={event => setQuery(event.target.value)}
+          onKeyDown={submitOnEnter}
+          placeholder={mode === "deep" ? "提出一个问题，开始深度研究..." : "提出一个问题，快速获得直接回答..."}
+          aria-label="输入你的研究问题"
+        />
+        <div className={styles.composerToolbar}>
+          <button
+            className={styles.modeSwitch}
+            type="button"
+            title="切换研究模式"
+            aria-label={`当前模式：${modeName}。切换为${mode === "deep" ? "快速探索" : "深度研究"}`}
+            aria-pressed={mode === "quick"}
+            disabled={!!busy || !!activeRun}
+            onClick={() => onModeChange(mode === "deep" ? "quick" : "deep")}
+          ><svg className={styles.modeSpark} viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.8 7.2L21 11l-7.2 1.8L12 20l-1.8-7.2L3 11l7.2-1.8L12 2Z" /></svg><span>{modeName}</span><svg className={styles.modeChevron} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button>
+          <div className={styles.composerRight}><span className={styles.shortcut}>{enterToSend ? "ENTER ↵ TO START" : "CTRL + ENTER TO START"}</span>
+            <button className={`${styles.sendButton} ${query.trim() && !busy && !activeRun && !projectLoading ? styles.sendButtonReady : ""}`} type="submit" disabled={!query.trim() || !!busy || !!activeRun || projectLoading} aria-label="发送研究问题">
+              {busy === "send" ? <span className={styles.spinner} /> : <svg className={styles.sendIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v12" /></svg>}
             </button>
           </div>
-          {source === "web" && <p className="collection-hint">使用设置页中的搜索引擎，必要时可补充论文。网页证据不等同于论文全文。</p>}{["all", "openalex"].includes(source) && <p className="collection-hint">必要时可补充网页资料。</p>}{source === "collection" && (!collectionId || !collectionPapers.length) && <p className="collection-hint">
-            {!collectionId ? "请选择收藏夹。" : "此收藏夹为空，请先加入文献。"}
-          </p>}
-        </form>
-      </section>
-      {library}
+        </div>
+      </form>
+      {!hasConversation && <>
+        <div className={styles.presetsHeading}><span>TRY ASKING TUFA</span><span>从灵感开始探索 ↗</span></div>
+        <div className={styles.presets} aria-label="预设研究问题">
+          {presets.map(preset => <button key={preset.prompt} className={styles.preset} type="button" onClick={() => choosePreset(preset.prompt)}>
+            <span className={`${styles.presetIcon} ${styles[preset.tone]}`}>{preset.icon}</span><span>{preset.text}</span><svg className={styles.presetArrow} viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
+          </button>)}
+        </div>
+      </>}
+      <div className={styles.workspaceFooter}><span>TRACEABLE</span><span className={styles.separator}>·</span><span>VERIFIABLE</span><span className={styles.separator}>·</span><span>RESEARCH-READY</span></div>
     </div>
-    <div className="secondary-column">
-      <section className="card compact">
-        <div className="section-kicker">CONVERSATION</div>
-        <h2>当前会话</h2>
-        <label htmlFor="conversation">选择会话</label>
-        <select disabled={!!busy} id="conversation" value={conversationId ?? ""} onChange={e => { const id = e.target.value ? Number(e.target.value) : undefined; selectConversation(id); }}>
-          <option value="">新会话</option>
-          {conversations.map(c => <option key={c.id} value={c.id}>
-            {c.title}
-          </option>)}
-        </select>
-        <form onSubmit={createConversation} className="new-conversation">
-          <label htmlFor="conversation-name">新建会话</label>
-          <div className="inline-input">
-            <input id="conversation-name" value={conversationName} onChange={e => setConversationName(e.target.value)} placeholder="输入会话名称" />
-            <button aria-label="创建会话" disabled={!conversationName.trim() || !!busy}>＋</button>
-          </div>
-        </form>
-      </section>
-      {importPanel}
-    </div>
-  </div>;
+  </main>;
 }

@@ -85,20 +85,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
         payload = json.loads(messages[1].get('content', '{}')) if len(messages) > 1 else {}
         match = re.search(r'运行节点标识：([a-z_]+)', system)
         role = match.group(1) if match else ''
-        result = self._model_result(role, payload)
+        result = self._model_result(role, payload, system)
         content = json.dumps(result, ensure_ascii=False)
         self._send_json({'choices': [{'message': {'content': content}}]})
 
     @staticmethod
-    def _model_result(role, payload):
+    def _model_result(role, payload, system=''):
         question = str(payload.get('question', ''))
         folded = question.casefold()
         if role == 'dispatcher':
             direct = folded.startswith('direct:')
+            quick_mode = '当前是快速探索模式' in system
             return {
+                # For quick mode, deliberately contradict the forced-direct policy.
+                # The application must still return this answer without entering research.
                 'needs_research': not direct,
-                'reason': '本地模拟入口分流',
-                'answer': '这是不需要检索的直接回答。' if direct else '',
+                'reason': '本地模拟入口分流；quick 模式下故意请求研究以覆盖强制模式边界',
+                'answer': ('这是不需要检索的直接回答。' if direct else
+                           '这是 quick 模式应返回的直接回答。' if quick_mode else ''),
             }
 
         if role == 'background_investigator':

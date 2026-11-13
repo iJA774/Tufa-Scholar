@@ -1,29 +1,31 @@
-# Web 开始页与研究工作台
+# Web 开始页与研究工作区
 
-`app/page.tsx` 是开始页路由，只装配 `launch/LaunchPage.tsx` 并导出首页 metadata。开始页不调用 API、不装载研究工作台状态；页面只提供“开始使用”和 GitHub 两个入口。Canvas LED 动画封装在独立组件中，不和路由或工作台状态耦合。点击“开始使用”进入 `/workspace`；GitHub 地址 `https://github.com/iJA774/Tufa-Scholar` 在新标签页打开。
+`app/page.tsx` 是独立开始页入口，只装配 `launch/LaunchPage.tsx`；LED Canvas 动画和样式单独封装，不请求 API、不装载研究状态。“开始使用”进入 `/workspace`，GitHub 链接在新标签页打开仓库。
 
-`app/workspace/page.tsx` 是原研究工作台的新入口，装配 `workspace/WorkspacePage.tsx` 中的项目与研究状态。工作台 API 调用仍通过 `/api` 代理，后端 API 路径、设置和业务行为不因首页迁移而改变。
+`app/workspace/page.tsx` 是研究工作区入口，装配 `workspace/WorkspacePage.tsx`。工作区通过 `GET /conversations` 加载单层历史抽屉；历史项带 `project_id`，打开时切换到对应项目，再加载该会话。项目仍用于限定可用 PDF、文献与新研究范围，不在历史列表中形成项目分组。
 
-| 模块 | 状态与职责 |
+工作区提供平铺历史导航和设置弹窗。初始研究模式为 deep；每次提问明确提交 `research_mode: deep|quick`。deep 强制进入研究流程，quick 强制直接回答并跳过背景调查与检索。API 仍接受旧客户端的 `auto`，省略模式也默认 auto；重试沿用原任务模式。设置中的“研究偏好”标签保留为不生效的占位，不影响后端；“通用”和“外观”偏好保存在本地，模型选择只用于下一次提问。
+
+设置弹窗与 `/settings` 页面共用 `SettingsPanel`，管理服务与模型、网页搜索、当前项目 PDF、研究偏好占位、外观和关于信息。导入后刷新文件列表，原文访问继续走本地 API。所有业务数据请求通过本机 `/api` 代理，不由浏览器直接访问数据库或携带服务密钥访问云端。
+
+| 模块 | 职责 |
 |---|---|
-| `app/page.tsx`、`launch/LaunchPage.tsx` | 独立开始页路由与内容；开始页不请求本地 API。 |
-| `launch/LaunchPage.module.css` | 开始页 LED 动画与页面样式。 |
-| `app/workspace/page.tsx`、`workspace/WorkspacePage.tsx` | `/workspace` 工作台路由及项目选择、顶层提示和工作区状态装配。 |
-| `workspace/ProjectWorkspace.tsx` | 工作区布局、视图切换、项目文献刷新及历史跳转协调；项目切换时重置，屏蔽旧项目回调 |
-| `workspace/ProjectSidebar.tsx` | 项目创建、菜单、删除确认和失败提示，组合收藏夹导航 |
-| `workspace/Collections.tsx` | 仅收藏域共享列表、当前范围与成员；管理创建、移除、删除、收藏选择及弹窗 |
-| `workspace/ResearchChat.tsx` | 会话、消息、提问草稿、模型选择、任务恢复与重试；通过文献库和导入插槽保持双列布局 |
-| `workspace/SearchDialog.tsx` | 文献与历史检索的标签、输入、结果和取消；组合现有网页搜索组件 |
-| `workspace/PdfImport.tsx` | 文件与元数据表单、上传状态和取消，成功后通知项目文献刷新 |
-| `workspace/PaperLibrary.tsx`、`PaperRow.tsx` | 文献列表与来源、PDF 链接展示，收藏动作由收藏域提供 |
-| `workspace/api.ts`、`types.ts` | 同一工作台使用的请求辅助与数据契约 |
-| `hooks/useRunPolling.ts`、`runPolling.ts` | React 生命周期适配与可独立验证的轮询调度 |
+| `app/page.tsx`、`launch/LaunchPage.tsx`、`launch/LaunchPage.module.css` | 独立开始页路由、内容与 LED Canvas 动画 |
+| `app/workspace/page.tsx`、`workspace/WorkspacePage.tsx`、`WorkspacePage.module.css` | 工作区路由、项目范围、单层历史抽屉、设置弹窗及其深色样式 |
+| `workspace/ResearchChat.tsx`、`ResearchChat.module.css` | 当前会话消息、deep/quick 模式、任务阶段与小结、轮询、重试、证据和下载 |
+| `app/settings/SettingsPanel.tsx`、`SettingsPanel.module.css`、`app/settings/page.tsx` | 工作区弹窗与 `/settings` 共用的服务、模型、网页搜索、PDF、研究占位及外观设置 |
+| `workspace/PdfImport.tsx`、`workspace/PaperLibrary.tsx`、`workspace/PaperRow.tsx` | 当前项目 PDF 导入、刷新、列表和原文访问 |
+| `app/settings/WebSearchSettings.tsx`、`RuntimeLogsSettings.tsx` | 网页搜索设置及本地运行日志管理 |
+| `workspace/api.ts`、`workspace/types.ts`、`workspace/sourceLabels.ts` | 工作区请求辅助、API 数据类型及来源标签 |
+| `workspace/preferences.ts` | deep/quick、Enter 发送、外观选项和模型选择的本地工作区偏好 |
+| `app/hooks/useRunPolling.ts`、`app/hooks/runPolling.ts` | 任务轮询的 React 生命周期适配与独立调度逻辑 |
+| `app/ModelControls.tsx` | 提问模型和思考强度选择 |
 
-收藏域上下文不承接聊天、模型、搜索或上传状态。切换收藏夹视图时保留聊天组件与草稿，项目切换则重挂项目域；输入变化、搜索关闭和卸载会取消过期请求。
+切换项目、会话、任务或卸载时取消旧请求，防止过时结果更新当前界面。
 
-任务在 `queued`、`pending`、`running` 时每次请求结束后间隔 1200 ms 再轮询，同一时刻只有一个请求。一次或两次请求失败后继续轮询，任意一次成功都清零失败计数。收到终态后停止，连续三次失败则停止并显示错误。切换任务、会话、项目或卸载时清除定时器并中止请求。完成后按任务 ID、状态和当前会话刷新消息。
+## 验收
 
-从仓库根目录验证：
+从仓库根目录运行：
 
 ```powershell
 pnpm check:web
@@ -32,4 +34,10 @@ pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module co
 node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)
 ```
 
-交互验收使用 `python -m scripts.fixture_api --data-dir <独立空目录> --port 18180` 的真实 API/SQLite 与模拟搜索、模型和任务。前端在构建前设置 `TUFA_API_URL=http://127.0.0.1:18180`。该 fixture 无真实云端调用且不启动 worker，任务通过 `POST /__fixture/advance` 两次显式推进运行、完成；包含 `fail` 的问题首次失败，重试后可完成。实测范围、结果与限制见 [根 README](../../README.md#验证)。
+桌面交互验收可以使用带真实 API/SQLite、模拟模型和搜索、但不启动 worker 的浏览器 fixture：
+
+```powershell
+uv run --locked python -m scripts.fixture_api --data-dir .cache/desktop-research-fixture --port 18180 --local-config
+```
+
+fixture 要求新建或空的数据目录。`--local-config` 会清除 fixture 进程继承的服务密钥环境变量，并在该隔离 SQLite 中保存假模型和 Searx 设置；不会调用真实服务。输出中给出可上传样例 PDF 的路径。待处理任务需对 `POST /__fixture/advance` 调用两次，失败任务可重试；quick 不保存证据，deep 显示模拟 researcher 阶段。此 fixture 仅用于浏览器交互和页面内容，不用于验证真实 graph、worker、模型或检索闭环。实际验收范围见 [根 README](../../README.md#验证)。

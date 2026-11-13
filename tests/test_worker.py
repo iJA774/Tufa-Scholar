@@ -56,7 +56,8 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(load.call_count, 1)
             self.assertEqual(observed[0][2], 'dispatcher')
             self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
-            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'local_papers'})
+            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'local_papers'})
+            self.assertEqual(observed[0][0]['research_mode'], 'auto')
             self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
             self.assertEqual([n['task'] for n in repository.get_task(first['run_id'])['subtasks']], ['topic'])
             from fastapi.testclient import TestClient
@@ -71,6 +72,23 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(observed[1][1:], ([], 'dispatcher'))
             self.assertEqual(observed[1][0]['paper_ids'], [])
             self.assertEqual(repository.get_task(current['run_id'])['status'], 'succeeded')
+
+    def test_worker_passes_saved_research_mode_to_graph(self):
+        from apps.worker.__main__ import run_once
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
+            initialize_storage()
+            project = repository.create_project('mode passthrough')['id']
+            task = repository.create_question(project, None, 'question', 'local', research_mode='deep')
+            received = []
+
+            def agent(research, *, history, on_stage, on_subtask):
+                received.append((research, history))
+                return 'answer', []
+
+            with patch('src.agents.literature.run', side_effect=agent):
+                self.assertTrue(run_once())
+            self.assertEqual(received[0][0]['research_mode'], 'deep')
+            self.assertEqual(repository.get_task(task['run_id'])['research_mode'], 'deep')
 
     def test_subtasks_survive_failure_and_retry_starts_empty(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
