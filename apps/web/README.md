@@ -1,9 +1,14 @@
-# 研究工作台前端
+# Web 开始页与研究工作台
 
-`app/page.tsx` 保存项目列表、当前项目和顶层提示，按项目 key 装配工作区。局部表单、请求和弹窗属于对应功能组件，不提升为首页状态。
+`app/page.tsx` 是开始页路由，只装配 `launch/LaunchPage.tsx` 并导出首页 metadata。开始页不调用 API、不装载研究工作台状态；页面只提供“开始使用”和 GitHub 两个入口。Canvas LED 动画封装在独立组件中，不和路由或工作台状态耦合。点击“开始使用”进入 `/workspace`；GitHub 地址 `https://github.com/iJA774/Tufa-Scholar` 在新标签页打开。
+
+`app/workspace/page.tsx` 是原研究工作台的新入口，装配 `workspace/WorkspacePage.tsx` 中的项目与研究状态。工作台 API 调用仍通过 `/api` 代理，后端 API 路径、设置和业务行为不因首页迁移而改变。
 
 | 模块 | 状态与职责 |
 |---|---|
+| `app/page.tsx`、`launch/LaunchPage.tsx` | 独立开始页路由与内容；开始页不请求本地 API。 |
+| `launch/LaunchPage.module.css` | 开始页 LED 动画与页面样式。 |
+| `app/workspace/page.tsx`、`workspace/WorkspacePage.tsx` | `/workspace` 工作台路由及项目选择、顶层提示和工作区状态装配。 |
 | `workspace/ProjectWorkspace.tsx` | 工作区布局、视图切换、项目文献刷新及历史跳转协调；项目切换时重置，屏蔽旧项目回调 |
 | `workspace/ProjectSidebar.tsx` | 项目创建、菜单、删除确认和失败提示，组合收藏夹导航 |
 | `workspace/Collections.tsx` | 仅收藏域共享列表、当前范围与成员；管理创建、移除、删除、收藏选择及弹窗 |
