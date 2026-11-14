@@ -210,15 +210,29 @@ def _payload(state, **extra):
         "question": research["query"],
         "history": _history_for_model(state.get("history", [])),
         "source": research["source"],
-        "background": state.get("background", {}),
+        "background": _background_summary_for_model(state.get("background", {})),
         "plan": state.get("plan", {}),
         "rounds": _rounds_for_model(state.get("rounds", [])),
-        "candidates": {mode: _candidate_summaries(state, mode) for mode in ("paper", "web")},
         "evidence": _evidence_views(_select_evidence(state)),
         "errors": state.get("errors", []),
         "warnings": state.get("warnings", []),
         **extra,
     }
+
+
+def _background_summary_for_model(background):
+    """Keep the screened overview and gaps, not candidate records repeated elsewhere."""
+    if not isinstance(background, dict):
+        return {}
+    summary = {key: value for key, value in background.items() if key != "selected_candidates"}
+    selected_ids = [
+        item.get("candidate_id")
+        for item in background.get("selected_candidates", [])
+        if isinstance(item, dict) and item.get("candidate_id")
+    ]
+    if selected_ids:
+        summary["selected_candidate_ids"] = selected_ids
+    return summary
 
 
 def _rounds_for_model(rounds):
@@ -272,19 +286,19 @@ def _web_block_key(candidate_id, block):
     return f"{candidate_id}:{offset if offset is not None else 'snippet'}:{digest}"
 
 
-def _candidate_view(item, mode, *, include_text=True):
+def _candidate_view(item, mode, *, include_text=True, text_limit=MAX_CANDIDATE_TEXT):
     allowed = ("candidate_id", "id", "title", "doi", "arxiv_id", "openalex_id", "year", "source_level", "original_url", "url", "provider", "retrieved_at", "content_offset")
     result = {key: item.get(key) for key in allowed if item.get(key) is not None}
     result["source"] = mode
-    if item.get("abstract"):
-        result["abstract"] = str(item["abstract"])[:MAX_CANDIDATE_TEXT]
+    if include_text and item.get("abstract"):
+        result["abstract"] = str(item["abstract"])[:text_limit]
     if item.get("content") and include_text:
-        result["content"] = str(item["content"])[:MAX_CANDIDATE_TEXT]
+        result["content"] = str(item["content"])[:text_limit]
     if item.get("next_offset") is not None:
         result["next_offset"] = item["next_offset"]
     if include_text and item.get("content_blocks"):
         blocks = []
-        budget = MAX_CANDIDATE_TEXT
+        budget = text_limit
         for block in item["content_blocks"][-3:]:
             body = str(block.get("content", ""))[:min(800, budget)]
             if not body:
@@ -303,13 +317,13 @@ def _candidate_view(item, mode, *, include_text=True):
     return result
 
 
-def _evidence_views(items):
+def _evidence_views(items, *, text_limit=1_200):
     fields = ("id", "paper_id", "title", "text", "source_level", "version_id", "page", "original_url", "provider", "retrieved_at", "char_start", "char_end", "published_at", "candidate_id")
     result = []
     for item in items:
         view = {key: item.get(key) for key in fields if item.get(key) is not None}
         if view.get("text"):
-            view["text"] = str(view["text"])[:1_200]
+            view["text"] = str(view["text"])[:text_limit]
         result.append(view)
     return result
 
@@ -406,12 +420,29 @@ def _record_search_results(state, mode, query, items):
     return pools, query_results
 
 
-def _candidate_summaries(state, mode, ids=None, *, limit=MAX_CANDIDATE_CONTEXT):
+def _candidate_summaries(state, mode, ids=None, *, limit=MAX_CANDIDATE_CONTEXT, include_text=True, text_limit=MAX_CANDIDATE_TEXT):
     pool = state.get("candidate_pools", {}).get(mode, [])
     if ids is not None:
         wanted = set(ids)
         pool = [item for item in pool if item.get("candidate_id") in wanted]
-    return [_candidate_view(item, mode) for item in pool[:limit]]
+    return [_candidate_view(item, mode, include_text=include_text, text_limit=text_limit) for item in pool[:limit]]
+
+
+def _compact_tool_results(results, *, limit=4, text_limit=400):
+    compact = []
+    for item in (results or [])[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        entry = {}
+        for key, value in item.items():
+            if isinstance(value, str):
+                entry[key] = value[:text_limit]
+            elif isinstance(value, list):
+                entry[key] = [part[:text_limit] if isinstance(part, str) else part for part in value[:20]]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                entry[key] = value
+        compact.append(entry)
+    return compact
 
 
 def _unique_evidence(items):
@@ -773,7 +804,6 @@ def _planner(state, on_stage):
     payload = _payload(
         state,
         round_count=len(rounds),
-        background=state.get("background", {}),
         current_plan=state.get("current_plan", []),
         current_draft=state.get("current_draft", {}),
         current_review=state.get("current_review", {}),
@@ -895,6 +925,7 @@ def _researcher(state, on_stage):
     state = {**state, "candidate_pools": {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}, "tool_results": [], "errors": list(state.get("errors", []))}
     tried_queries = set()
     search_failures = 0
+    consecutive_search_failures = 0
     search_attempts = 0
     action_count = 0
     draft = Draft()
@@ -902,20 +933,25 @@ def _researcher(state, on_stage):
     failure_message = ""
     tools = _helper_catalog(state["research"], mode)
     while action_count < MAX_RESEARCH_ACTIONS:
-        payload = _payload(
-            state,
-            phase="act",
-            current_round=state.get("current_round", 1),
-            current_source=mode,
-            current_plan=state.get("current_plan", []),
-            current_candidates=_candidate_summaries(state, mode),
-            evidence=_evidence_views(_select_evidence(state, _claim_ids(draft.model_dump()) | _findings_ids([item.model_dump() for item in findings]))),
-            tool_results=state.get("tool_results", [])[-8:],
-            tool_feedback=state.get("errors", [])[-6:],
-            calls_remaining=MAX_RESEARCH_ACTIONS - action_count,
-            search_attempts=search_attempts,
-            search_failures=search_failures,
-        )
+        payload = {
+            "question": state["research"]["query"],
+            "source": state["research"]["source"],
+            "phase": "act",
+            "current_round": state.get("current_round", 1),
+            "current_source": mode,
+            "current_plan": state.get("current_plan", []),
+            "requirements": (state.get("plan") or {}).get("requirements", []),
+            "selected_candidate_ids": _background_summary_for_model(state.get("background", {})).get("selected_candidate_ids", []),
+            "current_candidates": _candidate_summaries(
+                state, mode, limit=MAX_CANDIDATE_CONTEXT, text_limit=240,
+            ),
+            "evidence": _evidence_views(_select_evidence(state), text_limit=240),
+            "tool_results": _compact_tool_results(state.get("tool_results", [])),
+            "tool_feedback": state.get("errors", [])[-4:],
+            "calls_remaining": MAX_RESEARCH_ACTIONS - action_count,
+            "search_attempts": search_attempts,
+            "search_failures": search_failures,
+        }
         try:
             result = _model(
                 state,
@@ -942,12 +978,17 @@ def _researcher(state, on_stage):
                 try:
                     patch, _ = _invoke_tool(state, mode, name, args)
                     state.update(patch)
+                    consecutive_search_failures = 0
                 except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
                     search_failures += 1
                     state["errors"].append(_tool_error(name, exc))
+                    consecutive_search_failures += 1
+                    if consecutive_search_failures >= 2:
+                        failure_message = "连续检索失败，本轮停止重试并保留已收集资料。"
+                        break
                 continue
-            draft = result.draft
-            findings = result.findings
+            # The act phase carries compact evidence previews. Rebuild any finish
+            # answer from the full evidence in the dedicated draft phase below.
             break
         action_count += 1
         try:
@@ -958,24 +999,32 @@ def _researcher(state, on_stage):
                     tried_queries.add(" ".join(query.casefold().split()))
             patch, _ = _invoke_tool(state, mode, result.tool_name, result.arguments)
             state.update(patch)
+            consecutive_search_failures = 0
         except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
             error = _tool_error(result.tool_name, exc)
             state["errors"].append(error)
             if result.tool_name in {"search_web", "search_papers"}:
                 search_failures += 1
+                consecutive_search_failures += 1
+                if consecutive_search_failures >= 2:
+                    failure_message = "连续检索失败，本轮停止重试并保留已收集资料。"
+                    break
     if not draft.sections and not draft.limitations:
-        finalization_payload = _payload(
-            state,
-            phase="draft",
-            current_round=state.get("current_round", 1),
-            current_source=mode,
-            current_plan=state.get("current_plan", []),
-            current_candidates=_candidate_summaries(state, mode),
-            evidence=_evidence_views(_select_evidence(state)),
-            tool_results=state.get("tool_results", [])[-8:],
-            tool_feedback=state.get("errors", [])[-6:],
-            calls_remaining=0,
-        )
+        finalization_payload = {
+            "question": state["research"]["query"],
+            "source": state["research"]["source"],
+            "phase": "draft",
+            "current_round": state.get("current_round", 1),
+            "current_source": mode,
+            "current_plan": state.get("current_plan", []),
+            "current_candidates": _candidate_summaries(
+                state, mode, limit=5, text_limit=MAX_CANDIDATE_TEXT,
+            ),
+            "evidence": _evidence_views(_select_evidence(state)),
+            "tool_results": _compact_tool_results(state.get("tool_results", [])),
+            "tool_feedback": state.get("errors", [])[-6:],
+            "calls_remaining": 0,
+        }
         try:
             final_draft = _model(
                 state,
@@ -1054,7 +1103,6 @@ def _analyst(state, on_stage, on_subtask):
     _emit(on_stage, "analyst")
     mode = state.get("current_source", "paper")
     draft = state.get("current_draft", {})
-    candidate_items = _candidate_summaries(state, mode, limit=12)
     evidence = _select_evidence(state, _claim_ids(draft) | _findings_ids(state.get("current_findings", [])))
     allowed_papers = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
     payload = _payload(
@@ -1063,7 +1111,6 @@ def _analyst(state, on_stage, on_subtask):
         current_source=mode,
         current_plan=state.get("current_plan", []),
         current_draft=draft,
-        current_candidates=candidate_items,
         tool_results=state.get("tool_results", [])[-8:],
         evidence=_evidence_views(evidence),
         requirements=(state.get("plan") or {}).get("requirements", []),
@@ -1275,7 +1322,6 @@ def _reporter(state, on_stage):
     payload = _payload(
         state,
         source_scope=state["research"]["source"],
-        background=state.get("background", {}),
         rounds=_rounds_for_model(state.get("rounds", [])),
         evidence=_evidence_views(working),
         final_requirements=(state.get("plan") or {}).get("requirements", []),

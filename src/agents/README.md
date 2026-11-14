@@ -41,7 +41,7 @@ supervisor 不调用模型，只依据完成节点将控制顺序交给 research
 
 supervisor 和 coder 是确定性节点，不设置虚构 prompt ID。模型调用位于 `src/integrations/model.py`。Jinja2 仅渲染受信的六个 system 模板，使用 `StrictUndefined` 且关闭 autoescape；每次 HTTP 请求（包括格式纠错重试）注入当前北京时间和代码生成的 Pydantic `OUTPUT_SCHEMA`。工作流另提供 `node_role`、`search_mode`、节点权限过滤后的 `available_tools` 与本地文献文件名 `local_papers`。`CURRENT_TIME` 和 `OUTPUT_SCHEMA` 不能由上下文覆盖。问题、历史、网页、论文、候选、初稿和审查意见单独作为 user JSON 数据发送，不能进行二次模板求值；文件名也只是待处理数据。更多规则见 [提示词说明](../../docs/PROMPTS.md) 与 [模板维护规则](../prompts/AGENTS.md)。
 
-每次模型 payload 只包含有界上下文：论文和网页候选分池，通常各最多 20 条（analyst 候选窗口最多 12 条），候选摘要或正文片段最多 1,600 字符；工作证据最多 18 条、正文合计最多 21,600 字符。planner 可看到项目文献文件名清单以判断现有范围，但文件名不代表已读取原文。工具目录由代码按节点和来源过滤；图层将候选 ID 映射为 registry 的真实参数，不能由模型构造项目范围或网页 URL。
+模型请求按阶段裁剪。背景筛选接收检索候选摘要；planner 和 reporter 接收筛选摘要、缺口及候选 ID，不接收重复的候选正文。researcher act 每轮仅接收当前来源的短候选预览、证据预览、少量最近工具反馈和筛选候选 ID；结束时单独调用 draft，最多传入五条候选和所需完整证据，以保持证据引用校验能力。普通证据上下文最多 18 条、正文合计最多 21,600 字符。连续两次搜索失败会提前结束当轮检索，保留已有证据并继续生成初稿和报告。planner 可看到项目文献文件名清单以判断现有范围，但文件名不代表已读取原文。工具目录由代码按节点和来源过滤；图层将候选 ID 映射为 registry 的真实参数，不能由模型构造项目范围或网页 URL。
 
 ## 候选与证据
 

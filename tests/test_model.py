@@ -300,6 +300,62 @@ class ModelTests(unittest.TestCase):
         self.assertIn('elapsed_ms=', ' '.join(logs.output))
         self.assertIn('401', str(error.exception))
 
+    def test_model_usage_is_logged_with_task_and_prompt_without_sensitive_text(self):
+        response = self.response()
+        body = response.json()
+        body['usage'] = {
+            'prompt_tokens': 120,
+            'completion_tokens': 24,
+            'total_tokens': 144,
+            'prompt_tokens_details': {'cached_tokens': 18},
+            'completion_tokens_details': {'reasoning_tokens': 7},
+        }
+        response = httpx.Response(200, request=response.request, json=body)
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=response), \
+             patch('src.integrations.model.diagnostic_context', return_value={'run_id': 42}), \
+             self.assertLogs('src.integrations.model', level='INFO') as logs:
+            structured('runtime/dispatcher', {'question': 'private research question'}, Output,
+                       template_context=self.context())
+
+        output = ' '.join(logs.output)
+        self.assertIn('run_id=42', output)
+        self.assertIn('prompt_id=runtime/dispatcher', output)
+        self.assertIn('attempt=1', output)
+        self.assertIn('prompt_tokens=120', output)
+        self.assertIn('completion_tokens=24', output)
+        self.assertIn('total_tokens=144', output)
+        self.assertIn('cached_tokens=18', output)
+        self.assertIn('reasoning_tokens=7', output)
+        self.assertIn('input_chars=', output)
+        self.assertNotIn('private research question', output)
+
+    def test_invalid_structured_response_logs_usage_for_each_response_attempt(self):
+        response = httpx.Response(
+            200,
+            request=httpx.Request('POST', 'https://example.invalid/v1/chat/completions'),
+            json={
+                'choices': [{'message': {'content': '{}'}}],
+                'usage': {'prompt_tokens': 100, 'completion_tokens': 5, 'total_tokens': 105},
+            },
+        )
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
+             patch('src.integrations.model.httpx.post', return_value=response) as post, \
+             patch('src.integrations.model.diagnostic_context', return_value={'run_id': 9}), \
+             self.assertLogs('src.integrations.model', level='INFO') as logs:
+            with self.assertRaises(StructuredOutputError):
+                structured('runtime/dispatcher', {'question': 'test'}, Output,
+                           template_context=self.context())
+
+        output = '\n'.join(logs.output)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(output.count('model_call invalid'), 2)
+        self.assertEqual(output.count('run_id=9'), 4)
+        self.assertEqual(output.count('prompt_tokens=100'), 2)
+        self.assertEqual(output.count('completion_tokens=5'), 2)
+        self.assertEqual(output.count('total_tokens=105'), 2)
+
 
 if __name__ == '__main__':
     unittest.main()
