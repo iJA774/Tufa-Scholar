@@ -94,6 +94,11 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
+### Tavily 本机代理连接恢复
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 198 项测试，`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过隔离的 API/worker 闭环。
+- 实测独立网页搜索接口。将隔离实例的 HTTPS 代理指向未监听的本机端口后，日志记录代理连接失败和直连重试，接口返回 HTTP 200 与 5 条真实 Tavily 结果。
+
 ### 终稿结构与原生工具调用
 
 - `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 190 项测试。`.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 通过，使用隔离的 API、worker 与模拟上游。网页流程覆盖原生函数参数分片、公开操作目的、预算截断和带引用的固定报告栏目。

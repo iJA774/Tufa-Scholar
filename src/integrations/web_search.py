@@ -1,9 +1,13 @@
 """Direct, bounded adapters for the configured web search provider."""
 from datetime import datetime, timezone
+import ipaddress
 import logging
+import os
+import ssl
 import time
 from html import unescape
 import re
+import urllib.request
 from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
@@ -18,6 +22,7 @@ from src.infrastructure.settings import web_search_config
 logger = logging.getLogger(__name__)
 _ENGINES = frozenset({'duckduckgo', 'tavily', 'infoquest', 'brave_search', 'serper', 'arxiv', 'searx', 'wikipedia'})
 _TIMEOUT = 20
+_TAVILY_TIMEOUT = httpx.Timeout(_TIMEOUT, connect=5)
 _MAX_CONTENT = 4000
 _HEADERS = {"Accept": "application/json", "User-Agent": "Tufa-Scholar/0.1"}
 
@@ -46,11 +51,77 @@ def _text(value):
     return " ".join(unescape(re.sub(r"<[^>]*>", " ", value)).split())[:_MAX_CONTENT]
 
 
-def _request(method, url, *, headers=None, **kwargs):
+def _request(method, url, *, headers=None, timeout=_TIMEOUT, **kwargs):
     response = httpx.request(method, url, headers={**_HEADERS, **(headers or {})},
-                             timeout=_TIMEOUT, follow_redirects=False, **kwargs)
+                             timeout=timeout, follow_redirects=False, **kwargs)
     response.raise_for_status()
     return response
+
+
+def _loopback_https_proxy_configured(url):
+    """Return whether httpx would use a configured loopback proxy for this HTTPS URL."""
+    try:
+        hostname = urlsplit(url).hostname
+        if not hostname or urllib.request.proxy_bypass(hostname):
+            return False
+        proxies = urllib.request.getproxies()
+        proxy = proxies.get("https") or proxies.get("all")
+        if not isinstance(proxy, str) or not proxy.strip():
+            return False
+        proxy_url = proxy.strip()
+        if "://" not in proxy_url:
+            proxy_url = "http://" + proxy_url
+        proxy_host = urlsplit(proxy_url).hostname
+        if not proxy_host:
+            return False
+        proxy_host = proxy_host.rstrip(".").lower()
+        if proxy_host == "localhost":
+            return True
+        return ipaddress.ip_address(proxy_host).is_loopback
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _direct_verify_from_environment():
+    """Preserve httpx's explicitly configured CA bundle when bypassing proxies."""
+    cert_file = os.environ.get("SSL_CERT_FILE")
+    if cert_file:
+        return ssl.create_default_context(cafile=cert_file)
+    cert_dir = os.environ.get("SSL_CERT_DIR")
+    if cert_dir:
+        return ssl.create_default_context(capath=cert_dir)
+    return True
+
+
+def _is_certificate_verification_failure(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _tavily_request(query, limit, key):
+    url = "https://api.tavily.com/search"
+    headers = {"Authorization": f"Bearer {key}"}
+    payload = {"query": query, "max_results": limit, "include_raw_content": True}
+    loopback_proxy = _loopback_https_proxy_configured(url)
+    try:
+        return _request("POST", url, headers=headers, json=payload, timeout=_TAVILY_TIMEOUT)
+    except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        if not loopback_proxy or _is_certificate_verification_failure(exc):
+            raise
+        if isinstance(exc, httpx.ProxyError):
+            reason = "proxy_error"
+        elif isinstance(exc, httpx.ConnectTimeout):
+            reason = "connect_timeout"
+        else:
+            reason = "connect_error"
+        logger.warning("web_search engine=tavily proxy_recovery=direct reason=%s", reason)
+        return _request("POST", url, headers=headers, json=payload, timeout=_TAVILY_TIMEOUT,
+                        trust_env=False, verify=_direct_verify_from_environment())
 
 
 def _items(data, *path):
@@ -190,8 +261,7 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
             found = _Duckduckgo(timeout=_TIMEOUT).search(query) or []
             items = [{'title': item.title, 'href': item.href, 'body': item.body} for item in found]
         elif engine == "tavily":
-            data = _request("POST", "https://api.tavily.com/search", headers={"Authorization": f"Bearer {key}"},
-                            json={"query": query, "max_results": limit, "include_raw_content": True}).json()
+            data = _tavily_request(query, limit, key).json()
             items = _items(data, "results")
         elif engine == "infoquest":
             data = _request("POST", "https://search.infoquest.bytepluses.com", headers={"Authorization": f"Bearer {key}"},

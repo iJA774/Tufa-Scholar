@@ -256,6 +256,34 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(result['errors'][-1]['code'], 'duplicate_web_read_skipped')
         self.assertNotIn(candidate['url'], str(result['errors']))
 
+    def test_tool_error_explains_search_connection_failures(self):
+        network_error = workflow._tool_error(
+            'search_web', workflow.WebSearchError('private provider detail', 'network'),
+        )
+        timeout_error = workflow._tool_error(
+            'search_web', workflow.WebSearchError('private provider detail', 'timeout'),
+        )
+
+        self.assertEqual(network_error['code'], 'search_network')
+        self.assertIn('连接失败', network_error['message'])
+        self.assertIn('没有取得搜索结果', network_error['message'])
+        self.assertEqual(timeout_error['code'], 'search_timeout')
+        self.assertIn('超时', timeout_error['message'])
+        self.assertIn('没有取得搜索结果', timeout_error['message'])
+        self.assertNotIn('private provider detail', str([network_error, timeout_error]))
+
+    def test_tool_error_distinguishes_non_public_page_read_from_search(self):
+        error = workflow._tool_error(
+            'read_web_page',
+            workflow.WebPageError(category='invalid_address', reason='non_public_address'),
+        )
+
+        self.assertEqual(error['code'], 'web_page_non_public_address')
+        self.assertIn('公网校验', error['message'])
+        self.assertIn('无法读取正文', error['message'])
+        self.assertIn('已有搜索摘要', error['message'])
+        self.assertNotIn('invalid_address', str(error))
+
 
 if __name__ == '__main__':
     unittest.main()

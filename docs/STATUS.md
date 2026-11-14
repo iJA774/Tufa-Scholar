@@ -20,6 +20,8 @@ worker 日志按任务 ID、提示词、阶段和尝试次数记录请求字符�
 
 研究工具决策使用模型服务原生 Function Calling，调用前继续检查来源、参数和预算。终稿按标题、关键点、概述、详细分析和关键引文呈现，有缺口时附局限。已有的保存报告继续按当时的正文显示。
 
+Tavily 的本机代理连接失败可通过一次直连重试恢复。活动记录会区分搜索连接失败与候选网页正文读取被公网校验拦截。
+
 背景、规划、工具决策和审查可使用较低的推理强度与完成 token 上限，初稿和终稿保留原有生成空间。显式模型强度设置优先。上游通过 SSE 明确报告完成上限与推理预算冲突时，客户端保留推理强度并重试，后续请求沿用兼容设置。
 
 当前实现流程为 `dispatcher → background_investigator → planner → supervisor`，每轮 supervisor 依次调度 `researcher → analyst → coder → planner`，最多两轮后强制 `reporter` 成稿；简单直接回答由 dispatcher 结束，不调用工具。隔离回归、模拟模型/搜索 HTTP 闭环和实际 API/worker 入口均已通过；节点和数据契约见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [PROMPTS.md](PROMPTS.md)，实测命令及结果见 [README 验证](../README.md#验证)。

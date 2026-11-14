@@ -4,6 +4,11 @@
 
 ## 当前任务
 
+- 主题：排查 Tavily 间歇性连接失败，区分检索失败与网页正文读取受限。
+- 工作分支：`codex/native-research-tools`，延续原生研究工具的验收。
+
+## 上一阶段：原生工具与终稿结构
+
 - 主题：让终稿按固定报告结构保存，并将 researcher 的模型工具决策迁移到原生 Function Calling。
 - 工作分支：`codex/native-research-tools`，从 `main` 创建。
 

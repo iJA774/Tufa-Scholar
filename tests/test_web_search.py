@@ -1,3 +1,4 @@
+import ssl
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -5,7 +6,7 @@ from unittest.mock import patch
 import httpx
 from ddgs.exceptions import DDGSException, TimeoutException, RatelimitException
 
-from src.integrations.web_search import WebSearchError, search_web, search_web_fallback
+from src.integrations.web_search import WebSearchError, _loopback_https_proxy_configured, search_web, search_web_fallback
 
 
 class WebSearchTests(unittest.TestCase):
@@ -35,7 +36,11 @@ class WebSearchTests(unittest.TestCase):
                 self.assertTrue(result[0]["retrieved_at"])
                 args, kwargs = request.call_args
                 self.assertEqual(args, (method, endpoint))
-                self.assertEqual(kwargs["timeout"], 20)
+                if engine == "tavily":
+                    self.assertEqual(kwargs["timeout"].connect, 5)
+                    self.assertEqual(kwargs["timeout"].read, 20)
+                else:
+                    self.assertEqual(kwargs["timeout"], 20)
                 self.assertFalse(kwargs["follow_redirects"])
                 if header:
                     self.assertEqual(kwargs["headers"][header], secret)
@@ -49,6 +54,113 @@ class WebSearchTests(unittest.TestCase):
             self.assertEqual(result["source_level"], "web_content")
             self.assertEqual(len(result["content"]), 4000)
             self.assertTrue(request.call_args.kwargs["json"]["include_raw_content"])
+
+    def test_tavily_falls_back_directly_once_after_loopback_proxy_connect_failure(self):
+        request = httpx.Request("POST", "https://api.tavily.com/search")
+        row = {"title": "Title", "url": "https://example.org", "raw_content": "Full result"}
+        response = self.response({"results": [row]})
+        for failure in (
+            httpx.ProxyError("local proxy secret", request=request),
+            httpx.ConnectError("local proxy secret", request=request),
+            httpx.ConnectTimeout("local proxy secret", request=request),
+        ):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch("src.integrations.web_search.web_search_config", return_value=self.config("tavily")), \
+                    patch("src.integrations.web_search._loopback_https_proxy_configured", return_value=True), \
+                    patch("src.integrations.web_search.httpx.request", side_effect=[failure, response]) as request_mock:
+                with self.assertLogs("src.integrations.web_search", level="WARNING") as logs:
+                    result = search_web("private query")
+                self.assertEqual((len(result), result[0]["source_level"], result[0]["content"]), (1, "web_content", "Full result"))
+                self.assertEqual(request_mock.call_count, 2)
+                proxied, direct = (call.kwargs for call in request_mock.call_args_list)
+                self.assertEqual(request_mock.call_args_list[0].args, ("POST", "https://api.tavily.com/search"))
+                self.assertEqual(request_mock.call_args_list[1].args, ("POST", "https://api.tavily.com/search"))
+                self.assertEqual(proxied["headers"]["Authorization"], "Bearer secret-key")
+                self.assertEqual(direct["headers"]["Authorization"], "Bearer secret-key")
+                self.assertNotIn("trust_env", proxied)
+                self.assertNotIn("verify", proxied)
+                self.assertEqual(proxied["json"], direct["json"])
+                self.assertEqual(direct["json"], {"query": "private query", "max_results": 5, "include_raw_content": True})
+                self.assertTrue(direct["timeout"].connect <= 5)
+                self.assertEqual(direct["timeout"].read, 20)
+                self.assertFalse(direct["trust_env"])
+                self.assertTrue(direct["verify"])
+                self.assertFalse(direct["follow_redirects"])
+                self.assertIn("proxy_recovery=direct", str(logs.output))
+                for private in ("secret-key", "private query", "api.tavily.com", "local proxy secret"):
+                    self.assertNotIn(private, str(logs.output))
+
+    def test_tavily_does_not_retry_read_or_http_errors(self):
+        request = httpx.Request("POST", "https://api.tavily.com/search")
+        failures = [
+            httpx.ReadTimeout("after send", request=request),
+            self.response({"error": "secret-key"}, status=503),
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), \
+                    patch("src.integrations.web_search.web_search_config", return_value=self.config("tavily")), \
+                    patch("src.integrations.web_search._loopback_https_proxy_configured", return_value=True), \
+                    patch("src.integrations.web_search.httpx.request", side_effect=failure) as request_mock:
+                with self.assertRaises(WebSearchError):
+                    search_web("private query")
+                request_mock.assert_called_once()
+
+    def test_tavily_does_not_bypass_proxy_on_certificate_verification_failure(self):
+        request = httpx.Request("POST", "https://api.tavily.com/search")
+        failure = httpx.ConnectError("TLS verification failed", request=request)
+        failure.__cause__ = ssl.SSLCertVerificationError("untrusted certificate")
+        with patch("src.integrations.web_search.web_search_config", return_value=self.config("tavily")), \
+                patch("src.integrations.web_search._loopback_https_proxy_configured", return_value=True), \
+                patch("src.integrations.web_search.httpx.request", side_effect=failure) as request_mock:
+            with self.assertRaises(WebSearchError):
+                search_web("q")
+        request_mock.assert_called_once()
+
+    def test_loopback_proxy_detection_and_provider_scope(self):
+        for proxies, bypass, expected in (
+            ({"https": "http://127.0.0.1:7890"}, False, True),
+            ({"https": "http://[::1]:7890"}, False, True),
+            ({"https": "http://localhost:7890"}, False, True),
+            ({"all": "http://127.0.0.1:7890"}, False, True),
+            ({"https": "http://proxy.example:7890"}, False, False),
+            ({"all": "http://127.0.0.1:7890"}, True, False),
+            ({}, False, False),
+        ):
+            with self.subTest(proxies=proxies, bypass=bypass), \
+                    patch("src.integrations.web_search.urllib.request.getproxies", return_value=proxies), \
+                    patch("src.integrations.web_search.urllib.request.proxy_bypass", return_value=bypass):
+                self.assertEqual(_loopback_https_proxy_configured("https://api.tavily.com/search"), expected)
+
+        error = httpx.ConnectError("direct failure", request=httpx.Request("POST", "https://service.test"))
+        for engine, proxies, bypass in (
+            ("tavily", {}, False),
+            ("tavily", {"https": "http://proxy.example:7890"}, False),
+            ("tavily", {"https": "http://127.0.0.1:7890"}, True),
+            ("infoquest", {"https": "http://127.0.0.1:7890"}, False),
+        ):
+            with self.subTest(engine=engine, proxies=proxies, bypass=bypass), \
+                    patch("src.integrations.web_search.web_search_config", return_value=self.config(engine)), \
+                    patch("src.integrations.web_search.urllib.request.getproxies", return_value=proxies), \
+                    patch("src.integrations.web_search.urllib.request.proxy_bypass", return_value=bypass), \
+                    patch("src.integrations.web_search.httpx.request", side_effect=error) as request_mock:
+                with self.assertRaises(WebSearchError):
+                    search_web("q")
+                request_mock.assert_called_once()
+
+    def test_tavily_direct_fallback_preserves_explicit_ca_bundle(self):
+        marker = object()
+        response = self.response({"results": []})
+        with patch("src.integrations.web_search.web_search_config", return_value=self.config("tavily")), \
+                patch("src.integrations.web_search._loopback_https_proxy_configured", return_value=True), \
+                patch("src.integrations.web_search.os.environ", {"SSL_CERT_FILE": "C:/certs/custom.pem"}), \
+                patch("src.integrations.web_search.ssl.create_default_context", return_value=marker) as create_context, \
+                patch("src.integrations.web_search.httpx.request", side_effect=[
+                    httpx.ConnectError("proxy failure", request=httpx.Request("POST", "https://api.tavily.com/search")),
+                    response,
+                ]) as request_mock:
+            self.assertEqual(search_web("q"), [])
+        create_context.assert_called_once_with(cafile="C:/certs/custom.pem")
+        self.assertIs(request_mock.call_args.kwargs["verify"], marker)
 
     def test_duckduckgo_real_parser_handles_results_and_empty(self):
         html = '<html><div class="body"><h2>Title</h2><a href="https://example.org">body</a></div></html>'
@@ -95,7 +207,7 @@ class WebSearchTests(unittest.TestCase):
             self.assertEqual(request.call_args.kwargs["params"]["search_query"], "all:science")
 
     def test_empty_malformed_timeout_and_redaction(self):
-        with patch("src.integrations.web_search.web_search_config", return_value=self.config("tavily")), patch("src.integrations.web_search.httpx.request") as request:
+        with patch("src.integrations.web_search.web_search_config", return_value=self.config("tavily")), patch("src.integrations.web_search._loopback_https_proxy_configured", return_value=False), patch("src.integrations.web_search.httpx.request") as request:
             request.return_value = self.response({"results": []})
             self.assertEqual(search_web("q"), [])
             for payload in ({"error": "secret-key"}, {"results": "wrong"}, {"results": [{"title": "bad", "url": "javascript:alert(1)"}]}):
@@ -134,7 +246,7 @@ class WebSearchTests(unittest.TestCase):
             (self.response({'error': 'secret-key'}), 'invalid_response', None),
         ]
         for response, category, status in cases:
-            with self.subTest(category=category), patch('src.integrations.web_search.web_search_config', return_value=self.config('tavily')), patch('src.integrations.web_search.httpx.request') as request_mock:
+            with self.subTest(category=category), patch('src.integrations.web_search.web_search_config', return_value=self.config('tavily')), patch('src.integrations.web_search._loopback_https_proxy_configured', return_value=False), patch('src.integrations.web_search.httpx.request') as request_mock:
                 if isinstance(response, Exception): request_mock.side_effect = response
                 else: request_mock.return_value = response
                 with self.assertLogs('src.integrations.web_search', level='WARNING') as logs, self.assertRaises(RuntimeError): search_web('private-query')

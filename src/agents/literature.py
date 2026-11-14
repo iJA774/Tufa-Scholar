@@ -723,9 +723,22 @@ def _tool_error(name, exc):
     if isinstance(exc, ToolCallValidationError):
         return _safe_error("researcher", exc.code, "工具参数不符合当前来源范围或结构要求。")
     if name == "read_web_page":
+        if getattr(exc, "reason", "") == "non_public_address":
+            return _safe_error(
+                "researcher",
+                "web_page_non_public_address",
+                "来源地址未通过公网校验，无法读取正文。可使用已有搜索摘要或尝试其他来源。",
+            )
         return _safe_error("researcher", "web_page_read_failed", "网页正文读取失败，可继续尝试其他候选。")
     category = getattr(exc, "category", "")
     if category:
+        if name in {"search_web", "search_papers"} and category in {"network", "timeout"}:
+            reason = "网络连接失败" if category == "network" else "连接等待超时"
+            return _safe_error(
+                "researcher",
+                "search_" + str(category)[:40],
+                f"搜索{reason}，本次没有取得搜索结果。可稍后重试。",
+            )
         return _safe_error("researcher", "search_" + str(category)[:40], "搜索服务返回失败，可改写查询或尝试其他允许来源。")
     if name in {"search_web", "search_papers"}:
         return _safe_error("researcher", name + "_failed", "搜索失败，可改写查询后继续尝试。")
