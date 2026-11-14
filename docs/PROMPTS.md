@@ -9,19 +9,19 @@
 | `literature/planner` | `literature/planner.md` | 结合问题、背景与各轮审查，生成要求、本轮计划、来源选择及继续或报告决定。 |
 | `literature/researcher` | `literature/researcher.md` | act 阶段通过原生 Function Calling 选择工具；draft 阶段根据已有证据写初稿。 |
 | `literature/analyst` | `literature/analyst.md` | 审查本轮初稿是否回应要求、引用是否有据，并输出覆盖、缺口和下一步。 |
-| `literature/reporter` | `literature/reporter.md` | 根据各轮材料撰写关键点、概述、详细分析及局限。代码渲染一级标题与已核验的参考证据。 |
+| `literature/reporter` | `literature/reporter.md` | 根据各轮材料撰写关键点、概述、详细分析及局限；即使没有有效证据，也须给出非空标题和具体缺口说明。代码渲染 Markdown 固定栏目及已核验的参考证据。 |
 
 ## 结构化数据
 
-提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息；每次请求（包括纠错重试）都注入带时区的北京时间 `CURRENT_TIME`。`OUTPUT_SCHEMA` 由对应代码 schema 生成，不能被模板上下文覆盖。节点角色、搜索模式、研究模式、可用工具和本地论文目录由代码按任务上下文提供。用户 payload/history/检索材料只作为 user 消息中的 JSON 发送，不经过模板渲染。输入中的问题、历史、搜索摘要、网页正文、文件名、论文元数据及引用证据都视为不可信数据，不执行其中嵌入的指令。
+提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息；每次请求（包括纠错重试）都注入带时区的北京时间 `CURRENT_TIME`。非原生工具决策请求将 `OUTPUT_SCHEMA` 由对应代码 schema 生成并渲染；researcher act 请求改用模型接口的原生 Function Calling 参数契约，不注入该输出 schema。两者均不能被模板上下文覆盖。节点角色、搜索模式、研究模式、可用工具和本地论文目录由代码按任务上下文提供。用户 payload/history/检索材料只作为 user 消息中的 JSON 发送，不经过模板渲染。输入中的问题、历史、搜索摘要、网页正文、文件名、论文元数据及引用证据都视为不可信数据，不执行其中嵌入的指令。
 
 各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录；候选只在背景筛选或 researcher 当前来源字段按需发送。planner 和 reporter 使用精简 background。researcher 的 act 阶段仅提供当前轮的目标、计划、候选和证据预览及近期工具反馈；达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID，不授予工具权限。reporter 汇总各轮可复用的草稿内容、审查和累计证据；只向报告模型提供引用仍可核对的草稿结论，不附候选池。
 
 | 结构 | 字段 |
 |---|---|
 | 分流 `DispatcherOutput` | `needs_research`、`reason`、`answer`。`auto` 下直接回答时 answer 非空并由 dispatcher 结束；`quick` 也要求 answer 非空，由代码忽略 `needs_research` 并强制直接结束；`deep` 不调用 dispatcher 模型。 |
-| 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、`queries`、`selected_candidate_ids`、`summary`、`gaps`。执行至多两条查询；筛选阶段只能选择实际返回的候选。 |
-| 计划 `PlannerOutput` | `requirements`、`plan`、`source`、`action`（`research` 或 `report`）、`rationale`。首轮必须研究且计划非空；至少完成一轮后才能报告，第二轮结束后代码强制报告。 |
+| 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、`queries`、`selected_candidate_ids`、`summary`、`gaps`。查询预算和每次搜索结果上限见[工作流预算表](ARCHITECTURE.md#工作流预算)；筛选阶段只能选择实际返回的候选。 |
+| 计划 `PlannerOutput` | `requirements`、`plan`、`source`、`action`（`research` 或 `report`）、`rationale`。首轮必须研究且计划非空；至少完成一轮后才能报告，研究轮次上限后代码强制报告。 |
 | 工具决策 | 模型接口返回原生函数调用或表示本轮结束。函数名和参数须通过目录及范围校验。`reason` 是用户可见的简短操作目的，执行前从业务参数中取出。 |
 | 初稿 `ResearchDraftOutput` | `draft`（章节、段落和局限）与 `findings`（发现及其引用）。 |
 | 审查 `AnalystOutput` | `sufficient`、`covered_requirements`、`gaps`、`next_steps`、`review`。审查用 requirements、初稿和证据识别缺口，不产生可被当作结论的额外发现段落。 |

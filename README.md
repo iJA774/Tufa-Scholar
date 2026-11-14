@@ -1,6 +1,6 @@
 # Tufa Scholar
 
-本地单用户科研助手，提供项目与对话、文献检索和导入、证据定位、科研问答与报告导出。架构目标见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，已实现能力和验证边界见 [docs/STATUS.md](docs/STATUS.md)。开发前按 [AGENTS.md](AGENTS.md) 阅读适用规则；任务和分支上下文见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+本地单用户科研助手，提供项目与对话、文献检索和导入、证据定位、科研问答与报告导出。架构与研究预算见 [架构文档](docs/ARCHITECTURE.md)，当前能力见 [项目状态](docs/STATUS.md)，设计取舍与技术债见 [开发文档](docs/DEVELOPMENT.md)。
 
 ## 安装
 
@@ -19,7 +19,7 @@ pnpm install --frozen-lockfile
 
 API 和 worker 必须使用同一个 `TUFA_DATA_DIR`。未设置时数据写到仓库根目录 `data/`，该目录由 Git 忽略。验收脚本使用隔离临时目录，不要把临时数据库放入已有用户数据目录。
 
-模型可在设置页配置 OpenAI 兼容 Base URL、密钥和模型名。也可在运行 API/worker 的环境设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`；环境变量优先于本机设置。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文存于该本机数据库；接口只返回是否已配置和配置来源，不回显密钥。提问时可选模型及思考强度，任务和重试会保留所选项。模型列表不保证其支持应用所需的 JSON 输出。
+模型可在设置页配置 OpenAI 兼容 Base URL、密钥和模型名。也可在运行 API/worker 的环境设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`，这些环境变量优先。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文保存在该本机数据库，接口只返回配置状态和来源。提问时可选模型及思考强度，任务和重试保留所选项。深度研究需要服务支持结构化输出和原生 Function Calling。
 
 网页搜索默认 DuckDuckGo，可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia；各引擎的配置和证据层级见 [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md)。搜索引擎密钥可通过本机设置或相应环境变量提供。
 
@@ -56,7 +56,7 @@ pnpm dev:web
 
 在提问框切换“深度研究”或“快速探索”并输入问题。深度研究无条件进入研究流程；快速探索无条件直接回答，不调用检索工具。重试沿用原任务模式。设置中的“通用”可选择本次模型、思考强度及发送快捷键；“研究偏好”仅展示禁用的占位控件，不影响后端。
 
-深度研究会先由背景调查搜索和筛选资料，再规划至多两轮，最后生成终稿。提交深度研究后，右侧“活动”会逐步显示节点进度、规划路线、搜索结果、正在读取的网页和工具操作理由。支持流式响应的模型会边生成边显示正文预览。任务完成后显示通过校验并保存的报告和引用。快速探索的回答预览显示在聊天区。
+深度研究先搜索和筛选背景资料，再规划并收集证据，最后生成终稿。右侧“活动”显示节点进度、规划路线、搜索结果、正在读取的网页和工具操作理由。支持流式响应的模型会边生成边显示正文预览。任务完成后显示核验并保存的报告和引用。快速探索的回答预览显示在聊天区。
 
 点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文件”可打开浏览器的目录选择器，预览选中目录及子目录中的文件名。“关于”在新标签页打开项目的 GitHub 仓库。
 
@@ -94,120 +94,16 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
-### Tavily 本机代理连接恢复
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 198 项测试，`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过隔离的 API/worker 闭环。
-- 实测独立网页搜索接口。将隔离实例的 HTTPS 代理指向未监听的本机端口后，日志记录代理连接失败和直连重试，接口返回 HTTP 200 与 5 条真实 Tavily 结果。
-
-### 终稿结构与原生工具调用
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 190 项测试。`.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 通过，使用隔离的 API、worker 与模拟上游。网页流程覆盖原生函数参数分片、公开操作目的、预算截断和带引用的固定报告栏目。
-- 本机配置的 `qwen3.7-flash` 对最小普通请求和工具调用请求都返回 HTTP 403（`insufficient_quota`）。真实上游的原生调用仍待验证。
-
-### 终稿提示词与模型参数兼容
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q`（180 项）、`.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 均通过。模拟上游以 SSE 返回完成上限和推理预算冲突，实际 API 与 worker 继续取证并保存报告。同一模型后续阶段沿用兼容设置。
-- 使用本机配置的 `qwen3.7-flash` 和公开测试题验证模型入口。修复前同时发送两项参数时返回 HTTP 400。修复后同一进程连续两次取得通过结构校验的规划结果。完整深度研究流程使用隔离的模拟模型和搜索服务验收。
-
-### 深度研究预算与网页续读（2026-11-14）
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 178 项测试，覆盖预算内分页、同一偏移量去重，以及仍有后续页时触发上下文上限并停止读取。
-- `.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。隔离的实际 API 和 worker 使用模拟上游，验证密集搜索结果限量、决策生成上限、上下文触发后停止检索、终稿结构本地修复及流式预览。
-- 同一组 20 篇合成论文和两轮研究下，渲染后的系统消息与用户 JSON 共从 127,843 降到 58,345 字符，减少约 54%；两版均调用模型 12 次并保留一条引用。真实模型、搜索质量与计费未在本轮验证。
-
-### 实时研究活动与流式输出（2026-11-14）
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 165 项测试。隔离运行 `.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 均通过。网页脚本使用模拟上游 SSE，验证正文片段在报告保存前可达，工具理由和规划路线存在，断线游标可续读。
-- `pnpm check:web`、`pnpm build:web` 通过。浏览器经本机 Next 代理和隔离 API 检查真实 SSE 事件渲染，包括路线、网页链接、灰色理由、活动分隔线、报告草稿、保存的终稿和关闭重开。浏览器事件由隔离 fixture 提供，未调用真实模型或搜索服务。
-
-### 网页读取与终稿收束（2026-11-14）
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 156 项测试，覆盖失败网页区间不重复请求、正常分页、终稿引用无效以及有无可保留阶段发现。
-- `.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。隔离 API/worker 验证无效终稿引用被拒时，保存的 Markdown 和证据 CSV 仍包含有效的阶段性引用。使用模拟模型与搜索服务。
-- `worker.log` 新增 `research_round_stopped` 与 `report_validation`，便于按任务核对工具循环的收束原因和报告引用校验结果。
-
-### 研究模型输入裁剪与用量日志（2026-11-14）
-
-- 合入工作区分支后复验通过：153 项后端测试、`scripts.verify_chat`、`scripts.verify_web_search`、`pnpm build:web` 和 `pnpm check:web`。两条研究闭环均使用本地模拟服务。
-
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q`、`.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。两项闭环使用隔离 SQLite、实际本机 API 和 worker，以及模拟模型与搜索服务。
-- 同一组 20 篇合成论文和两轮研究计划下，发送给模型的用户 JSON 正文从 497,460 降至 94,680 字符，下降约 81%；调用从 10 增至 12 次，报告均保留 1 条引用。此对照不含系统提示，只衡量正文体积；真实计费及报告质量仍需真实服务验证。
-- `data/logs/worker.log` 中按 `run_id`、`prompt_id`、`phase`、`attempt` 查询。`model_call started` 报告请求字符数，`completed` 与 `invalid` 记录供应商返回的 token。缓存与推理 token 是供应商提供的明细，不能与 `total_tokens` 再相加；缺失值为 `na`。
-
-### 诊断
-
-结构化模型响应诊断保存在 `TUFA_DATA_DIR/diagnostics/`，可能包含问题、用户材料和模型响应，应按私有数据保管。仓库根目录可用 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 对当前六个 prompt schema 做离线检查；不联网、不访问数据库。脱敏和环境差异可能影响复现。该工具不支持旧工作流 schema。
-
-常用检查命令在仓库根目录执行：
+在仓库根目录按改动范围运行。
 
 ```powershell
-uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m unittest discover -s tests -q
 uv run --locked python -m scripts.verify_chat
 uv run --locked python -m scripts.verify_web_search
 pnpm check:web
 pnpm build:web
 ```
 
-`verify_chat` 和 `verify_web_search` 使用隔离临时数据目录，自启实际本地 API/worker，并连接本地模拟模型及搜索 HTTP 服务；它们检查业务闭环和成功、失败后的资源清理，不调用真实云服务。真实模型输出、搜索服务权限/限流/质量及浏览器交互需分别验收。
+两条 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。浏览器交互和真实供应商需要分别验收。浏览器验收入口见 [前端说明](apps/web/README.md)。
 
-### 已完成的前端检查（2026-11-12）
-
-- `pnpm check:web`：通过。
-- `pnpm build:web`：通过。
-- 临时启动构建后的 Next.js 服务，以随机回环端口请求 `/` 与 `/settings`：均返回 HTTP 200；首页加载的 JavaScript 包含八个工作流阶段映射。
-- 未执行真实浏览器交互；构建和 HTTP 检查不代表浏览器端到端交互已验证。
-
-### 新工作流与接口验收（2026-11-12）
-
-- `uv run --locked python -m unittest discover -s tests -v`：138 tests OK，12.322 秒。
-- `uv run --locked python -m scripts.verify_chat`：通过，8.48 秒。实际 API 与 worker 使用隔离临时数据，模拟模型 HTTP；覆盖未配置模型失败、重试、直接回答不调研究节点、PDF 页证据、报告导出和空收藏夹终稿。
-- `uv run --locked python -m scripts.verify_web_search`：通过，9.58 秒。实际 API 与 worker 使用本地模拟 Searx 和模型 HTTP；覆盖搜索筛选、摘要证据和报告、两轮后强制终稿、供应商失败重试及无证据终稿。
-- 两个脚本都验证自启 API/worker、模拟 HTTP 服务和临时目录在成功与失败路径后收尾；验收健康检查确认 API 指向本次临时 SQLite。
-- 使用返回非隔离数据库路径的占用端口 HTTP mock 验证隔离保护：两个脚本均非零退出、零业务写请求，并完成自有资源清理。
-- 前端检查见上节。未调用真实云端模型或真实搜索供应商，未执行浏览器交互；供应商权限、限流、内容质量及真实模型输出仍未验证。
-
-### 开始页与工作台入口验收（2026-11-13）
-
-- `pnpm check:web`：最终通过；修正首轮检查发现的 `ResizeObserver` 类型收窄问题后复验通过。
-- `$env:TUFA_API_URL = 'http://127.0.0.1:50187'; pnpm build:web`：通过。构建后的 `/`、`/workspace`、`/settings`、`/api/projects` 均返回 HTTP 200。
-- 桌面浏览器 1440×900：开始页 LED 点亮与呼吸动画符合原稿；键盘 Enter 激活“开始使用”后进入 `/workspace`，并加载模拟项目、历史和文献。设置页的“返回研究空间”进入 `/workspace`；GitHub 打开新标签页，地址为 `https://github.com/iJA774/Tufa-Scholar`。
-- 返回首页后动画正常；浏览器 console 无 warning/error，浅色研究工作台未受开始页样式污染。动画的 `reduced-motion`、页面隐藏和清理行为只做源码审查，未做浏览器媒体模拟。
-- 页面通过 `scripts.fixture_api` 和隔离 `.cache` 数据提供模拟内容；该 UI fixture 不启动 worker，也不调用真实模型或真实检索。临时前端、API 与参考服务已停止。截图保存在 `.cache/launch-page/desktop.jpg`。
-
-### 桌面研究工作区与研究模式验收（2026-11-13）
-
-- `uv run --locked python -m unittest discover -s tests -v`：146 tests OK，14.813 秒。
-- `uv run --locked python -m scripts.verify_chat`：通过。脚本以隔离临时 SQLite 启动实际本机 API 和 worker，连接本地模拟模型 HTTP；覆盖 deep 失败后重试并保持模式、PDF 页证据、引用报告、auto 直接回答和空收藏夹结果。
-- `uv run --locked python -m scripts.verify_web_search`：通过。脚本以隔离临时 SQLite 和本地模拟模型/Searx HTTP 启动实际 API 与 worker；覆盖 quick 模式在 dispatcher 反向要求研究时仍直接答复且零搜索、deep 对简单问候执行背景搜索、网页证据与报告、两轮后终稿及供应商失败后的无证据终稿。
-- 两个脚本成功退出，且各自 finally 检查了 API、worker、模拟 HTTP 服务和临时目录收尾。只访问本地模拟服务，没有调用真实模型、真实搜索供应商或外部网页。
-- `$env:TUFA_API_URL = 'http://127.0.0.1:61400'; pnpm build:web`：通过。构建后 `/`、`/workspace`、`/settings`、`/api/conversations` 均返回 HTTP 200。
-- 桌面浏览器 1280×720，使用隔离 SQLite 的 `scripts.fixture_api --local-config`：验证跨项目平铺历史、标题搜索、切换历史后加载对应消息和文件范围；Escape 关闭弹窗；新研究清空草稿；quick 答复无证据；同一会话连续提交 deep 问题；失败后把当前模式切为 quick，再重试仍保留失败任务的 deep 模式。
-- 同一浏览器验收还确认 Ctrl+Enter 发送、Enter 换行；`fixture-model` 与 `high` 随提问记录；本机默认模型设置保存；跨服务商切换时密钥草稿清空；Searx 切换为 Wikipedia 后设置保存；PDF 样例导入并显示提取正文，打开原文返回 HTTP 200；报告 Markdown 和 CSV 均返回 HTTP 200。研究偏好控件显示为 disabled 并标注暂不生效。
-- 后续桌面验收确认直接访问 `/settings` 可读回已保存的 quick、Enter 关闭及模型/high 设置，点击“完成”返回 `/workspace`；外观页的背景网格开关实际作用于工作区并可恢复。开始页“开始使用”进入新研究页，GitHub DOM 链接地址正确；浏览器 console 无 error/warning。截图保存在 `.cache/desktop-research/workspace.jpg` 与 `.cache/desktop-research/settings.jpg`。
-- UI fixture 使用真实 API/SQLite，但任务推进、模型目录和检索为本地模拟且没有 worker。模式执行和 worker 重试由上述两个真实 API/worker 闭环脚本验证；本轮未调用真实云端模型、搜索供应商或外部网页。
-- `pnpm check:web`、未设置 `TUFA_API_URL` 时的 `pnpm build:web`：最终通过；构建产物的 `/api` 代理恢复为 `http://127.0.0.1:8000`。
-- `pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck` 与 `node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)`：通过，轮询回归 5/5；`git diff --check` 通过。
-- 本轮只验收桌面 1280×720，没有执行移动端 viewport 验收。自启的前端、模拟 API 与参考服务已停止；用户原有 `next-env.d.ts` 和 `.idea/` 改动保留，未操作默认用户数据库。
-
-### 研究历史操作验收（2026-11-13）
-
-- `pnpm check:web`、`pnpm build:web`：通过。
-- `.venv/Scripts/python.exe -m unittest discover -s tests -q`：148 项通过。覆盖置顶排序、删除任务冲突、重试链和会话关联数据清理。
-- 使用 `pnpm` 工作区的 Next.js 开发入口与 `scripts.fixture_api --local-config`，以隔离 SQLite 验证 `/`、`/workspace`。1280×720 桌面浏览器验证开始页导航、指定文案移除、指针进出抽屉、悬浮行显示操作、置顶后刷新保留、解除置顶、删除确认弹窗及取消后保留会话。
-- 确认删除的持久化结果通过同一隔离 fixture 的 HTTP `DELETE` 验证：返回 204，目标消息和报告返回 404，其他两条会话保留。浏览器未点击最终删除确认；未测试触屏或真实模型、搜索服务，未操作默认用户数据库。
-
-### 设置与研究进度栏验收（2026-11-13）
-
-- `pnpm check:web`、`pnpm build:web` 和前端说明中的轮询回归通过，轮询共 5 项。
-- 以 `scripts.fixture_api --local-config` 和独立 SQLite 启动本机 API，再通过 Next.js 开发入口验收。浏览器验证设置卡片遮罩、Esc 和点击遮罩关闭、草稿保留、直接访问 `/settings`、GitHub 链接地址和新标签页属性，以及预览测试目录中的 `.txt` 与子目录中的 `.csv` 文件名。
-- 桌面 1280×720 验证聊天与进度分栏，430×760 验证窄屏抽屉可关闭。通过 fixture 逐步推进深度任务，并写入一条测试小结，验证等待、运行、完成、失败、重试后自动展开，以及关闭后重新打开。完成的历史任务可手动重开，切换到快速探索会话时不显示前一会话的进度。
-- 浏览器确认星形描边引用动画渐变，周围光点启用漂浮动画。减少动态效果按样式规则检查。本轮未调用真实模型和搜索服务。
-
-### DeerFlow 研究面板移植验收（2026-11-14）
-
-- 配色调整后，`pnpm check:web`、`pnpm build:web` 通过，首页和工作台返回 HTTP 200。用隔离 fixture 在 1280×720 下查看活动、来源和报告，确认卡片与输入框采用同色系渐变，选中标签和链接使用工作台的蓝紫强调色。
-
-- `pnpm check:web`、`pnpm build:web`、`git diff --check` 通过；首页及工作台实际 HTTP 入口返回 200。
-- 对照本机 DeerFlow 自带 `rag` 回放及源码。1280×720 实测展开时聊天宽 538px、右卡片宽 575px、间距 32px；收起时聊天宽 768px、平移 287.5px，面板保持挂载并缩放到 0、禁用交互。采用原版 300ms ease-out 动画参数。保留 TUFA 顶栏，因此卡片顶部为 95px，原版为 48px。
-- 通过独立 `.cache/deerflow-panel-final` SQLite 和 `scripts.fixture_api --local-config` 验证首次展开、运行阶段、小结与来源、关闭重开、完成自动切报告、新任务清除旧报告、失败重试自动展开、切换快速会话移除旧面板。430×760 下验证卡片无横向溢出且可关闭。
-- 本轮任务由 fixture 推进，不启动 worker，不调用真实模型或搜索服务。原版完整 MIT 许可保留在前端研究组件旁。
+排查研究请求时，可在 `TUFA_DATA_DIR/logs/worker.log` 按 `run_id` 查询模型调用、工具失败和报告校验。供应商用量缺失时日志显示 `na`。结构化响应诊断位于 `TUFA_DATA_DIR/diagnostics/`，可能包含用户材料。可在仓库根目录用 `uv run --locked python -m scripts.replay_diagnostic <诊断文件路径>` 离线校验当前提示词契约。

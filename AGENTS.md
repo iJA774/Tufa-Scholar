@@ -1,52 +1,41 @@
-# Tufa Scholar 全局开发约定
+# 仓库规则
 
-本项目是本机单用户科研助手。本文件约束整个仓库，提供全局边界和目录导航；模块细节由就近的 `AGENTS.md` 负责。
+本项目是本机单用户科研助手。此处约束全仓库；各模块的长期专属约束放在职责目录内的 `AGENTS.md`。
 
-## 按需阅读与维护
+## 阅读与文档
 
-1. 开始任务先读本文件、[架构文档](docs/ARCHITECTURE.md) 的相关章节，再检查目标目录已有实现。
-2. 修改文件前，沿目录路径读取适用的子目录 `AGENTS.md`。父级规则持续生效，子级补充局部约束，不得违反全局规则；跨模块修改分别读取相关规则，不必通读无关目录。
-3. 从 [开发进度](docs/DEVELOPMENT.md) 了解当前任务、工作分支和协作上下文；按 [项目状态](docs/STATUS.md) 区分已实现能力、待实现目标和未验证部分。架构目标不等于已实现功能，也不构成本次任务授权。
-4. 仅当开发规范、模块职责或架构发生实质变化时更新就近规则。新增 `AGENTS.md` 须有独立职责，不重复父级内容，不为凑层级创建空规则。
-5. `AGENTS.md` 仅记录长期约束、职责导航和验证要求，不记录当前分支、阶段进度、功能完成清单、测试次数或本轮结果。任务进度与分支上下文更新 `docs/DEVELOPMENT.md`；能力与限制更新 `docs/STATUS.md`；实测命令和结果记录在 README 验收部分；设计与接口边界更新架构文档或模块说明。
+- 开始改动前阅读本文件、相关架构章节、目标代码及沿路径适用的 `AGENTS.md`。跨模块改动读取各自规则。
+- `README.md` 是安装、配置、启动、使用和稳定验证命令的入口。`docs/DEVELOPMENT.md` 记录当前任务、关键决策及理由、考虑过的替代方案和接受的技术债；`docs/ARCHITECTURE.md` 是设计、接口边界和预算的权威来源；`docs/STATUS.md` 记录已实现能力与限制。
+- 详细测试结果属于本次交付或 PR 说明，不归档到规则、架构、进度或状态文档。只有长期约束变化时才修改 `AGENTS.md`。
+- 长期设计、实际能力和当前任务必须分开表述。架构目标不代表已实现，也不授权扩大本次任务范围。
+
+## 全局约束
+
+- 保持单机单用户、SQLite 和单 worker；API 与前端默认只监听回环地址。没有明确需求时，不引入鉴权令牌、租约、分布式组件或多后端抽象。
+- Python 依赖由根 `pyproject.toml`/`uv.lock` 管理，前端依赖由根 pnpm workspace/lockfile 管理；不创建重复环境。
+- API 与 worker 共用 `TUFA_DATA_DIR`。保护用户数据库、原文、报告和本机配置；测试使用独立数据目录，不把用户材料、密钥或本机配置提交到 Git。
+- 新任务从 `main` 创建 `codex/*` 分支，同一任务沿用原分支。完成后仅本地提交本任务改动，保留用户已有的其他改动。
+- 环境变量优先于本机设置。接口、错误和日志不得泄露密钥、用户材料或不必要的上游内容。
+- 提示词正文放在 `src/prompts/`；数据结构、数值检查、证据范围与定位由代码负责。测试断言可观察行为，不以固定摘要锁定提示词、整份报告或目录内容。
+- 修改代码时按 README 和相关模块规则验证实际入口。纯文档改动检查路径、链接和规则一致性，不启动应用或全量构建。
 
 ## 目录导航
 
-下表用于定位入口；进入具体子目录时仍须检查更近的 `AGENTS.md`。
-
-| 范围 | 职责 | 就近规则 |
+| 范围 | 职责 | 局部规则 |
 |---|---|---|
-| `apps/api/` | FastAPI HTTP 接口、请求校验、文件与报告交付 | [API](apps/api/AGENTS.md) |
-| `apps/worker/` | 单进程任务领取、执行与生命周期 | [Worker](apps/worker/AGENTS.md) |
-| `apps/web/` | Next.js App Router、TypeScript 界面与 API 代理 | [前端](apps/web/AGENTS.md) |
+| `apps/api/` | HTTP 接口、校验与文件交付 | [API](apps/api/AGENTS.md) |
+| `apps/worker/` | 单 worker 任务生命周期 | [Worker](apps/worker/AGENTS.md) |
+| `apps/web/` | Next.js 界面与 API 代理 | [前端](apps/web/AGENTS.md) |
 | `src/` | Python 模块职责与依赖方向 | [共享代码](src/AGENTS.md) |
-| `src/agents/` | Agent 工作流、状态、综合与核验 | [工作流](src/agents/AGENTS.md) |
-| `src/literature/` | 文献检索、排名与证据提取业务 | [文献业务](src/literature/AGENTS.md) |
-| `src/tools/` | 可独立发现与调用的科研工具、参数契约与范围约束 | [工具](src/tools/AGENTS.md) |
-| `src/integrations/` | 外部检索与模型调用 | [外部集成](src/integrations/AGENTS.md) |
+| `src/agents/` | 科研工作流 | [工作流](src/agents/AGENTS.md) |
+| `src/literature/` | 检索、排名与证据提取 | [文献业务](src/literature/AGENTS.md) |
+| `src/tools/` | 可独立调用的科研工具 | [工具](src/tools/AGENTS.md) |
+| `src/integrations/` | 外部搜索与模型协议 | [集成](src/integrations/AGENTS.md) |
 | `src/persistence/` | SQLite、仓储与事务 | [持久化](src/persistence/AGENTS.md) |
-| `src/infrastructure/` | 本机设置、环境变量与日志 | [基础设施](src/infrastructure/AGENTS.md) |
-| `src/prompts/` | Markdown 提示词正文 | [提示词](src/prompts/AGENTS.md) |
-| `tests/` | 回归测试、固定样例与模拟服务 | [测试](tests/AGENTS.md) |
-| `scripts/`、`start.ps1` | 本机启动、进程管理与实际入口验收 | [脚本](scripts/AGENTS.md)，修改根启动器时也读取 |
-| `docs/` | 架构设计、项目状态与专题说明 | [文档](docs/AGENTS.md) |
-| `data/`、`.cache/` | 用户运行数据和临时验收产物，不存放源码或开发规范 | 遵守下方数据保护规则 |
+| `src/infrastructure/` | 本机设置、环境与日志 | [基础设施](src/infrastructure/AGENTS.md) |
+| `src/prompts/` | Markdown 提示词 | [提示词](src/prompts/AGENTS.md) |
+| `tests/` | 回归测试与模拟服务 | [测试](tests/AGENTS.md) |
+| `scripts/`、`start.ps1` | 启动、进程管理与入口验收 | [脚本](scripts/AGENTS.md) |
+| `docs/` | 项目文档 | [文档](docs/AGENTS.md) |
 
-## 全局技术边界
-
-- 面向单机单用户，采用 SQLite 和单 worker。只实现本次任务与当前里程碑所需的最小改动，不引入无实际需求的防御性措施或抽象。
-- 禁止自行引入身份令牌体系、鉴权、租约、分布式组件或多后端抽象。前端与 API 默认仅监听回环地址。
-- 根目录 `pyproject.toml`、`uv.lock` 管理 API、worker 与 `src/` 的共用 Python 环境；根目录 pnpm workspace、`pnpm-lock.yaml` 管理前端。依赖变更更新对应入口和锁文件，不另建重复环境。
-- API 与 worker 共用 `TUFA_DATA_DIR` 下的 SQLite，默认运行数据在被 Git 忽略的 `data/`。保留用户数据库、原文、报告和已有改动，验收使用独立数据目录。
-- 外部服务 API 密钥可由用户保存到本机设置或从环境变量读取，环境变量优先。接口与日志不得回显密钥；不把密钥、用户材料或本机配置提交到 Git。
-- 提示词正文集中在 `src/prompts/` 的 Markdown 文件中；数据结构、数值检查与证据定位由代码负责。
-- 内容摘要可用于导入时的相同文件去重。普通测试检查数据、状态和可观察结果，禁止用固定摘要锁死提示词、整份报告或目录内容。
-
-## 开发与交付
-
-- 以任务为单位管理 Git 分支。新任务从 `main` 创建 `codex/*` 分支；同一任务的后续修改、修复和验收反馈沿用原分支，不直接在 `main` 开发。
-- 修改代码时及时同步受影响的职责、能力、接口和验证文档。
-- 完成后仅暂存并本地提交本次任务产生的改动，用户明确要求合并提交的已有改动除外。不得擅自提交、覆盖或清理用户已有修改；若工作区改动妨碍安全切换分支，保留现场并说明冲突。
-- 从实际调用入口验证改动，按模块规则运行相关检查。纯文档修改验证路径、链接与规则一致性，不为此启动应用或全量构建。
-- 交付说明修改内容、实测命令、结果及未验证部分；区分模拟服务与真实外部服务验收，不把构建通过当成交互验证通过。
-- 安装、启动和常用验收命令以 [README](README.md) 为入口，不把每次验收记录追加进规则文件。
+进入目标目录时仍须检查更近的规则；`data/` 和 `.cache/` 是运行数据与临时产物位置，不存放源码或开发规则。

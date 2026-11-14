@@ -25,7 +25,7 @@ Tavily 优先使用配置的网络路径。若本机回环代理在建立连接�
 
 - `src/integrations/web_search.py` 负责供应商协议、超时、安全错误和统一结果；`src/infrastructure/settings.py` 解析当前引擎配置。
 - `src/tools/search.py` 暴露可独立调用的搜索工具；`src/tools/read_web_page.py` 暴露网页正文读取；`src/literature/evidence.py` 负责从结果中提取证据。
-- `GET /projects/{project_id}/web-search?q=...` 返回最多五条结果，验证项目存在，不写论文库，也不调用模型。
+- `GET /projects/{project_id}/web-search?q=...` 独立返回最多五条结果，验证项目存在，不写论文库，也不调用模型。科研工作流的搜索额度见[架构预算表](ARCHITECTURE.md#工作流预算)。
 - 搜索候选、读取正文片段和已取证材料是不同证据层级。报告保留来源 URL、引擎、获取时间及可用的字符区间；获取时间不等同网页发布时间。搜索摘要不等同已阅读的完整网页，网页内容也不自动成为论文收藏夹成员。
 
 网页正文以清理后的 Markdown 分页。读取前检查公网地址并逐跳检查重定向；HTTPS 连接固定到已验证 IP，同时校验原域名。HTML 优先提取 `article`/`main`，移除导航与脚本，不执行 JavaScript。公开 PDF 可在受限子进程提取可复制文字，下载上限 2 MB，最多 50 页或 20 万字符；扫描件、加密文件或解析超时无法读取。正文证据保存绝对字符区间；这不是论文库 PDF 页码锚点。
