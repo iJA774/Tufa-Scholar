@@ -64,11 +64,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 self._send_json({'results': []})
                 return
             slug = re.sub(r'[^a-z0-9]+', '-', folded).strip('-')[:60] or 'fixture'
-            self._send_json({'results': [{
+            results = [{
                 'title': 'Simulated official accuracy results',
                 'url': f'https://example.org/{slug}',
                 'content': 'Accuracy was 92% in the simulated search result.',
-            }]})
+            }]
+            if 'dense-search-fixture' in folded:
+                results.extend({
+                    'title': f'Accuracy source {index}',
+                    'url': f'https://example.org/{slug}/{index}',
+                    'content': 'Accuracy was 92%. ' + 'Context from the simulated publisher. ' * 45,
+                } for index in range(1, 20))
+            self._send_json({'results': results})
             return
         if parts.path == '/v1/models':
             self._send_json({'data': [{'id': 'fixture'}]})
@@ -136,7 +143,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if payload.get('phase') == 'query':
                 return {
                     'source': preferred if preferred in allowed else allowed[0],
-                    'queries': [question],
+                    'queries': ['accuracy'] if 'context-cutoff-fixture' in folded else [question],
                     'selected_candidate_ids': [],
                     'summary': '',
                     'gaps': [],
@@ -156,7 +163,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             preferred = payload.get('source_preference') or ('web' if payload.get('source') == 'web' else 'paper')
             source = preferred if preferred in allowed else allowed[0]
             count = payload.get('round_count', 0)
-            two_rounds = 'two-rounds' in question.casefold()
+            two_rounds = 'two-rounds' in folded or 'context-cutoff-fixture' in folded
             return {
                 'requirements': ['查证准确率及其来源'],
                 'plan': ['收集并核对与问题直接相关的证据'],
@@ -173,32 +180,28 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 item.get('source_level') in {'web_content', 'web_snippet'} if mode == 'web'
                 else item.get('source_level') not in {'web_content', 'web_snippet'}
             )]
-            if candidates and not matching:
+            if payload.get('phase') == 'act' and candidates and not matching:
                 return {
                     'action': 'tool',
                     'tool_name': 'collect_evidence',
                     'reason': '核对搜索结果中的准确率。',
                     'arguments': {'query': question, 'candidate_ids': [candidates[0]['candidate_id']]},
-                    'draft': {'sections': [], 'limitations': []},
-                    'findings': [],
                 }
-            if mode == 'web' and ('research-failure' in folded or 'search-failure' in folded) and payload.get('search_attempts', 0) == 0:
-                return {
-                    'action': 'tool',
-                    'tool_name': 'search_web',
-                    'arguments': {'query': question, 'limit': 5},
-                    'draft': {'sections': [], 'limitations': []},
-                    'findings': [],
-                }
+            if payload.get('phase') == 'act':
+                if mode == 'web' and ('research-failure' in folded or 'search-failure' in folded) and payload.get('search_attempts', 0) == 0:
+                    return {
+                        'action': 'tool',
+                        'tool_name': 'search_web',
+                        'arguments': {'query': question, 'limit': 5},
+                    }
+                return {'action': 'finish'}
             if matching:
                 claim = '网页搜索摘要记录准确率为 92%。' if mode == 'web' else '论文证据记录准确率为 92%。'
                 return {
-                    'action': 'finish', 'tool_name': '', 'arguments': {},
                     'draft': {'sections': [{'heading': '研究结果', 'paragraphs': [{'text': claim, 'citations': [matching[0]['id']]}]}], 'limitations': []},
                     'findings': [{'text': claim, 'citations': [matching[0]['id']]}],
                 }
             return {
-                'action': 'finish', 'tool_name': '', 'arguments': {},
                 'draft': {'sections': [], 'limitations': [{'text': '本轮没有获得可核查资料，无法确认准确率。', 'citations': []}]},
                 'findings': [],
             }
@@ -219,10 +222,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 source = evidence[0].get('source_level')
                 claim = '网页搜索摘要记录准确率为 92%。' if source in {'web_content', 'web_snippet'} else '论文证据记录准确率为 92%。'
                 citation_id = 'fixture-unavailable' if 'reporter-invalid-citation' in folded else evidence[0]['id']
-                return {
-                    'sections': [{'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [citation_id]}]}],
-                    'limitations': [],
-                }
+                section = {'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [citation_id]}]}
+                if 'dense-search-fixture' in folded:
+                    section['limitations'] = [{'text': '尚需核对更多独立来源。', 'citations': []}]
+                return {'sections': [section], 'limitations': []}
             return {
                 'sections': [],
                 'limitations': [{'text': '当前没有可核查证据，无法确认准确率。', 'citations': []}],

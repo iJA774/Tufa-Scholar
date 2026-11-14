@@ -23,19 +23,25 @@ def replay(artifact):
             DispatcherOutput,
             PlannerOutput,
             ReporterOutput,
-            ResearcherOutput,
+            ResearchActionOutput,
+            ResearchDraftOutput,
         )
         schemas = {
             'runtime/dispatcher': DispatcherOutput,
             'literature/background_investigator': BackgroundOutput,
             'literature/planner': PlannerOutput,
-            'literature/researcher': ResearcherOutput,
             'literature/analyst': AnalystOutput,
             'literature/reporter': ReporterOutput,
         }
     except ImportError:
         return '无法离线复现：当前提示词 schema 不可用'
     schema = schemas.get(prompt_id)
+    if prompt_id == 'literature/researcher':
+        payload = artifact.get('payload')
+        phase = payload.get('phase') if isinstance(payload, dict) else None
+        schema = ResearchActionOutput if phase == 'act' else ResearchDraftOutput if phase == 'draft' else None
+        if schema is None:
+            return '无法离线复现：未知研究阶段'
     if schema is None:
         return '无法离线复现：未知提示词'
     try:

@@ -62,6 +62,14 @@ class DiagnosticsTest(unittest.TestCase):
         with patch('src.infrastructure.diagnostics.data_directory', side_effect=OSError('sensitive')):
             self.assertEqual(record_failure(kind='network_error', payload={}, schema={}), '')
 
+    def test_researcher_replay_uses_the_saved_stage(self):
+        base = {'kind': 'model_validation', 'context': {'prompt_id': 'literature/researcher'}}
+        finish = {'action': 'finish'}
+        self.assertEqual(replay({**base, 'payload': {'phase': 'act'}, 'response': finish}), '未复现')
+        self.assertTrue(replay({**base, 'payload': {'phase': 'draft'}, 'response': finish}).startswith('复现：'))
+        draft = {'draft': {'sections': [], 'limitations': []}, 'findings': []}
+        self.assertEqual(replay({**base, 'payload': {'phase': 'draft'}, 'response': draft}), '未复现')
+
 
 if __name__ == '__main__':
     unittest.main()

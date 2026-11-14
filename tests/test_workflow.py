@@ -1,10 +1,23 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
 from src.integrations.model import ModelServiceError, StructuredOutputError
+
+
+def researcher_output(*, action="finish", tool_name="", arguments=None, reason="", draft=None, findings=None):
+    """Return a lightweight test response independent of either phase schema."""
+    return SimpleNamespace(
+        action=action,
+        tool_name=tool_name,
+        arguments=arguments or {},
+        reason=reason,
+        draft=draft or workflow.Draft(),
+        findings=findings or [],
+    )
 
 
 def paper(identifier, title, abstract, doi=None):
@@ -104,9 +117,9 @@ class ModelFixture:
                 tool = 'search_web' if mode == 'web' else 'search_papers'
                 if tool in tools:
                     arguments = {'query': 'accuracy', 'limit': 5} if mode == 'web' else {'query': 'accuracy'}
-                    return workflow.ResearcherOutput(action='tool', tool_name=tool, arguments=arguments)
+                    return researcher_output(action='tool', tool_name=tool, arguments=arguments)
             if candidate and not mode_evidence:
-                return workflow.ResearcherOutput(
+                return researcher_output(
                     action='tool',
                     tool_name='collect_evidence',
                     arguments={'query': 'accuracy', 'candidate_ids': [candidate['candidate_id']]},
@@ -119,7 +132,7 @@ class ModelFixture:
                 limitations=[workflow.Claim(text='本轮没有获得可核查证据。', citations=[])] if not citations else [],
             )
             findings = [workflow.Claim(text='材料记录准确率为 92%。', citations=citations)] if citations else []
-            return workflow.ResearcherOutput(action='finish', draft=draft, findings=findings)
+            return researcher_output(action='finish', draft=draft, findings=findings)
 
         if prompt_id == 'literature/analyst':
             self.analyst_contexts.append(kwargs['template_context'])
@@ -480,15 +493,15 @@ class WorkflowTests(unittest.TestCase):
                     candidates = payload['current_candidates']
                     searches = [item for item in payload['tool_results'] if item.get('tool') == 'search_papers']
                     if not candidates:
-                        return workflow.ResearcherOutput(action='tool', tool_name='search_papers', arguments={'query': 'first accuracy query'})
+                        return researcher_output(action='tool', tool_name='search_papers', arguments={'query': 'first accuracy query'})
                     if len(searches) < 2:
-                        return workflow.ResearcherOutput(action='tool', tool_name='search_papers', arguments={'query': 'second accuracy query'})
+                        return researcher_output(action='tool', tool_name='search_papers', arguments={'query': 'second accuracy query'})
                     promoted = next((item for item in candidates if item['title'] == 'New high rank accuracy paper'), None)
                     if promoted and not payload['evidence']:
-                        return workflow.ResearcherOutput(action='tool', tool_name='collect_evidence', arguments={'query': 'accuracy', 'candidate_ids': [promoted['candidate_id']]})
+                        return researcher_output(action='tool', tool_name='collect_evidence', arguments={'query': 'accuracy', 'candidate_ids': [promoted['candidate_id']]})
                     evidence = payload['evidence']
                     draft = workflow.Draft(sections=[workflow.Section(heading='结果', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=[evidence[0]['id']])])]) if evidence else workflow.Draft()
-                    return workflow.ResearcherOutput(action='finish', draft=draft)
+                    return researcher_output(action='finish', draft=draft)
                 if prompt_id == 'literature/analyst':
                     return workflow.AnalystOutput(sufficient=True, covered_requirements=['accuracy'], review='ok')
                 if prompt_id == 'literature/reporter':

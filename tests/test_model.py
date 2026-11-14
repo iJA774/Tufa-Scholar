@@ -11,7 +11,8 @@ import httpx
 from jinja2 import StrictUndefined, UndefinedError
 from pydantic import BaseModel, ConfigDict
 
-from src.integrations.model import PROMPT_ENV, PROMPT_IDS, ModelServiceError, StructuredOutputError, structured
+import src.integrations.model as model_client
+from src.integrations.model import PROMPT_ENV, PROMPT_IDS, ModelServiceError, StructuredOutputError, structured, structured_input_units
 
 
 class Output(BaseModel):
@@ -20,6 +21,7 @@ class Output(BaseModel):
 
 class ModelTests(unittest.TestCase):
     def setUp(self):
+        model_client.UNSUPPORTED_REQUEST_PARAMS.clear()
         self.diagnostics = patch('src.integrations.model.record_failure', return_value='diagnostic-1')
         self.diagnostics_mock = self.diagnostics.start()
         self.addCleanup(self.diagnostics.stop)
@@ -75,13 +77,207 @@ class ModelTests(unittest.TestCase):
                 for tool in tools:
                     self.assertIn(tool['name'], system['content'])
                     self.assertIn(tool['description'], system['content'])
-                self.assertIn(json.dumps(Output.model_json_schema(), ensure_ascii=False), system['content'])
+                self.assertIn(json.dumps(Output.model_json_schema(), ensure_ascii=False, separators=(',', ':')), system['content'])
                 self.assertNotIn('{{ CURRENT_TIME }}', system['content'])
                 self.assertNotIn('{{ OUTPUT_SCHEMA }}', system['content'])
                 self.assertEqual(user['role'], 'user')
                 self.assertEqual(json.loads(user['content']), payload)
                 self.assertEqual(body['response_format'], {'type': 'json_object'})
         self.assertEqual(clock.now.call_count, len(cases))
+
+    def test_structured_input_units_measure_rendered_system_and_serialized_payload_deterministically(self):
+        context = self.context('planner role', 'paper', [{'name': 'search_papers', 'description': 'search', 'input_schema': {}}])
+        first_payload = {'question': '中文 {{ CURRENT_TIME }}', 'phase': 'query'}
+        units = structured_input_units('literature/planner', first_payload, Output, template_context=context)
+        self.assertIs(type(units), int)
+        self.assertGreater(units, len(json.dumps(first_payload, ensure_ascii=False)))
+        self.assertEqual(
+            units,
+            structured_input_units('literature/planner', first_payload, Output, template_context=context),
+        )
+        self.assertGreater(
+            structured_input_units('literature/planner', {**first_payload, 'evidence': ['更多证据'] * 20}, Output, template_context=context),
+            units,
+        )
+
+    def test_decision_stages_use_low_effort_and_4096_output_cap_but_writing_stages_are_uncapped(self):
+        config = {'base_url': 'https://decision-options.example/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            for prompt_id, payload in (
+                ('literature/background_investigator', {'phase': 'query'}),
+                ('literature/planner', {}),
+                ('literature/analyst', {}),
+                ('literature/researcher', {'phase': 'act'}),
+            ):
+                with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured(prompt_id, payload, Output, template_context=self.context())
+                request = post.call_args.kwargs['json']
+                self.assertEqual(request['reasoning_effort'], 'low')
+                self.assertEqual(request['max_completion_tokens'], 4096)
+
+            for prompt_id, payload in (
+                ('runtime/dispatcher', {'phase': 'query'}),
+                ('literature/researcher', {'phase': 'draft'}),
+                ('literature/reporter', {}),
+            ):
+                with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured(prompt_id, payload, Output, template_context=self.context())
+                request = post.call_args.kwargs['json']
+                self.assertNotIn('reasoning_effort', request)
+                self.assertNotIn('max_completion_tokens', request)
+
+    def test_explicit_effort_overrides_default_and_higher_effort_has_no_output_cap(self):
+        config = {'base_url': 'https://explicit-effort.example/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+            structured('literature/planner', {}, Output,
+                       model_options={'reasoning_effort': 'high'}, template_context=self.context())
+        request = post.call_args.kwargs['json']
+        self.assertEqual(request['reasoning_effort'], 'high')
+        self.assertNotIn('max_completion_tokens', request)
+
+    def test_optional_decision_parameters_retry_only_after_explicit_rejection_and_cache_support(self):
+        config = {'base_url': 'https://option-compat.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            json={'error': {'message': 'Unsupported parameter: max_completion_tokens', 'param': 'max_completion_tokens'}},
+        )
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(dict(kwargs['json']))
+            return rejected if len(sent) == 1 else self.response()
+
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', side_effect=post):
+            structured('literature/planner', {}, Output, template_context=self.context())
+            structured('literature/planner', {}, Output, template_context=self.context())
+
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(sent[0]['max_completion_tokens'], 4096)
+        self.assertNotIn('max_completion_tokens', sent[1])
+        self.assertNotIn('max_completion_tokens', sent[2])
+        self.assertTrue(all(request['reasoning_effort'] == 'low' for request in sent))
+        self.assertLessEqual(len(model_client.UNSUPPORTED_REQUEST_PARAMS), model_client.MAX_UNSUPPORTED_REQUEST_PARAMS)
+
+    def test_explicit_unsupported_user_effort_is_not_silently_dropped(self):
+        config = {'base_url': 'https://explicit-unsupported.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            json={'error': {'message': 'Unsupported parameter: reasoning_effort', 'param': 'reasoning_effort'}},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=rejected) as post:
+            with self.assertRaises(ModelServiceError):
+                structured('literature/planner', {}, Output,
+                           model_options={'reasoning_effort': 'high'}, template_context=self.context())
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs['json']['reasoning_effort'], 'high')
+        self.assertNotIn('max_completion_tokens', post.call_args.kwargs['json'])
+
+    def test_invalid_parameter_value_does_not_trigger_compatibility_retry(self):
+        config = {'base_url': 'https://invalid-value.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            json={'error': {'message': 'Invalid value for max_completion_tokens', 'param': 'max_completion_tokens'}},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=rejected) as post:
+            with self.assertRaises(ModelServiceError):
+                structured('literature/planner', {}, Output, template_context=self.context())
+        self.assertEqual(post.call_count, 1)
+
+    def test_rejected_default_effort_value_falls_back_without_disabling_other_effort_levels(self):
+        config = {'base_url': 'https://effort-value.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            json={'error': {'message': 'Invalid value for reasoning_effort: low is not supported', 'param': 'reasoning_effort'}},
+        )
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(dict(kwargs['json']))
+            return rejected if len(sent) == 1 else self.response()
+
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', side_effect=post):
+            structured('literature/planner', {}, Output, template_context=self.context())
+            structured('literature/planner', {}, Output, template_context=self.context())
+            structured('literature/planner', {}, Output,
+                       model_options={'reasoning_effort': 'high'}, template_context=self.context())
+
+        self.assertEqual(len(sent), 4)
+        self.assertEqual(sent[0]['reasoning_effort'], 'low')
+        self.assertNotIn('reasoning_effort', sent[1])
+        self.assertNotIn('reasoning_effort', sent[2])
+        self.assertEqual(sent[3]['reasoning_effort'], 'high')
+        self.assertTrue(model_client._parameter_is_known_unsupported(config, 'reasoning_effort=low'))
+        self.assertFalse(model_client._parameter_is_known_unsupported(config, 'reasoning_effort'))
+
+    def test_output_cap_length_response_is_recorded_without_same_cap_retry_for_json_and_stream(self):
+        config = {'base_url': 'https://cap-length.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        usage = {'prompt_tokens': 100, 'completion_tokens': 4096, 'total_tokens': 4196}
+        ordinary = httpx.Response(
+            200,
+            request=request,
+            json={'choices': [{'message': {'content': '{"answer":"partial'}, 'finish_reason': 'length'}], 'usage': usage},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=ordinary) as post, self.assertLogs('src.integrations.model', level='INFO') as logs:
+            with self.assertRaises(StructuredOutputError):
+                structured('literature/planner', {}, Output, template_context=self.context())
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(self.diagnostics_mock.call_args.kwargs['response'], '{"answer":"partial')
+        self.assertEqual('\n'.join(logs.output).count('completion_tokens=4096'), 1)
+
+        events = [
+            {'choices': [{'delta': {'content': '{'}}]},
+            {'choices': [{'delta': {}, 'finish_reason': 'length'}], 'usage': usage},
+        ]
+        encoded = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events) + 'data: [DONE]\n\n'
+        streamed = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=encoded)
+        observed = []
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.stream', return_value=nullcontext(streamed)) as stream:
+            with self.assertRaises(StructuredOutputError):
+                structured('literature/planner', {}, Output, template_context=self.context(),
+                           on_stream=lambda kind, data: observed.append((kind, data)))
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.failed'])
+
+    def test_valid_json_is_accepted_even_when_provider_marks_length_finish_reason(self):
+        config = {'base_url': 'https://valid-length.example/v1', 'model': 'test'}
+        response = httpx.Response(
+            200,
+            request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+            json={'choices': [{'message': {'content': '{"answer":"ok"}'}, 'finish_reason': 'length'}]},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response) as post:
+            result = structured('literature/planner', {}, Output, template_context=self.context())
+        self.assertEqual(result.answer, 'ok')
+        self.assertEqual(post.call_count, 1)
+
+    def test_reporter_repairs_only_legacy_section_limitations_and_validates_merged_data(self):
+        from src.agents.literature import ReporterOutput
+
+        output = {
+            'sections': [{
+                'heading': '研究结果',
+                'paragraphs': [{'text': '已有结论。', 'citations': ['E1']}],
+                'limitations': [{'text': '章节局限。', 'citations': []}],
+            }],
+            'limitations': [{'text': '报告局限。', 'citations': []}],
+        }
+        config = {'base_url': 'https://report-repair.example/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response(json.dumps(output))) as post:
+            result = structured('literature/reporter', {'evidence': [{'id': 'E1'}]}, ReporterOutput,
+                                template_context=self.context())
+
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual([item.text for item in result.limitations], ['报告局限。', '章节局限。'])
+        self.assertEqual(result.sections[0].paragraphs[0].citations, ['E1'])
 
     def test_planner_gets_local_filenames_tools_and_role_without_rendering_them_again(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}

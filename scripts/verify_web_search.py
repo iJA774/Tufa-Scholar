@@ -151,6 +151,48 @@ def main():
             assert 'web_snippet' in report_csv and 'searx' in report_csv
             assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
 
+            dense_question = 'dense-search-fixture accuracy'
+            dense = call('POST', f'/projects/{project}/questions', json={
+                'question': dense_question, 'source': 'web', 'research_mode': 'deep',
+            })
+            dense_task = wait(dense['run_id'])
+            assert dense_task['status'] == 'succeeded', dense_task
+            assert dense_task['result']['evidence'] and '92%' in dense_task['result']['content']
+            assert '尚需核对更多独立来源' in dense_task['result']['content']
+            dense_calls = [
+                (request, json.loads(request['messages'][1]['content']))
+                for request in fixture.model_requests
+                if json.loads(request['messages'][1]['content']).get('question') == dense_question
+            ]
+            background = [payload for _, payload in dense_calls if payload.get('phase') == 'select']
+            assert len(background) == 1 and 1 <= len(background[0]['candidates']) <= 3, background
+            decisions = [(request, payload) for request, payload in dense_calls if payload.get('phase') == 'act']
+            assert decisions and all(1 <= len(payload['current_candidates']) <= 3 for _, payload in decisions), decisions
+            assert all(request.get('reasoning_effort') == 'low' and request.get('max_completion_tokens') == 4096
+                       for request, _ in decisions)
+            writing = [request for request, payload in dense_calls if payload.get('phase') == 'draft'
+                       or '运行节点标识：reporter' in request['messages'][0]['content']]
+            assert len(writing) == 2 and all('max_completion_tokens' not in request for request in writing), writing
+
+            cutoff_question = 'context-cutoff-fixture ' + '核对这项研究的准确率。' * 1_000
+            searches_before = len(fixture.search_requests)
+            requests_before = len(fixture.model_requests)
+            cutoff = call('POST', f'/projects/{project}/questions', json={
+                'question': cutoff_question, 'source': 'web', 'research_mode': 'deep',
+            })
+            cutoff_run = cutoff['run_id']
+            cutoff_task = wait(cutoff_run)
+            assert cutoff_task['status'] == 'succeeded', cutoff_task
+            assert '上下文预算' in cutoff_task['result']['content']
+            assert fixture.search_requests[searches_before:] == ['accuracy']
+            cutoff_phases = [json.loads(request['messages'][1]['content']).get('phase')
+                             for request in fixture.model_requests[requests_before:]]
+            assert cutoff_phases == ['query', 'select', None, 'draft', None, None], cutoff_phases
+            assert stages(cutoff_run).count('researcher') == 1
+            assert stages(cutoff_run)[-1:] == ['reporter']
+            worker_log = (Path(temporary.name) / 'logs' / 'worker.log').read_text(encoding='utf-8')
+            assert f'research_round_stopped run_id={cutoff_run} reason=decision_context_budget' in worker_log
+
             streamed_question = call('POST', f'/projects/{project}/questions', json={
                 'question': 'stream-fixture accuracy', 'source': 'web', 'research_mode': 'deep',
             })
@@ -243,6 +285,8 @@ def main():
             print('Simulated HTTP: quick mode stayed direct despite a contradictory dispatcher, with zero searches.')
             print('Simulated HTTP: deep mode researched a greeting through background search and reporting.')
             print('Simulated HTTP: API web search, background filtering, web evidence and cited report passed.')
+            print('Research budgets: dense results are capped, decisions have generation limits, and reporter format repair preserves cited evidence without a second call.')
+            print('Context cutoff: an over-budget decision is skipped and the worker goes from draft to report without any further retrieval.')
             print('Live SSE: reporter delta arrived while the worker was running; tool reason and reconnect cursor passed.')
             print('Reporter citation rejection: report and CSV preserve valid provisional evidence.')
             print('Provider failure: rewritten search retries stop after two consecutive failures and produce an explicit no-evidence report.')

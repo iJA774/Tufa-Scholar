@@ -1,9 +1,22 @@
 import unittest
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+
+
+def researcher_output(*, action="finish", tool_name="", arguments=None, reason="", draft=None, findings=None):
+    """Return a lightweight test response independent of either phase schema."""
+    return SimpleNamespace(
+        action=action,
+        tool_name=tool_name,
+        arguments=arguments or {},
+        reason=reason,
+        draft=draft or workflow.Draft(),
+        findings=findings or [],
+    )
 
 
 WEB_PAGE = {
@@ -52,12 +65,12 @@ class WebWorkflowModel:
             evidence = [item for item in payload.get('evidence', []) if item.get('source_level') in {'web_snippet', 'web_content'}]
             if not candidates and (self.research_search_limit is None or self.research_searches < self.research_search_limit):
                 self.research_searches += 1
-                return workflow.ResearcherOutput(
+                return researcher_output(
                     action='tool', tool_name='search_web',
                     arguments={'query': 'accuracy official results', 'limit': 5},
                 )
             if candidates and not evidence:
-                return workflow.ResearcherOutput(
+                return researcher_output(
                     action='tool', tool_name='collect_evidence',
                     arguments={'query': 'accuracy', 'candidate_ids': [candidates[0]['candidate_id']]},
                 )
@@ -66,7 +79,7 @@ class WebWorkflowModel:
                 if evidence else [],
                 limitations=[workflow.Claim(text='当前没有网页证据可用于核验。', citations=[])] if not evidence else [],
             )
-            return workflow.ResearcherOutput(action='finish', draft=draft)
+            return researcher_output(action='finish', draft=draft)
         if prompt_id == 'literature/analyst':
             return workflow.AnalystOutput(
                 sufficient=False,
@@ -151,17 +164,17 @@ class WebWorkflowTests(unittest.TestCase):
                     )
                 if prompt_id == 'literature/researcher':
                     if payload['phase'] == 'draft':
-                        return workflow.ResearcherOutput(
+                        return researcher_output(
                             action='finish',
                             draft=workflow.Draft(limitations=[workflow.Claim(text='没有取得可核查证据。', citations=[])]),
                         )
                     act_count = sum(phase.get('phase') == 'act' for role, phase in model_calls if role == 'literature/researcher')
                     if act_count in {1, 3}:
-                        return workflow.ResearcherOutput(
+                        return researcher_output(
                             action='tool', tool_name='search_web',
                             arguments={'query': f'attempt {act_count}', 'limit': 5},
                         )
-                    return workflow.ResearcherOutput(action='finish')
+                    return researcher_output(action='finish')
                 if prompt_id == 'literature/analyst':
                     return workflow.AnalystOutput(sufficient=False, gaps=['无证据'], review='资料不足。')
                 if prompt_id == 'literature/reporter':
@@ -193,11 +206,11 @@ class WebWorkflowTests(unittest.TestCase):
         def model(prompt_id, payload, schema, **kwargs):
             model_calls.append((prompt_id, payload))
             if payload.get('phase') == 'act':
-                return workflow.ResearcherOutput(
+                return researcher_output(
                     action='tool', tool_name='read_web_page',
                     arguments={'candidate_id': 'web:inaccessible', 'offset': 0},
                 )
-            return workflow.ResearcherOutput(
+            return researcher_output(
                 action='finish',
                 draft=workflow.Draft(limitations=[workflow.Claim(text='网页无法读取，证据不足。', citations=[])]),
             )

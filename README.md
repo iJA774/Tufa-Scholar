@@ -94,6 +94,12 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
+### 深度研究预算与网页续读（2026-11-14）
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 178 项测试，覆盖预算内分页、同一偏移量去重，以及仍有后续页时触发上下文上限并停止读取。
+- `.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。隔离的实际 API 和 worker 使用模拟上游，验证密集搜索结果限量、决策生成上限、上下文触发后停止检索、终稿结构本地修复及流式预览。
+- 同一组 20 篇合成论文和两轮研究下，渲染后的系统消息与用户 JSON 共从 127,843 降到 58,345 字符，减少约 54%；两版均调用模型 12 次并保留一条引用。真实模型、搜索质量与计费未在本轮验证。
+
 ### 实时研究活动与流式输出（2026-11-14）
 
 - `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 165 项测试。隔离运行 `.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 均通过。网页脚本使用模拟上游 SSE，验证正文片段在报告保存前可达，工具理由和规划路线存在，断线游标可续读。
