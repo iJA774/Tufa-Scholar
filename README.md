@@ -94,6 +94,11 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
+### 终稿结构与原生工具调用
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 190 项测试。`.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 通过，使用隔离的 API、worker 与模拟上游。网页流程覆盖原生函数参数分片、公开操作目的、预算截断和带引用的固定报告栏目。
+- 本机配置的 `qwen3.7-flash` 对最小普通请求和工具调用请求都返回 HTTP 403（`insufficient_quota`）。真实上游的原生调用仍待验证。
+
 ### 终稿提示词与模型参数兼容
 
 - `.venv/Scripts/python.exe -m unittest discover -s tests -q`（180 项）、`.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 均通过。模拟上游以 SSE 返回完成上限和推理预算冲突，实际 API 与 worker 继续取证并保存报告。同一模型后续阶段沿用兼容设置。

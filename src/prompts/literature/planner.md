@@ -31,15 +31,8 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 
 首次规划必须提出 research。审查后可以沿同一渠道补查，也可以根据具体缺口切换渠道；有充分证据或没有可执行的下一轮计划时提出 report。最多两轮研究，代码会在上限到达后强制交给 reporter；不要尝试延长轮数。不得把 report 当成证据充分的保证，reporter 无论完整与否都会整理结果并说明限制。
 
-`search_mode` 和可用工具目录由代码提供，必须遵守其范围。source 字段只填写 web 或 paper。local 或 collection 的来源限制由代码执行；不得以模型选择绕过。
+按允许的来源规划。source 字段只填写 web 或 paper，遵守 local 或 collection 的来源限制。
 
 输出 requirements（要回答的问题点）、plan（可执行的一轮计划）、source、action 和 rationale。action 首轮必须是 `research`；审查后可选 `research` 或 `report`。无下一步时 plan 可为空；requirements 应保留回答原问题所需的关键覆盖点。`rationale` 是展示给用户的一句简短路线说明，不输出私有思维链或内部分析。
-
-## 可用工具目录
-{% for tool in available_tools -%}
-- `{{ tool.name }}`：{{ tool.description }}；参数：{{ tool.input_schema | tojson }}
-{% else %}
-（无可调用工具）
-{% endfor %}
 
 {% include "runtime/structured_output.md" %}

@@ -159,6 +159,11 @@ def main():
             assert dense_task['status'] == 'succeeded', dense_task
             assert dense_task['result']['evidence'] and '92%' in dense_task['result']['content']
             assert '尚需核对更多独立来源' in dense_task['result']['content']
+            dense_report = dense_task['result']['content']
+            assert dense_report.startswith('# 准确率核查\n'), dense_report
+            sections = ['## 关键点', '## 概述', '## 详细分析', '## 关键引文']
+            assert [dense_report.index(section) for section in sections] == sorted(dense_report.index(section) for section in sections)
+            assert '\n- ' in dense_report and '](' in dense_report
             dense_calls = [
                 (request, json.loads(request['messages'][1]['content']))
                 for request in fixture.model_requests
@@ -169,6 +174,12 @@ def main():
             decisions = [(request, payload) for request, payload in dense_calls if payload.get('phase') == 'act']
             assert decisions and all(1 <= len(payload['current_candidates']) <= 3 for _, payload in decisions), decisions
             assert all(request.get('reasoning_effort') == 'low' and request.get('max_completion_tokens') == 4096
+                       for request, _ in decisions)
+            assert all(request.get('tool_choice') == 'auto'
+                       and {'search_web', 'read_web_page', 'collect_evidence'} == {
+                           tool['function']['name'] for tool in request['tools']
+                       }
+                       and 'response_format' not in request and 'JSON Schema' not in request['messages'][0]['content']
                        for request, _ in decisions)
             writing = [request for request, payload in dense_calls if payload.get('phase') == 'draft'
                        or '运行节点标识：reporter' in request['messages'][0]['content']]

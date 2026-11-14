@@ -119,6 +119,22 @@ class WebWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(search.call_count, 1)
         self.assertIn('search_web', [call.args[0] for call in invoke.call_args_list])
+        researcher_calls = [call for call in model.calls if call[0] == 'literature/researcher']
+        act_calls = [call for call in researcher_calls if call[1].get('phase') == 'act']
+        draft_calls = [call for call in researcher_calls if call[1].get('phase') == 'draft']
+        self.assertTrue(act_calls)
+        self.assertTrue(all(call[2].get('native_tools') for call in act_calls))
+        self.assertTrue(all(
+            set(item) == {'name', 'description'}
+            for call in act_calls
+            for item in call[2]['template_context']['available_tools']
+        ))
+        self.assertTrue(all(call[2].get('native_tools') is None for call in draft_calls))
+        self.assertTrue(all(
+            call[2].get('native_tools') is None
+            for call in model.calls
+            if call[0] != 'literature/researcher'
+        ))
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0]['source_level'], 'web_snippet')
         self.assertEqual(evidence[0]['provider'], 'fixture')

@@ -105,6 +105,44 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.wfile.write(f'data: {json.dumps(error)}\n\n'.encode('utf-8'))
             return
         result = self._model_result(role, payload, system)
+        if role == 'researcher' and payload.get('phase') == 'act':
+            assert request.get('tools') and request.get('tool_choice') == 'auto'
+            assert 'response_format' not in request
+            arguments = result.get('arguments', {})
+            if result.get('reason'):
+                arguments = {**arguments, 'reason': result['reason']}
+            function_call = result.get('tool_name')
+            tool_calls = [{
+                'id': 'call_fixture', 'type': 'function',
+                'function': {'name': function_call, 'arguments': json.dumps(arguments, ensure_ascii=False)},
+            }] if function_call else []
+            finish_reason = 'tool_calls' if tool_calls else 'stop'
+            if request.get('stream') and tool_calls and 'stream-fixture' in payload.get('question', ''):
+                call = tool_calls[0]
+                encoded_args = call['function']['arguments']
+                split = len(encoded_args) // 2
+                chunks = [
+                    {'choices': [{'index': 0, 'delta': {'tool_calls': [{
+                        'index': 0, 'id': call['id'], 'type': 'function',
+                        'function': {'name': function_call, 'arguments': encoded_args[:split]},
+                    }]}, 'finish_reason': None}]},
+                    {'choices': [{'index': 0, 'delta': {'tool_calls': [{
+                        'index': 0, 'function': {'arguments': encoded_args[split:]},
+                    }]}, 'finish_reason': None}]},
+                    {'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]},
+                ]
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+                self.end_headers()
+                for chunk in chunks:
+                    self.wfile.write(f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'.encode('utf-8'))
+                self.wfile.write(b'data: [DONE]\n\n')
+            else:
+                message = {'role': 'assistant', 'content': None if tool_calls else '本轮证据已收集。'}
+                if tool_calls:
+                    message['tool_calls'] = tool_calls
+                self._send_json({'choices': [{'index': 0, 'message': message, 'finish_reason': finish_reason}]})
+            return
         content = json.dumps(result, ensure_ascii=False)
         prompt_tokens = max(1, len(system) // 4) + max(1, len(messages[1].get('content', '')) // 4) if len(messages) > 1 else max(1, len(system) // 4)
         completion_tokens = max(1, len(content) // 4)
@@ -236,7 +274,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 section = {'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [citation_id]}]}
                 if 'dense-search-fixture' in folded:
                     section['limitations'] = [{'text': '尚需核对更多独立来源。', 'citations': []}]
-                return {'sections': [section], 'limitations': []}
+                report = {'sections': [section], 'limitations': []}
+                if 'dense-search-fixture' in folded:
+                    report['title'] = '准确率核查'
+                    report['key_points'] = [{'text': '网页资料给出了可核查的准确率。', 'citations': [citation_id]}]
+                    report['overview'] = [{'text': '核查以模拟机构发布的结果为依据。', 'citations': [citation_id]}]
+                return report
             return {
                 'sections': [],
                 'limitations': [{'text': '当前没有可核查证据，无法确认准确率。', 'citations': []}],

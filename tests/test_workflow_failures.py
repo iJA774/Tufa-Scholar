@@ -96,7 +96,7 @@ class WorkflowFailureTests(unittest.TestCase):
                         action="research" if payload["round_count"] == 0 else "report",
                     )
                 if prompt_id == "literature/researcher":
-                    researcher_calls.append((payload, kwargs["template_context"]))
+                    researcher_calls.append((payload, kwargs["template_context"], kwargs.get("native_tools")))
                     if payload["phase"] == "act":
                         index = sum(item[0]["phase"] == "act" for item in researcher_calls)
                         return researcher_output(
@@ -128,7 +128,16 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(len(act_calls), workflow.MAX_RESEARCH_ACTIONS)
         self.assertEqual(len(draft_calls), 1)
         self.assertEqual(draft_calls[0][1]["available_tools"], [])
-        for payload, _ in act_calls:
+        self.assertIsNone(draft_calls[0][2])
+        for _, template_context, native_tools in act_calls:
+            self.assertTrue(native_tools)
+            self.assertTrue(all(set(item) == {"name", "description"} for item in template_context["available_tools"]))
+            for tool in native_tools:
+                reason = tool["input_schema"]["properties"]["reason"]
+                self.assertEqual(reason["type"], "string")
+                self.assertEqual(reason["maxLength"], 240)
+                self.assertNotIn("reason", tool["input_schema"].get("required", []))
+        for payload, _, _ in act_calls:
             self.assertNotIn("history", payload)
             self.assertNotIn("background", payload)
             self.assertNotIn("rounds", payload)
@@ -341,6 +350,7 @@ class WorkflowFailureTests(unittest.TestCase):
         web_calls = []
         fetch_calls = []
         researcher_payloads = []
+        native_act_calls = []
         reporter_payloads = []
 
         class Model:
@@ -361,6 +371,8 @@ class WorkflowFailureTests(unittest.TestCase):
                     )
                 if prompt_id == "literature/researcher":
                     researcher_payloads.append(payload)
+                    if payload.get("phase") == "act":
+                        native_act_calls.append((payload, kwargs.get("native_tools")))
                     self.researcher_actions += 1
                     candidates = payload["current_candidates"]
                     candidate_id = candidates[0]["candidate_id"]
@@ -420,6 +432,17 @@ class WorkflowFailureTests(unittest.TestCase):
             invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
         self.assertEqual(web_calls, [("visible_first_next_offset", 10), ("second_offset", 10)])
+        self.assertTrue(all(native_tools for _, native_tools in native_act_calls))
+        read_tool = next(
+            item for item in native_act_calls[2][1]
+            if item["name"] == "read_web_page"
+        )
+        self.assertEqual(read_tool["input_schema"]["properties"]["offset"]["type"], "integer")
+        prior_read = next(
+            item for item in native_act_calls[2][0]["tool_results"]
+            if item["tool"] == "read_web_page"
+        )
+        self.assertEqual(prior_read["next_offset"], 10)
         self.assertEqual(fetch_calls, ["https://example.org/accuracy", "https://example.org/accuracy"])
         read_calls = [(name, args, kwargs) for name, args, kwargs in invoke_calls if name == "read_web_page"]
         self.assertEqual(len(read_calls), 2)
@@ -488,6 +511,8 @@ class WorkflowFailureTests(unittest.TestCase):
         full_page = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         fetch_calls = []
         act_model_calls = []
+        act_native_tools = []
+        estimated_native_tools = []
         measured_units = []
         schemas = []
 
@@ -505,12 +530,13 @@ class WorkflowFailureTests(unittest.TestCase):
                         requirements=["读取网页正文"], plan=["逐段读取网页"], source="web", action="research",
                     )
                 if prompt_id == "literature/researcher":
-                    schemas.append((payload["phase"], schema))
+                    schemas.append((payload["phase"], schema, kwargs.get("native_tools")))
                     if payload["phase"] == "draft":
                         return researcher_output(
                             draft=workflow.Draft(limitations=[workflow.Claim(text="读取的页面片段尚未提取为可引用证据。")]),
                         )
                     act_model_calls.append(payload)
+                    act_native_tools.append(kwargs.get("native_tools"))
                     candidate_id = payload["current_candidates"][0]["candidate_id"]
                     offset = 0
                     if payload.get("tool_results"):
@@ -534,8 +560,15 @@ class WorkflowFailureTests(unittest.TestCase):
 
         original_estimator = workflow.structured_input_units
 
-        def measure_actual_input(prompt_id, payload, schema, *, template_context=None):
-            units = original_estimator(prompt_id, payload, schema, template_context=template_context)
+        def measure_actual_input(prompt_id, payload, schema, *, template_context=None, native_tools=None):
+            estimated_native_tools.append(native_tools)
+            units = original_estimator(
+                prompt_id,
+                payload,
+                schema,
+                template_context=template_context,
+                native_tools=native_tools,
+            )
             measured_units.append(units)
             # Set the cumulative ceiling to the exact rendered-input total at
             # the third researcher decision. Its equality must stop the call.
@@ -559,9 +592,13 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertTrue(all(0 < units < 100_000 for units in measured_units))
         self.assertLess(sum(measured_units[:2]), sum(measured_units))
         self.assertEqual(len(act_model_calls), 2)
-        self.assertEqual([phase for phase, _ in schemas], ["act", "act", "draft"])
-        self.assertEqual([schema for phase, schema in schemas if phase == "act"], [workflow.ResearchActionOutput] * 2)
-        self.assertTrue(all(schema is workflow.ResearchDraftOutput for phase, schema in schemas if phase == "draft"))
+        self.assertEqual([phase for phase, _, _ in schemas], ["act", "act", "draft"])
+        self.assertEqual([schema for phase, schema, _ in schemas if phase == "act"], [workflow.ResearchActionOutput] * 2)
+        self.assertTrue(all(schema is workflow.ResearchDraftOutput for phase, schema, _ in schemas if phase == "draft"))
+        self.assertEqual(act_native_tools, estimated_native_tools[:2])
+        self.assertEqual(act_native_tools[0], estimated_native_tools[2])
+        self.assertTrue(all(native_tools for native_tools in act_native_tools))
+        self.assertIsNone(schemas[-1][2])
         self.assertEqual([name for name, _, _ in invoke_calls].count("read_web_page"), 2)
         self.assertEqual(fetch_calls, ["https://example.org/accuracy", "https://example.org/accuracy"])
         self.assertEqual(stages.count("researcher"), 1)

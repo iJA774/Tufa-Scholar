@@ -4,6 +4,11 @@
 
 ## 当前任务
 
+- 主题：让终稿按固定报告结构保存，并将 researcher 的模型工具决策迁移到原生 Function Calling。
+- 工作分支：`codex/native-research-tools`，从 `main` 创建。
+
+## 上一阶段：终稿提示词与模型参数兼容
+
 - 主题：恢复 `cd8da93` 的终稿结构要求，修复推理预算与完成上限冲突导致的模型请求失败。
 - 工作分支：`codex/live-research-feedback`，延续研究流程的调整。
 

@@ -11,6 +11,7 @@ import httpx
 from jinja2 import StrictUndefined, UndefinedError
 from pydantic import BaseModel, ConfigDict
 
+from src.agents.literature import ResearchActionOutput
 import src.integrations.model as model_client
 from src.integrations.model import PROMPT_ENV, PROMPT_IDS, ModelServiceError, StructuredOutputError, structured, structured_input_units
 
@@ -42,6 +43,22 @@ class ModelTests(unittest.TestCase):
         if status != 200:
             return httpx.Response(status, request=request, text=content)
         return httpx.Response(200, request=request, json={'choices': [{'message': {'content': content}}]})
+
+    @staticmethod
+    def native_tools():
+        return [{
+            'name': 'search_papers',
+            'description': 'Search the current project papers.',
+            'input_schema': {
+                'type': 'object',
+                'properties': {
+                    'query': {'type': 'string'},
+                    'reason': {'type': 'string', 'maxLength': 240},
+                },
+                'required': ['query'],
+                'additionalProperties': False,
+            },
+        }]
 
     def test_all_real_prompt_ids_render_time_and_schema_at_http_boundary(self):
         cases = [
@@ -75,8 +92,8 @@ class ModelTests(unittest.TestCase):
                 self.assertIn(role, system['content'])
                 self.assertIn(f'`{mode}`', system['content'])
                 for tool in tools:
-                    self.assertIn(tool['name'], system['content'])
-                    self.assertIn(tool['description'], system['content'])
+                    self.assertNotIn(tool['name'], system['content'])
+                    self.assertNotIn(tool['description'], system['content'])
                 self.assertIn(json.dumps(Output.model_json_schema(), ensure_ascii=False, separators=(',', ':')), system['content'])
                 self.assertNotIn('{{ CURRENT_TIME }}', system['content'])
                 self.assertNotIn('{{ OUTPUT_SCHEMA }}', system['content'])
@@ -99,6 +116,249 @@ class ModelTests(unittest.TestCase):
             structured_input_units('literature/planner', {**first_payload, 'evidence': ['更多证据'] * 20}, Output, template_context=context),
             units,
         )
+
+    def test_native_tools_are_included_in_research_input_estimate_without_injected_output_schema(self):
+        tools = self.native_tools()
+        context = self.context('researcher', 'paper', tools)
+        payload = {'question': 'find evidence', 'phase': 'act'}
+        native_without_tools_units = structured_input_units(
+            'literature/researcher', payload, ResearchActionOutput,
+            template_context=context, native_tools=[],
+        )
+        native_units = structured_input_units(
+            'literature/researcher', payload, ResearchActionOutput,
+            template_context=context, native_tools=tools,
+        )
+        self.assertGreater(native_units, native_without_tools_units)
+
+        config = {'base_url': 'https://native-tools.example/v1', 'model': 'test'}
+        response = httpx.Response(
+            200,
+            request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+            json={'choices': [{'finish_reason': 'stop', 'message': {'content': 'done'}}]},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=response) as post:
+            result = structured(
+                'literature/researcher', payload, ResearchActionOutput,
+                template_context=context, native_tools=tools,
+            )
+
+        self.assertEqual(result.action, 'finish')
+        body = post.call_args.kwargs['json']
+        self.assertNotIn('response_format', body)
+        self.assertEqual(body['tool_choice'], 'auto')
+        self.assertEqual(body['tools'], [{
+            'type': 'function',
+            'function': {
+                'name': 'search_papers',
+                'description': 'Search the current project papers.',
+                'parameters': tools[0]['input_schema'],
+            },
+        }])
+        system = body['messages'][0]['content']
+        self.assertNotIn('OUTPUT_SCHEMA', system)
+        self.assertNotIn('JSON Schema 为准', system)
+
+    def test_native_tool_call_maps_reason_out_of_arguments(self):
+        tools = self.native_tools()
+        config = {'base_url': 'https://native-action.example/v1', 'model': 'test'}
+        response = httpx.Response(
+            200,
+            request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+            json={'choices': [{
+                'finish_reason': 'tool_calls',
+                'message': {
+                    'content': None,
+                    'tool_calls': [{
+                        'id': 'call-1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'search_papers',
+                            'arguments': json.dumps({
+                                'query': 'causal inference',
+                                'reason': 'Find primary literature for the current requirement.',
+                            }),
+                        },
+                    }],
+                },
+            }]},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=response) as post:
+            result = structured(
+                'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+            )
+
+        self.assertEqual(result.action, 'tool')
+        self.assertEqual(result.tool_name, 'search_papers')
+        self.assertEqual(result.arguments, {'query': 'causal inference'})
+        self.assertEqual(result.reason, 'Find primary literature for the current requirement.')
+        self.assertNotIn('response_format', post.call_args.kwargs['json'])
+
+    def test_native_tool_stream_assembles_fragments_by_index_and_hides_internal_deltas(self):
+        tools = [
+            *self.native_tools(),
+            {
+                'name': 'read_paper',
+                'description': 'Read a selected paper.',
+                'input_schema': {'type': 'object', 'properties': {'paper_id': {'type': 'string'}}},
+            },
+        ]
+        request = httpx.Request('POST', 'https://native-stream.example/v1/chat/completions')
+        events = [
+            {'choices': [{'delta': {
+                'reasoning_content': 'private reasoning',
+                'content': 'private assistant text',
+                'tool_calls': [
+                    {'index': 1, 'id': 'call-later', 'type': 'function', 'function': {'name': 'not_registered', 'arguments': '{incomplete'}},
+                    {'index': 0, 'id': 'call-first', 'type': 'function', 'function': {'name': 'search_', 'arguments': '{"query":"causal'}},
+                ],
+            }}]},
+            {'choices': [{'delta': {
+                'tool_calls': [
+                    {'index': 0, 'function': {'name': 'papers', 'arguments': ' inference","reason":"Need primary support."}'}},
+                ],
+            }}]},
+            {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}],
+             'usage': {'prompt_tokens': 25, 'completion_tokens': 12, 'total_tokens': 37}},
+        ]
+        payload = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events) + 'data: [DONE]\n\n'
+        response = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=payload)
+        observed = []
+        config = {'base_url': 'https://native-stream.example/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)) as stream:
+            result = structured(
+                'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+                on_stream=lambda kind, data: observed.append((kind, data)),
+            )
+
+        self.assertEqual((result.tool_name, result.arguments['query']), ('search_papers', 'causal inference'))
+        self.assertEqual(result.reason, 'Need primary support.')
+        self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.completed'])
+        self.assertNotIn('private reasoning', json.dumps(observed))
+        self.assertNotIn('causal inference', json.dumps(observed))
+        body = stream.call_args.kwargs['json']
+        self.assertTrue(body['stream'])
+        self.assertNotIn('response_format', body)
+        self.assertEqual(body['tool_choice'], 'auto')
+
+    def test_native_no_call_ignores_content_and_malformed_or_unknown_calls_fail_safely(self):
+        tools = self.native_tools()
+        config = {'base_url': 'https://native-invalid.example/v1', 'model': 'test'}
+        no_call = httpx.Response(
+            200,
+            request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+            json={'choices': [{'finish_reason': 'stop', 'message': {
+                'content': '{"action":"tool","tool_name":"search_papers","arguments":{"query":"must not run"}}',
+            }}]},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=no_call):
+            result = structured(
+                'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+            )
+        self.assertEqual(result.action, 'finish')
+
+        invalid_calls = [
+            [{'type': 'function', 'function': {'name': 'search_papers', 'arguments': '{"query":'}}],
+            [{'type': 'function', 'function': {'name': 'search_papers'}}],
+            [{'type': 'function', 'function': {'name': 'not_registered', 'arguments': '{}'}}],
+            [{'type': 'function', 'function': {'name': 'search_papers', 'arguments': '[]'}}],
+        ]
+        for calls in invalid_calls:
+            with self.subTest(calls=calls), \
+                 patch('src.integrations.model.settings.model_config', return_value=config), \
+                 patch('src.integrations.model.httpx.post', return_value=httpx.Response(
+                     200,
+                     request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+                     json={'choices': [{'finish_reason': 'tool_calls', 'message': {'tool_calls': calls}}]},
+                 )) as post:
+                with self.assertRaises(StructuredOutputError):
+                    structured(
+                        'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                        template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+                    )
+            self.assertEqual(post.call_count, 1)
+            self.assertIsNone(self.diagnostics_mock.call_args.kwargs['response'])
+
+        content_filtered = httpx.Response(
+            200,
+            request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+            json={'choices': [{'finish_reason': 'content_filter', 'message': {'content': ''}}]},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=content_filtered) as post:
+            with self.assertRaises(StructuredOutputError):
+                structured(
+                    'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                    template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+                )
+        self.assertEqual(post.call_count, 1)
+
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        incomplete = ''.join('data: ' + json.dumps(event) + '\n\n' for event in [
+            {'choices': [{'delta': {'tool_calls': [{
+                'index': 0,
+                'type': 'function',
+                'function': {'name': 'search_papers', 'arguments': '{"query":'},
+            }]}}]},
+            {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]},
+        ]) + 'data: [DONE]\n\n'
+        response = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=incomplete)
+        observed = []
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)) as stream:
+            with self.assertRaises(StructuredOutputError):
+                structured(
+                    'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                    template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+                    on_stream=lambda kind, data: observed.append((kind, data)),
+                )
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.failed'])
+        self.assertNotIn('query', json.dumps(observed))
+
+        unmarked = ''.join('data: ' + json.dumps(event) + '\n\n' for event in [
+            {'choices': [{'delta': {'tool_calls': [{
+                'index': 0,
+                'type': 'function',
+                'function': {'name': 'search_papers', 'arguments': '{"query":"complete"}'},
+            }]}}]},
+        ])
+        response = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=unmarked)
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)) as stream:
+            with self.assertRaises(StructuredOutputError):
+                structured(
+                    'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                    template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+                    on_stream=lambda *_: None,
+                )
+        self.assertEqual(stream.call_count, 1)
+
+    def test_native_tool_400_is_not_retried_as_an_optional_parameter_fallback(self):
+        tools = self.native_tools()
+        config = {'base_url': 'https://native-400.example/v1', 'model': 'test'}
+        rejected = httpx.Response(
+            400,
+            request=httpx.Request('POST', config['base_url'] + '/chat/completions'),
+            json={'error': {'message': 'Unsupported parameter: tools', 'param': 'tools'}},
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=rejected) as post:
+            with self.assertRaisesRegex(ModelServiceError, r'HTTP 400'):
+                structured(
+                    'literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                    template_context=self.context('researcher', 'paper', tools), native_tools=tools,
+                )
+        self.assertEqual(post.call_count, 1)
+        self.assertIn('tools', post.call_args.kwargs['json'])
+        self.assertEqual(post.call_args.kwargs['json']['tool_choice'], 'auto')
 
     def test_decision_stages_use_low_effort_and_4096_output_cap_but_writing_stages_are_uncapped(self):
         config = {'base_url': 'https://decision-options.example/v1', 'model': 'test'}
@@ -361,7 +621,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual([item.text for item in result.limitations], ['报告局限。', '章节局限。'])
         self.assertEqual(result.sections[0].paragraphs[0].citations, ['E1'])
 
-    def test_planner_gets_local_filenames_tools_and_role_without_rendering_them_again(self):
+    def test_planner_gets_local_filenames_and_role_without_rendering_context_values_again(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
         context = self.context(
             '科研计划制定者', 'paper',
@@ -377,8 +637,8 @@ class ModelTests(unittest.TestCase):
         self.assertIn('科研计划制定者', system['content'])
         self.assertIn('paper', system['content'])
         self.assertIn('论文规划身份', system['content'])
-        self.assertIn('search_papers', system['content'])
-        self.assertIn('只检索允许范围内的论文', system['content'])
+        self.assertNotIn('search_papers', system['content'])
+        self.assertNotIn('只检索允许范围内的论文', system['content'])
         self.assertIn('<研究图表>.pdf {{ CURRENT_TIME }}', system['content'])
         self.assertNotIn('forged time', system['content'])
         self.assertNotIn('forged schema', system['content'])
@@ -545,7 +805,7 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(structured('runtime/dispatcher', {'question': 'test'}, Output).answer, 'ok')
             system = post.call_args.kwargs['json']['messages'][0]['content']
             self.assertTrue(system.startswith('---\nCURRENT_TIME: '))
-            self.assertIn('（无可调用工具）', system)
+            self.assertNotIn('（无可调用工具）', system)
         finally:
             os.chdir(original_cwd)
 

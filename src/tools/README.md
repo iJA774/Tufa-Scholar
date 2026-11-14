@@ -12,7 +12,7 @@ from src.tools import ToolContext, ToolRegistry
 registry = ToolRegistry()
 context = ToolContext(project_id=1, source="local")
 
-# 名称、中文说明及 JSON Schema，可供调用方展示或生成调用参数。
+# 列出当前来源允许的工具及其参数定义。
 catalog = registry.list_tools(context)
 
 result = registry.invoke(
@@ -48,7 +48,7 @@ evidence = registry.invoke(
 
 每次取证最多处理六条候选。论文从最新有可用文本的版本读取缓存页文本，按查询选出每篇最多六个片段，每段最多 1200 字符，并保留原文版本与页码。摘要和网页片段也最多 1200 字符。页文本和取证边界见 [文献业务说明](../literature/README.md)。
 
-每次 `registry.invoke()` 只执行一次目录工具操作。科研图的 researcher 节点按当前来源使用允许工具，代码限制动作数并处理候选池、搜索重试与证据累积；reporter 汇总研究结果。图层可以将已有候选 ID 映射为 `collect_evidence` 的论文对象，或将已知候选映射成 `read_web_page` 的 URL，但这不改变通用 registry 的真实参数契约。worker 与仓储负责任务阶段和结果保存。工具不自动扫描文件或加载第三方插件。
+每次 `registry.invoke()` 执行一次工具操作。researcher 通过模型服务的原生 Function Calling 发出调用，代码按当前来源校验参数、限制动作数并管理候选与证据。图层将候选 ID 映射为 `collect_evidence` 的论文对象或 `read_web_page` 的 URL。公开的操作目的会展示在活动面板，工具处理函数只接收业务参数。
 
 ## 扩展
 

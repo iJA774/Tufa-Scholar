@@ -1,6 +1,6 @@
 # 科研节点提示词
 
-本目录只包含以下五个科研模型节点；schema、payload 与工具目录由 `src/agents/literature.py` 构造并传入 `structured()`。
+本目录包含以下五个科研模型节点。工作流提供阶段输入，并为工具决策提供当前来源允许的原生函数定义。
 
 | prompt ID | 职责 | 工具权限 |
 |---|---|---|
@@ -12,4 +12,4 @@
 
 `search_mode` 区分 `web`、`paper` 和 `none`；系统提示按模式说明身份及证据边界。planner 可收到本地文献文件名列表；文件名仅用于判断范围，不代表已经读取文献。
 
-问题、历史、候选、用户文档、论文和网页文本保持为不可信数据，不在模板中二次渲染。共同 JSON Schema 规则由 [runtime/structured_output.md](../runtime/structured_output.md) include。模板加载、Jinja2 和上下文契约见 [提示词规则](../AGENTS.md) 与 [提示词规范](../../../docs/PROMPTS.md)。
+问题、历史、候选、用户文档、论文和网页文本始终作为待处理数据。需要校验内容字段的回复使用公共的 [输出契约](../runtime/structured_output.md)。模板加载和上下文见 [提示词规则](../AGENTS.md) 与 [提示词规范](../../../docs/PROMPTS.md)。

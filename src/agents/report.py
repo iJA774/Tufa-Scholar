@@ -1,8 +1,9 @@
 """Deterministic citation and measurement checks used by the reporter node."""
 
+import ipaddress
 import re
 from decimal import Decimal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 
 _UNSAFE = re.compile(
@@ -30,6 +31,11 @@ _MEASURE = re.compile(
     r"(?<![A-Za-z0-9_.,])(?:百分之\s*(" + _NUM + r")|(" + _NUM
     + r")\s*(milliseconds?|seconds?|percent|gib|mib|ms|gb|mb|kg|km|毫秒|秒|%))"
     r"(?![A-Za-z0-9_])",
+    re.I,
+)
+_SENSITIVE_QUERY_KEY = re.compile(
+    r"(?:^|[^a-z0-9])(?:token|secret|key|auth|signature|sig|password|credential|session)(?:$|[^a-z0-9])"
+    r"|(?:access|refresh|api|client)(?:token|key|secret)",
     re.I,
 )
 
@@ -117,20 +123,70 @@ def _safe_http_url(value):
         return ""
 
 
-def reference(evidence):
-    """Render a compact reference line without exposing local filesystem paths."""
+def _safe_markdown_url(value):
+    """Keep useful source query values while removing common credentials."""
+    safe = _safe_http_url(value)
+    if not safe:
+        return ""
+    parts = urlsplit(safe)
+    host = (parts.hostname or "").rstrip(".").casefold()
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".test")) or "." not in host:
+        return ""
+    try:
+        if not ipaddress.ip_address(host).is_global:
+            return ""
+    except ValueError:
+        pass
+    query = [
+        (key, item) for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if not _SENSITIVE_QUERY_KEY.search(key)
+    ]
+    query_text = urlencode(query, doseq=True)
+    link = urlunsplit((parts.scheme, parts.netloc, parts.path, query_text, ""))
+    return quote(link, safe=":/@%?&=+$,;!~*'-._")
+
+
+def reference(evidence, *, markdown=False):
+    """Render a compact reference line, optionally linking a safe public URL."""
     level = evidence.get("source_level", "")
+    title = _safe_title(evidence.get("title", ""))
+    url = _safe_http_url(evidence.get("original_url", ""))
+    if markdown:
+        if title and unsafe_text(title):
+            title = ""
+        title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        title = title.replace("(", "\\(").replace(")", "\\)")
+        if url:
+            # Preserve useful parameters such as article titles, while removing
+            # common credential and one-time access parameters.
+            url = _safe_markdown_url(evidence.get("original_url", ""))
+        source_title = f"[{title or '来源'}]({url})" if url else (title or "来源")
+        identifier = str(evidence.get("id", ""))
+        if unsafe_text(identifier):
+            identifier = ""
+        metadata = [f"证据 {identifier}"] if identifier else []
+    else:
+        source_title = f"[{evidence['id']}] {title}"
     if level in ("web_snippet", "web_content"):
-        label = {"web_snippet": "搜索摘要", "web_content": "网页文本"}.get(level, level)
+        source_kind = {"web_snippet": "搜索摘要", "web_content": "网页文本"}.get(level, level)
         anchor = ""
         if evidence.get("char_start") is not None and evidence.get("char_end") is not None:
             anchor = f" · Markdown 字符区间 {evidence['char_start']}–{evidence['char_end']}（从 0 开始）"
-        return (
-            f"[{evidence['id']}] {_safe_title(evidence.get('title', ''))} · {label} · "
-            f"{evidence.get('provider', '')} · {_safe_http_url(evidence.get('original_url', ''))} · "
-            f"获取于 {evidence.get('retrieved_at', '')}{anchor}"
-        )
+        provider = evidence.get("provider", "")
+        retrieved_at = evidence.get("retrieved_at", "")
+        if markdown:
+            metadata.append(source_kind)
+            if provider and not unsafe_text(str(provider)):
+                metadata.append(str(provider))
+            if retrieved_at and not unsafe_text(str(retrieved_at)):
+                metadata.append(f"获取于 {retrieved_at}")
+            suffix = " · ".join(metadata + ([anchor[3:]] if anchor else []))
+            return f"{source_title} · {suffix}" if suffix else source_title
+        return f"[{evidence['id']}] {title} · {source_kind} · {provider} · {url} · 获取于 {retrieved_at}{anchor}"
     if evidence.get("version_id"):
-        return f"[{evidence['id']}] {_safe_title(evidence.get('title', ''))} · 原文版本 {evidence['version_id']}，第 {evidence.get('page', '')} 页"
-    url = _safe_http_url(evidence.get("original_url", ""))
-    return f"[{evidence['id']}] {_safe_title(evidence.get('title', ''))} · 论文摘要" + (f" · {url}" if url else "")
+        suffix = f"原文版本 {evidence['version_id']}，第 {evidence.get('page', '')} 页"
+        return f"{source_title} · {' · '.join(metadata + [suffix])}" if markdown else f"{source_title} · {suffix}"
+    suffix = "论文摘要"
+    if url and not markdown:
+        suffix += f" · {url}"
+    return f"{source_title} · {' · '.join(metadata + [suffix])}" if markdown else f"{source_title} · {suffix}"

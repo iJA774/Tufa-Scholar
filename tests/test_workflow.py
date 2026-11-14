@@ -414,7 +414,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(payload['rounds'][1]['draft'])
         self.assertGreaterEqual(len(payload['evidence']), 1)
         self.assertEqual([item['id'] for item in evidence], ['a1'])
-        self.assertIn('# 研究报告', content)
+        self.assertIn('# accuracy', content)
+        self.assertIn('## 关键点', content)
+        self.assertIn('## 概述', content)
+        self.assertIn('## 详细分析', content)
+        self.assertIn('## 关键引文', content)
+        self.assertIn('### 综合结果', content)
 
     def test_collection_ignores_history_and_uses_only_snapshot(self):
         selected = paper(7, 'Selected accuracy study', 'Accuracy was 92%.')
@@ -599,7 +604,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('<script>', rendered['content'])
         self.assertNotIn('https://example.org/private', rendered['content'])
         self.assertNotIn('准确率100%', rendered['content'])
-        self.assertIn('## 准确率', rendered['content'])
+        self.assertIn('### 准确率', rendered['content'])
         self.assertEqual([item['id'] for item in rendered['evidence']], ['a1'])
 
     def test_reporter_with_no_valid_citations_restores_vetted_stage_findings(self):
@@ -683,6 +688,10 @@ class WorkflowTests(unittest.TestCase):
         }
         result = workflow._reporter_fallback(state, '报告模型不可用。')
         self.assertIn('# 研究报告', result['content'])
+        self.assertIn('## 关键点', result['content'])
+        self.assertIn('## 概述', result['content'])
+        self.assertIn('## 详细分析', result['content'])
+        self.assertIn('## 关键引文', result['content'])
         self.assertNotIn('# 阶段性研究结果', result['content'])
         self.assertIn('补充样本量及置信区间', result['content'])
         self.assertIn('核对网页原文与更新时间', result['content'])

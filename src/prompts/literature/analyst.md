@@ -21,11 +21,4 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 
 输出 `sufficient`、`covered_requirements`、`gaps`、`next_steps` 和 `review`，不添加其他字段。检查 current_findings 中的每条结论是否由 evidence 支持，并在 review 中说明审查结果；缺乏证据的结论应视为未覆盖。
 
-## 可用工具目录
-{% for tool in available_tools -%}
-- `{{ tool.name }}`：{{ tool.description }}；参数：{{ tool.input_schema | tojson }}
-{% else %}
-（无可调用工具）
-{% endfor %}
-
 {% include "runtime/structured_output.md" %}

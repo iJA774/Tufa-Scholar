@@ -65,7 +65,11 @@ class Draft(BaseModel):
 
 
 class ReporterOutput(Draft):
-    """Structured final report payload; same paragraph/citation contract as a draft."""
+    """Structured final report layout; every prose field uses the claim contract."""
+
+    title: str = Field(default="", max_length=180)
+    key_points: list[Claim] = Field(default_factory=list, max_length=6)
+    overview: list[Claim] = Field(default_factory=list, max_length=2)
 
 
 class DispatcherOutput(BaseModel):
@@ -273,12 +277,15 @@ def _model_template_context(state, search_mode, node_role, available_tools):
     }
 
 
-def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", available_tools=None):
+def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", available_tools=None, native_tools=None):
     research = state["research"]
     template_context = _model_template_context(state, search_mode, node_role, available_tools)
     context = state.get("_event_context")
     if not context:
-        return structured(prompt_id, payload, schema, model_options=research, template_context=template_context)
+        call_options = {"model_options": research, "template_context": template_context}
+        if native_tools is not None:
+            call_options["native_tools"] = native_tools
+        return structured(prompt_id, payload, schema, **call_options)
 
     call_id = context.next_call_id()
 
@@ -309,14 +316,14 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
             return
         context.emit(kind, event_data)
 
-    return structured(
-        prompt_id,
-        payload,
-        schema,
-        model_options=research,
-        template_context=template_context,
-        on_stream=on_stream,
-    )
+    call_options = {
+        "model_options": research,
+        "template_context": template_context,
+        "on_stream": on_stream,
+    }
+    if native_tools is not None:
+        call_options["native_tools"] = native_tools
+    return structured(prompt_id, payload, schema, **call_options)
 
 
 def _payload(state, **extra):
@@ -772,6 +779,26 @@ def _helper_catalog(research, mode):
                 "anyOf": [{"required": ["candidate_id"]}, {"required": ["url"]}],
             }
     return catalog
+
+
+def _native_tool_specs(catalog):
+    """Copy the current helper catalog into provider function definitions."""
+    specs = []
+    for item in catalog:
+        schema = dict(item.get("input_schema") or {})
+        properties = dict(schema.get("properties") or {})
+        properties["reason"] = {
+            "type": "string",
+            "maxLength": 240,
+            "description": "简短说明这次操作对用户的目的，可省略。",
+        }
+        schema["properties"] = properties
+        specs.append({
+            "name": item["name"],
+            "description": item["description"],
+            "input_schema": schema,
+        })
+    return specs
 
 
 def _invoke_tool(state, mode, tool_name, arguments):
@@ -1300,6 +1327,11 @@ def _researcher(state, on_stage):
         else ""
     )
     tools = _helper_catalog(state["research"], mode)
+    native_tools = _native_tool_specs(tools)
+    prompt_tools = [
+        {key: item[key] for key in ("name", "description") if key in item}
+        for item in tools
+    ]
     while (
         action_count < MAX_RESEARCH_ACTIONS
         and actions_used < MAX_RESEARCH_ACTIONS_TOTAL
@@ -1327,12 +1359,13 @@ def _researcher(state, on_stage):
             "search_attempts": search_attempts,
             "search_failures": search_failures,
         }
-        template_context = _model_template_context(state, mode, "researcher", tools)
+        template_context = _model_template_context(state, mode, "researcher", prompt_tools)
         input_units = structured_input_units(
             "literature/researcher",
             payload,
             ResearchActionOutput,
             template_context=template_context,
+            native_tools=native_tools,
         )
         projected_input_units = decision_input_units + input_units
         if (
@@ -1366,7 +1399,8 @@ def _researcher(state, on_stage):
                 ResearchActionOutput,
                 node_role="researcher",
                 search_mode=mode,
-                available_tools=tools,
+                available_tools=prompt_tools,
+                native_tools=native_tools,
             )
         except (ModelServiceError, StructuredOutputError):
             state["errors"].append(_safe_error("researcher", "model_failed", "研究模型不可用，保留已收集证据并继续生成缺口说明。"))
@@ -1670,64 +1704,189 @@ def _coder(state, on_stage):
     return {"coder_status": "placeholder", "last_completed": "coder"}
 
 
+def _claim_parts(claim):
+    if isinstance(claim, dict):
+        return claim.get("text", ""), claim.get("citations", [])
+    return getattr(claim, "text", ""), getattr(claim, "citations", [])
+
+
+def _safe_report_title(value):
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"\s+", " ", value).strip().strip("# ").strip()
+    if (
+        not text
+        or len(text) > 120
+        or re.match(r"^(?:[a-z]:[\\/]|[/\\]{2}|/)", text, re.I)
+        or validate_claim(text, [], {}, allow_uncited=True)[1] == "格式或引用不安全"
+        or re.search(r"[\[\]{}|`<>*_~\\]", text)
+    ):
+        return ""
+    return text
+
+
+def _report_title(draft, fallback):
+    candidate = _safe_report_title(getattr(draft, "title", ""))
+    if candidate:
+        return candidate
+    candidate = _safe_report_title(fallback)
+    return candidate or "研究报告"
+
+
+def _report_reference(item):
+    """Build a linked reference from validated evidence and its stored trace fields."""
+    return "- " + reference(item, markdown=True)
+
+
 def _render_draft(draft, evidence, source, *, title, caveats=None, allowed_paper_ids=None, visible_ids=None):
     evidence_by_id = {item["id"]: item for item in evidence}
     permitted_ids = set(visible_ids) if visible_ids is not None else set(evidence_by_id)
     used_ids = set()
     rejected = []
-    lines = [title]
-    for section in draft.sections:
-        accepted = []
-        section_ids = []
-        for claim in section.paragraphs:
-            if any(identifier not in permitted_ids for identifier in claim.citations):
-                rejected.append("引用不在报告工作证据范围内")
-                continue
-            cited, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_paper_ids)
-            if reason:
-                rejected.append(reason)
-                continue
-            accepted.append(claim)
-            used_ids.update(item["id"] for item in cited)
-            section_ids.extend(claim.citations)
-        if accepted:
-            _, heading_error = validate_claim(section.heading, list(dict.fromkeys(section_ids)), evidence_by_id, allowed_paper_ids)
-            heading = section.heading if not heading_error else "研究发现"
-            if heading_error:
-                rejected.append("章节标题未通过格式或数值依据检查")
-            lines.append("## " + heading)
-            for claim in accepted:
-                citations = " ".join(f"[{item}]" for item in claim.citations)
-                lines.append(claim.text + (" " + citations if citations else ""))
-    accepted_limitations = []
-    for claim in draft.limitations:
-        if any(identifier not in permitted_ids for identifier in claim.citations):
-            rejected.append("局限引用不在报告工作证据范围内")
-            continue
-        cited, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_paper_ids, allow_uncited=True, is_limitation=True)
+
+    def validate(item, *, allow_uncited=False, is_limitation=False):
+        text, citations = _claim_parts(item)
+        if not isinstance(text, str) or not text.strip() or not isinstance(citations, list):
+            rejected.append("报告字段格式无效")
+            return None
+        if any(identifier not in permitted_ids for identifier in citations):
+            rejected.append("引用不在报告工作证据范围内")
+            return None
+        cited, reason = validate_claim(
+            text, citations, evidence_by_id, allowed_paper_ids,
+            allow_uncited=allow_uncited, is_limitation=is_limitation,
+        )
         if reason:
             rejected.append(reason)
-            continue
-        accepted_limitations.append(claim)
+            return None
         used_ids.update(item["id"] for item in cited)
-    if accepted_limitations:
+        return Claim(text=text, citations=citations)
+
+    def unique_claims(items, limit):
+        result = []
+        seen = set()
+        for item in items:
+            key = re.sub(r"\s+", " ", item.text).strip().casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+            if len(result) >= limit:
+                break
+        return result
+
+    accepted_sections = []
+    section_claims = []
+    for section in getattr(draft, "sections", []) or []:
+        heading = section.get("heading", "") if isinstance(section, dict) else getattr(section, "heading", "")
+        paragraphs = section.get("paragraphs", []) if isinstance(section, dict) else getattr(section, "paragraphs", [])
+        accepted = []
+        section_ids = []
+        for item in paragraphs or []:
+            claim = validate(item)
+            if claim:
+                accepted.append(claim)
+                section_claims.append(claim)
+                section_ids.extend(claim.citations)
+        if accepted:
+            _, heading_error = validate_claim(
+                heading, list(dict.fromkeys(section_ids)), evidence_by_id, allowed_paper_ids,
+            )
+            if heading_error or not isinstance(heading, str):
+                heading = "证据支持的发现"
+                rejected.append("章节标题未通过格式或数值依据检查")
+            accepted_sections.append((heading, accepted))
+
+    accepted_points = []
+    for item in getattr(draft, "key_points", []) or []:
+        claim = validate(item)
+        if claim:
+            accepted_points.append(claim)
+    accepted_overview = []
+    for item in getattr(draft, "overview", []) or []:
+        claim = validate(item)
+        if claim:
+            accepted_overview.append(claim)
+
+    points = unique_claims(accepted_points, 6)
+    if len(points) < 4:
+        points = unique_claims([*points, *section_claims], 4)
+    if len(points) < 4:
+        points = unique_claims([*points, *accepted_overview], 4)
+    point_texts = {item.text.casefold() for item in points}
+    overview = unique_claims(
+        [item for item in accepted_overview if item.text.casefold() not in point_texts], 2,
+    )
+    if not overview:
+        overview = unique_claims(
+            [item for item in section_claims if item.text.casefold() not in point_texts], 2,
+        )
+    if not overview:
+        overview = unique_claims(accepted_overview or section_claims or points, 2)
+
+    accepted_limitations = []
+    for item in getattr(draft, "limitations", []) or []:
+        claim = validate(item, allow_uncited=True, is_limitation=True)
+        if claim:
+            accepted_limitations.append(claim)
+
+    lines = ["# " + _report_title(draft, title), "## 关键点"]
+
+    def claim_line(claim):
+        citations = " ".join(f"[{item}]" for item in claim.citations)
+        return claim.text + (" " + citations if citations else "")
+
+    if points:
+        lines.extend("- " + claim_line(item) for item in points)
+    else:
+        missing = "当前没有通过引用校验的结论。"
+        if not validate_claim(missing, [], evidence_by_id, allowed_paper_ids, allow_uncited=True)[1]:
+            lines.append("- " + missing)
+
+    lines.append("## 概述")
+    if overview:
+        lines.extend(claim_line(item) for item in overview)
+    else:
+        missing = "本次没有可引用资料，尚不能形成有证据支持的概述。"
+        if not validate_claim(missing, [], evidence_by_id, allowed_paper_ids, allow_uncited=True)[1]:
+            lines.append(missing)
+
+    lines.append("## 详细分析")
+    if accepted_sections:
+        for heading, claims in accepted_sections:
+            lines.append("### " + heading)
+            lines.extend(claim_line(item) for item in claims)
+    elif points:
+        lines.append("### 证据支持的发现")
+        lines.extend(claim_line(item) for item in points[:6])
+    else:
+        missing = "当前没有通过引用校验的详细分析内容。"
+        if not validate_claim(missing, [], evidence_by_id, allowed_paper_ids, allow_uncited=True)[1]:
+            lines.append(missing)
+
+    if accepted_limitations or caveats:
         lines.append("## 局限与缺口")
-        for claim in accepted_limitations:
-            citations = " ".join(f"[{item}]" for item in claim.citations)
-            lines.append(claim.text + (" " + citations if citations else ""))
-    if caveats:
-        lines.append("## 局限与待核查")
-        lines.extend(caveats)
-    source_label = {"auto": "自动选择", "local": "项目文献", "openalex": "OpenAlex", "all": "项目与外部论文", "collection": "收藏夹快照", "web": "网页"}.get(source, source)
-    lines.append("初始来源偏好：" + source_label + "。")
+        lines.extend(claim_line(item) for item in accepted_limitations)
+        for caveat in caveats or []:
+            if isinstance(caveat, str) and not validate_claim(
+                caveat, [], evidence_by_id, allowed_paper_ids, allow_uncited=True, is_limitation=True,
+            )[1]:
+                lines.append(caveat)
+            else:
+                rejected.append("系统局限说明未通过格式或数值依据检查")
+
+    used_ids = {
+        identifier
+        for claim in (
+            [claim for _, claims in accepted_sections for claim in claims]
+            + points + overview + accepted_limitations
+        )
+        for identifier in claim.citations
+    }
     kept = [item for item in evidence if item.get("id") in used_ids]
-    used_modes = {item.get("research_source") for item in kept if item.get("research_source")}
-    if used_modes:
-        actual_labels = {"paper": "论文", "web": "网页"}
-        lines.append("本次引用资料：" + "、".join(actual_labels.get(mode, mode) for mode in ("paper", "web") if mode in used_modes) + "。")
     if kept:
-        lines.append("## 参考证据")
-        lines.extend(reference(item) for item in kept)
+        lines.append("## 关键引文")
+        lines.extend(_report_reference(item) for item in kept)
     return {"content": "\n\n".join(lines), "evidence": kept, "rejected": rejected}
 
 
@@ -1946,7 +2105,7 @@ def _reporter(state, on_stage):
         result,
         working,
         state["research"]["source"],
-        title="# 研究报告",
+        title=state["research"].get("query") or "研究报告",
         caveats=caveats,
         allowed_paper_ids=allowed,
         visible_ids=visible_ids,
