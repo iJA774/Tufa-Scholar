@@ -94,6 +94,34 @@ function eventState(event: RunEvent) {
 
 type ActivityEntry = { event: RunEvent; ending?: RunEvent };
 
+function FileActivityIcon() {
+  // The outline follows the page geometry in File Check.json at a static frame.
+  return <svg viewBox="-12 -12 24 24" aria-hidden="true"><g transform="scale(.085)"><path vectorEffect="non-scaling-stroke" d="M85-96v192q0 19.4-19.4 19.4h-131.45q-19.4 0-19.4-19.4v-160l50.25-50.9H65.6Q85-115.4 85-96Z" /><path vectorEffect="non-scaling-stroke" d="M-85.25-64.5H-35v-50.9m-40 85h74m-74 25h74" /></g></svg>;
+}
+
+function ActivityIcon({ event, complete }: { event: RunEvent; complete: boolean }) {
+  if (complete) {
+    // CircleCheck.tsx provides the exact check mark path and circle used here.
+    return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" /></svg>;
+  }
+
+  const tool = textField(event.data, "tool");
+  const node = textField(event.data, "node");
+  if (tool.startsWith("search_") || node === "background_investigator") {
+    // Search.json's Loupe layers supply the circle and handle proportions at a static frame.
+    return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="8.2" /><path d="m15.7 15.7 4.2 4.2" /></svg>;
+  }
+  if (tool === "read_web_page" || tool === "collect_evidence") {
+    return <FileActivityIcon />;
+  }
+  if (["planner", "supervisor", "coder"].includes(node)) return <span className={styles.activityGearIcon} aria-hidden="true" />;
+  if (node === "reporter") {
+    // edit.tsx supplies the pen path, kept as its original static SVG geometry.
+    return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.378 12.626a1 1 0 0 0-3.004-3.004l-4.01 4.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" /><path d="M8 18h1" /></svg>;
+  }
+  return <FileActivityIcon />;
+}
+
 function mergeActivityEvents(events: RunEvent[]) {
   const entries: ActivityEntry[] = [];
   const openNodes = new Map<string, number[]>();
@@ -152,6 +180,8 @@ export default function ResearchPanel({ run, report, events, open, status, stage
   const [hasEntered, setHasEntered] = useState(false);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activityViewport = useRef<HTMLElement>(null);
+  const [activityExpanded, setActivityExpanded] = useState<Record<string, boolean>>({});
+  const [draftExpanded, setDraftExpanded] = useState<Record<string, boolean>>({});
   const followActivity = useRef(true);
   const reportId = report?.metadata?.report_id;
   const reportTabId = `research-report-tab-${run.id}`;
@@ -161,6 +191,8 @@ export default function ResearchPanel({ run, report, events, open, status, stage
 
   useEffect(() => {
     tabWasChosen.current = false;
+    setActivityExpanded({});
+    setDraftExpanded({});
   }, [run.id]);
 
   useEffect(() => {
@@ -276,15 +308,23 @@ export default function ResearchPanel({ run, report, events, open, status, stage
               return [{ key: `${event.id}-${index}`, title: sourceTitle, href }];
             });
             const isFailed = displayEvent.kind.endsWith("failed");
-            const isComplete = !!ending || displayEvent.kind.endsWith("completed");
+            const isComplete = !isFailed && displayEvent.kind.endsWith("completed");
+            const activityKey = `${run.id}:${event.id}`;
+            const collapsedByDefault = isComplete && !isFailed;
+            const heading = eventHeading(combinedEvent);
+            const detailsId = `activity-details-${run.id}-${event.id}`;
+            const hasDetails = !!(message || reason || query || title || url || sourceItems.length || (displayEvent.kind === "node.completed" && node === "planner" && (source || action)));
+            const isExpanded = hasDetails && (activityExpanded[activityKey] ?? !collapsedByDefault);
             return <li key={event.id} className={`${styles.liveActivityItem} ${isFailed ? styles.liveActivityFailed : isComplete ? styles.liveActivityComplete : ""}`}>
               <div className={styles.liveActivityHeading}>
-                <span className={styles.liveActivityMark} aria-hidden="true" />
-                <strong>{eventHeading(combinedEvent)}</strong>
-                <small>{isFailed ? "失败" : isComplete ? "完成" : eventState(event)}</small>
+                <span className={styles.liveActivityMark} aria-hidden="true">{isFailed ? null : <ActivityIcon event={event} complete={isComplete} />}</span>
+                {isComplete && hasDetails ? <button type="button" className={styles.liveActivityToggle} aria-expanded={isExpanded} aria-controls={isExpanded ? detailsId : undefined} aria-label={`${isExpanded ? "收起" : "展开"}活动：${heading}`} onClick={() => setActivityExpanded(current => ({ ...current, [activityKey]: !isExpanded }))}>
+                  <strong>{heading}</strong><small>完成</small><span className={`${styles.liveActivityChevron} ${isExpanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
+                </button> : <><strong className={active && !isComplete && !isFailed ? styles.liveActivityShimmer : ""}>{heading}</strong><small>{isFailed ? "失败" : isComplete ? "完成" : active ? eventState(event) : "未完成"}</small></>}
               </div>
+              {hasDetails && (!isComplete || isExpanded) && <div id={detailsId} className={styles.liveActivityDetails}>
               {displayEvent.kind === "node.completed" && node === "planner" && (source || action) && <p className={styles.liveActivityDetail}>{[source && `选择${sourceName(source)}线路`, action && actionName(action)].filter(Boolean).join(" · ")}</p>}
-              {message && <p className={styles.liveActivityDetail}>{message}</p>}
+              {message && <p className={isFailed ? styles.liveActivityError : styles.liveActivityDetail}>{message}</p>}
               {event.kind === "tool.started" && reason && <p className={styles.toolReason}>{reason}</p>}
               {query && <p className={styles.liveActivityDetail}>检索词：{query}</p>}
               {title && <p className={styles.liveActivityDetail}>{url ? <a href={url} target="_blank" rel="noopener noreferrer">{title} ↗</a> : title}</p>}
@@ -292,33 +332,51 @@ export default function ResearchPanel({ run, report, events, open, status, stage
               {sourceItems.length > 0 && <ul className={styles.liveActivitySources}>
                 {sourceItems.map(item => <li key={item.key}>{item.href ? <a href={item.href} target="_blank" rel="noopener noreferrer">{item.title} ↗</a> : <span>{item.title}</span>}</li>)}
               </ul>}
-              {isFailed && message && <p className={styles.liveActivityError}>{message}</p>}
+              </div>}
               {event !== timeline[timeline.length - 1]?.event && <hr />}
             </li>;
           })}
         </ol>}
         {activityPreviews.length > 0 && <section className={styles.liveDrafts} aria-label="模型实时输出">
-          {activityPreviews.map(preview => <article className={styles.streamedDraft} key={preview.key}>
-            <div><strong>{preview.node === "reporter" ? "报告草稿" : "研究草稿"}</strong><span>实时输出 · 未核验{preview.status === "complete" ? " · 已生成" : ""}</span></div>
-            <p>{preview.text}</p>
-          </article>)}
+          {activityPreviews.map(preview => {
+            const draftKey = `${run.id}:${preview.key}`;
+            const complete = preview.status === "complete";
+            const expanded = draftExpanded[draftKey] ?? !complete;
+            const title = preview.node === "reporter" ? "报告草稿" : "研究草稿";
+            const draftDetailsId = `draft-details-${run.id}-${preview.key}`;
+            return <article className={styles.streamedDraft} key={preview.key}>
+              {complete ? <button type="button" className={styles.liveActivityToggle} aria-expanded={expanded} aria-controls={expanded ? draftDetailsId : undefined} onClick={() => setDraftExpanded(current => ({ ...current, [draftKey]: !expanded }))}>
+                <strong>{title}</strong><small>实时输出 · 未核验 · 已生成</small><span className={`${styles.liveActivityChevron} ${expanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
+              </button> : <div><strong className={active ? styles.liveActivityShimmer : ""}>{title}</strong><span>实时输出 · 未核验</span></div>}
+              {expanded && <p id={draftDetailsId}>{preview.text}</p>}
+            </article>;
+          })}
         </section>}
         {subtasks.length ? <ol className={styles.activityList}>
-          {subtasks.map((step, index) => <li className={styles.activityItem} key={`${run.id}-${step.index}`} style={index < 10 ? { animationDelay: `${Math.min(index * .05, .5)}s` } as CSSProperties : undefined}>
-            <h3>{step.task}</h3>
-            <span className={styles.subtaskStatus}>{subtaskStatus(step.status)}</span>
-            {step.findings?.map((finding, findingIndex) => <p key={`${step.index}-finding-${findingIndex}`}>{finding.text}{finding.citations.length ? ` ${finding.citations.map(id => `[${id}]`).join(" ")}` : ""}</p>)}
-            {step.sources?.length > 0 && <ul className={styles.sourceChips}>
-              {step.sources.map((source, sourceIndex) => {
-                const href = safeSourceUrl(source.original_url);
-                return <li className={styles.sourceChip} key={`${step.index}-${source.id}`} style={sourceIndex < 6 ? { animationDelay: `${Math.min(sourceIndex * .05, .3)}s` } : undefined}>
-                  {href ? <a href={href} target="_blank" rel="noopener noreferrer">{source.title || source.id}</a> : <span>{source.title || source.id}</span>}
-                </li>;
-              })}
-            </ul>}
-            {step.gap && <p className={styles.gapText}>{step.gap}</p>}
-            {index !== subtasks.length - 1 && <hr />}
-          </li>)}
+          {subtasks.map((step, index) => {
+            const key = `subtask:${run.id}:${step.index}`;
+            const hasDetails = !!(step.findings?.length || step.sources?.length || step.gap);
+            const expanded = hasDetails && (activityExpanded[key] ?? false);
+            const detailsId = `subtask-details-${run.id}-${step.index}`;
+            return <li className={styles.activityItem} key={`${run.id}-${step.index}`} style={index < 10 ? { animationDelay: `${Math.min(index * .05, .5)}s` } as CSSProperties : undefined}>
+              {hasDetails ? <button type="button" className={styles.subtaskToggle} aria-expanded={expanded} aria-controls={expanded ? detailsId : undefined} onClick={() => setActivityExpanded(current => ({ ...current, [key]: !expanded }))}>
+                <strong>{step.task}</strong><span className={styles.subtaskStatus}>{subtaskStatus(step.status)}</span><span className={`${styles.liveActivityChevron} ${expanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
+              </button> : <><h3>{step.task}</h3><span className={styles.subtaskStatus}>{subtaskStatus(step.status)}</span></>}
+              {hasDetails && expanded && <div id={detailsId} className={styles.subtaskDetails}>
+                {step.findings?.map((finding, findingIndex) => <p key={`${step.index}-finding-${findingIndex}`}>{finding.text}{finding.citations.length ? ` ${finding.citations.map(id => `[${id}]`).join(" ")}` : ""}</p>)}
+                {step.sources?.length > 0 && <ul className={styles.sourceChips}>
+                  {step.sources.map((source, sourceIndex) => {
+                    const href = safeSourceUrl(source.original_url);
+                    return <li className={styles.sourceChip} key={`${step.index}-${source.id}`} style={sourceIndex < 6 ? { animationDelay: `${Math.min(sourceIndex * .05, .3)}s` } : undefined}>
+                      {href ? <a href={href} target="_blank" rel="noopener noreferrer">{source.title || source.id}</a> : <span>{source.title || source.id}</span>}
+                    </li>;
+                  })}
+                </ul>}
+                {step.gap && <p className={styles.gapText}>{step.gap}</p>}
+              </div>}
+              {index !== subtasks.length - 1 && <hr />}
+            </li>;
+          })}
         </ol> : timeline.length === 0 && activityPreviews.length === 0 ? <p className={styles.emptyState}>当前任务暂未返回研究活动。</p> : null}
       </section>
     </div>
