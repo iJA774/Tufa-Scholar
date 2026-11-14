@@ -8,4 +8,5 @@
 - 模型节点只使用 `src/prompts/` 中六个真实模板。调用前核对 payload、Pydantic schema、`search_mode`、`available_tools` 和 `local_papers`；受信系统模板才经 Jinja2 渲染，用户输入、history、候选与证据作为数据单独传入。同步维护 [提示词规则](../prompts/AGENTS.md)。
 - 候选池按 web/paper 分开；不同查询排名以 RRF 合并，同查询不重复加权，入池前不能按精读上限截断。累计证据跨轮保留并保证本次运行内引用 ID 唯一；每个模型输入遵循条数与文本长度上限。
 - 研究问题、history、项目和来源范围作为输入；Agent 不接收数据库任务行、不查询任务历史、不修改任务状态。collection 忽略外部 history，调用方传入提交时论文快照。阶段和研究小结通过回调通知运行器，worker 与仓储负责生命周期及持久化。
+- `on_event(kind, data)` 只发送可公开的节点进度、工具活动及正文预览。工具 `reason` 是简短的用户可见操作目的，不能作为工具执行参数，内部推理不进入活动流。
 - 检索和取证经 [工具入口](../tools/AGENTS.md) 调用，算法见 [文献模块](../literature/AGENTS.md)。修改图节点时验证 direct、证据不足、服务失败、来源切换、两轮上限和 reporter 收束路径；使用 [工作流测试规则](../../tests/AGENTS.md) 区分模拟与真实服务验收。

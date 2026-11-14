@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -89,6 +90,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
         content = json.dumps(result, ensure_ascii=False)
         prompt_tokens = max(1, len(system) // 4) + max(1, len(messages[1].get('content', '')) // 4) if len(messages) > 1 else max(1, len(system) // 4)
         completion_tokens = max(1, len(content) // 4)
+        if request.get('stream') and role == 'reporter' and 'stream-fixture' in payload.get('question', ''):
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+            self.end_headers()
+            for index in range(0, len(content), 24):
+                delta = {'content': content[index:index + 24], 'reasoning_content': 'private-fixture-sentinel'}
+                body = {'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]}
+                self.wfile.write(f'data: {json.dumps(body, ensure_ascii=False)}\n\n'.encode('utf-8'))
+                self.wfile.flush()
+                time.sleep(0.08)
+            self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+            return
         self._send_json({
             'choices': [{'message': {'content': content}}],
             'usage': {
@@ -164,6 +177,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return {
                     'action': 'tool',
                     'tool_name': 'collect_evidence',
+                    'reason': '核对搜索结果中的准确率。',
                     'arguments': {'query': question, 'candidate_ids': [candidates[0]['candidate_id']]},
                     'draft': {'sections': [], 'limitations': []},
                     'findings': [],

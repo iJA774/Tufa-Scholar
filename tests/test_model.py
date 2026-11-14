@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -355,6 +356,131 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(output.count('prompt_tokens=100'), 2)
         self.assertEqual(output.count('completion_tokens=5'), 2)
         self.assertEqual(output.count('total_tokens=105'), 2)
+
+    def test_streaming_reads_only_sse_content_and_coalesces_small_chunks(self):
+        request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
+        events = [
+            {'choices': [{'delta': {'reasoning_content': 'private reasoning', 'content': '{"ans'}}]},
+            {'choices': [{'delta': {'reasoning_content': 'more private reasoning', 'content': 'wer":"'}}]},
+            {'choices': [{'delta': {'content': 'ok"}'}}], 'usage': {'prompt_tokens': 11, 'completion_tokens': 4, 'total_tokens': 15}},
+        ]
+        payload = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events) + 'data: [DONE]\n\n'
+        response = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=payload)
+        observed = []
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': 'private-key'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)) as stream, \
+             self.assertLogs('src.integrations.model', level='INFO') as logs:
+            result = structured('literature/researcher', {'phase': 'act', 'question': 'private prompt'}, Output,
+                                on_stream=lambda kind, data: observed.append((kind, data)))
+
+        self.assertEqual(result.answer, 'ok')
+        body = stream.call_args.kwargs['json']
+        self.assertTrue(body['stream'])
+        self.assertNotIn('stream_options', body)
+        self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.completed'])
+        self.assertEqual(''.join(data['text'] for kind, data in observed if kind == 'model.delta'), '{"answer":"ok"}')
+        self.assertTrue(all(data['attempt'] == 1 and data['phase'] == 'act' for _, data in observed))
+        public_events = json.dumps(observed, ensure_ascii=False)
+        self.assertNotIn('private reasoning', public_events)
+        self.assertNotIn('private prompt', public_events)
+        self.assertIn('prompt_tokens=11', ' '.join(logs.output))
+
+    def test_stream_mode_accepts_ordinary_json_when_provider_ignores_stream_flag(self):
+        response = httpx.Response(
+            200,
+            request=httpx.Request('POST', 'https://example.invalid/v1/chat/completions'),
+            headers={'content-type': 'application/json'},
+            stream=httpx.ByteStream(json.dumps({'choices': [{'message': {'content': '{"answer":"ok"}'}}]}).encode()),
+        )
+        observed = []
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)) as stream:
+            result = structured('runtime/dispatcher', {'phase': 'query'}, Output,
+                                on_stream=lambda kind, data: observed.append((kind, data)))
+
+        self.assertEqual(result.answer, 'ok')
+        self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.completed'])
+        self.assertEqual(observed[1][1]['text'], '{"answer":"ok"}')
+        self.assertTrue(stream.call_args.kwargs['json']['stream'])
+
+    def test_stream_mode_retries_without_stream_only_after_explicit_parameter_rejection(self):
+        rejected = httpx.Response(
+            400,
+            request=httpx.Request('POST', 'https://example.invalid/v1/chat/completions'),
+            headers={'content-type': 'application/json'},
+            stream=httpx.ByteStream(json.dumps({'error': {'message': 'Unsupported parameter: stream', 'param': 'stream'}}).encode()),
+        )
+        observed = []
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(rejected)) as stream, \
+             patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+            result = structured('runtime/dispatcher', {}, Output,
+                                on_stream=lambda kind, data: observed.append((kind, data)))
+        self.assertEqual(result.answer, 'ok')
+        self.assertEqual(stream.call_count, 1)
+        self.assertNotIn('stream', post.call_args.kwargs['json'])
+        self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.completed'])
+
+    def test_streaming_redacts_known_key_even_when_split_across_sse_chunks(self):
+        request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
+        secret = 'the-secret-key'
+        content = '{"answer":"12345678901234567890' + secret + '"}'
+        chunks = [content[:40], content[40:]]
+        encoded = ''.join(
+            'data: ' + json.dumps({'choices': [{'delta': {'content': chunk}}]}) + '\n\n'
+            for chunk in chunks
+        ) + 'data: [DONE]\n\n'
+        response = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=encoded)
+        observed = []
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': secret}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)):
+            result = structured('runtime/dispatcher', {}, Output,
+                                on_stream=lambda kind, data: observed.append((kind, data)))
+        self.assertIn(secret, result.answer)
+        emitted = ''.join(data['text'] for kind, data in observed if kind == 'model.delta')
+        self.assertNotIn(secret, emitted)
+        self.assertIn('[REDACTED]', emitted)
+
+    def test_stream_validation_retry_has_distinct_attempt_and_transport_failure_is_not_retried(self):
+        request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
+
+        def sse(content):
+            body = 'data: ' + json.dumps({'choices': [{'delta': {'content': content}}]}) + '\n\ndata: [DONE]\n\n'
+            return httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=body)
+
+        responses = [sse('{}'), sse('{"answer":"ok"}')]
+        observed = []
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
+             patch('src.integrations.model.httpx.stream', side_effect=lambda *args, **kwargs: nullcontext(responses.pop(0))) as stream:
+            result = structured('runtime/dispatcher', {}, Output,
+                                on_stream=lambda kind, data: observed.append((kind, data)))
+        self.assertEqual(result.answer, 'ok')
+        self.assertEqual(stream.call_count, 2)
+        self.assertEqual([data['attempt'] for kind, data in observed if kind == 'model.started'], [1, 2])
+        self.assertEqual([data['attempt'] for kind, data in observed if kind == 'model.completed'], [2])
+        self.assertEqual([data['attempt'] for kind, data in observed if kind == 'model.failed'], [1])
+
+        partial = unittest.mock.Mock()
+        partial.headers = {'content-type': 'text/event-stream'}
+        partial.status_code = 200
+        partial.raise_for_status.return_value = None
+
+        def interrupted_lines():
+            yield 'data: ' + json.dumps({'choices': [{'delta': {'content': '{"answer"'}}]})
+            raise httpx.ReadTimeout('private timeout detail')
+
+        partial.iter_lines.return_value = interrupted_lines()
+        failed_events = []
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(partial)) as stream:
+            with self.assertRaises(ModelServiceError):
+                structured('runtime/dispatcher', {}, Output,
+                           on_stream=lambda kind, data: failed_events.append((kind, data)))
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual([kind for kind, _ in failed_events], ['model.started', 'model.delta', 'model.failed'])
+        self.assertNotIn('private timeout detail', json.dumps(failed_events))
 
 
 if __name__ == '__main__':

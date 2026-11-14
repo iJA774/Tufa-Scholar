@@ -56,7 +56,7 @@ pnpm dev:web
 
 在提问框切换“深度研究”或“快速探索”并输入问题。深度研究无条件进入研究流程；快速探索无条件直接回答，不调用检索工具。重试沿用原任务模式。设置中的“通用”可选择本次模型、思考强度及发送快捷键；“研究偏好”仅展示禁用的占位控件，不影响后端。
 
-深度研究会先由背景调查搜索和筛选资料，再规划至多两轮，最后生成终稿。提交深度研究后，聊天收窄并展开右侧研究卡片；“活动”显示当前阶段、已记录的小结和来源，“报告”在结果可用后展示正文，卡片可关闭和重新打开。双栏布局和动画移植自 DeerFlow。快速探索继续在聊天中显示状态和回答。完成后可查看回答、引用和证据。
+深度研究会先由背景调查搜索和筛选资料，再规划至多两轮，最后生成终稿。提交深度研究后，右侧“活动”会逐步显示节点进度、规划路线、搜索结果、正在读取的网页和工具操作理由。支持流式响应的模型会边生成边显示正文预览。任务完成后显示通过校验并保存的报告和引用。快速探索的回答预览显示在聊天区。
 
 点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文件”可打开浏览器的目录选择器，预览选中目录及子目录中的文件名。“关于”在新标签页打开项目的 GitHub 仓库。
 
@@ -81,6 +81,7 @@ pnpm dev:web
 | `GET /projects/{project_id}/web-search?q=...` | 独立网页搜索 |
 | `POST /projects/{project_id}/questions` | 提交科研问题 |
 | `GET /runs/{run_id}`、`POST /runs/{run_id}/retry` | 查询或重试任务 |
+| `GET /runs/{run_id}/events?after=0` | 订阅研究事件，按事件 ID 续读 |
 | `GET /conversations/{conversation_id}/messages` | 查询对话消息和证据 |
 | `GET /reports/{report_id}/markdown`、`GET /reports/{report_id}/evidence.csv` | 下载报告或证据表 |
 
@@ -92,6 +93,11 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 ```
 
 ## 验证
+
+### 实时研究活动与流式输出（2026-11-14）
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 165 项测试。隔离运行 `.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 均通过。网页脚本使用模拟上游 SSE，验证正文片段在报告保存前可达，工具理由和规划路线存在，断线游标可续读。
+- `pnpm check:web`、`pnpm build:web` 通过。浏览器经本机 Next 代理和隔离 API 检查真实 SSE 事件渲染，包括路线、网页链接、灰色理由、活动分隔线、报告草稿、保存的终稿和关闭重开。浏览器事件由隔离 fixture 提供，未调用真实模型或搜索服务。
 
 ### 网页读取与终稿收束（2026-11-14）
 

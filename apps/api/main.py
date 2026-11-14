@@ -1,7 +1,9 @@
 """Local API for projects, imported papers, and retrieval tasks."""
 from contextlib import asynccontextmanager
+import asyncio
 import csv
 import io
+import json
 import logging
 import os
 import time
@@ -13,7 +15,7 @@ from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 from pypdf import PdfReader
 
@@ -492,6 +494,40 @@ def get_run(run_id: int):
     if not task:
         raise HTTPException(404, '任务不存在')
     return task
+
+
+@app.get('/runs/{run_id}/events')
+async def stream_research_events(run_id: int, request: Request, after: int = Query(0, ge=0, le=9223372036854775807)):
+    if not await asyncio.to_thread(repo.get_task, run_id):
+        raise HTTPException(404, '任务不存在')
+    cursor = after
+    last_id = request.headers.get('last-event-id', '')
+    if last_id.isascii() and last_id.isdecimal() and len(last_id) <= 19:
+        cursor = max(cursor, min(int(last_id), 9223372036854775807))
+
+    async def events():
+        nonlocal cursor
+        yield ': connected\n\n'
+        last_sent = time.monotonic()
+        while not await request.is_disconnected():
+            status, batch = await asyncio.to_thread(repo.research_event_batch, run_id, cursor)
+            for event in batch:
+                cursor = event['id']
+                yield f'id: {cursor}\nevent: research\ndata: {json.dumps(event, ensure_ascii=False)}\n\n'
+                last_sent = time.monotonic()
+            if len(batch) == 100:
+                continue
+            if status not in ('pending', 'queued', 'running'):
+                break
+            if time.monotonic() - last_sent >= 10:
+                yield ': keep-alive\n\n'
+                last_sent = time.monotonic()
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(events(), media_type='text/event-stream', headers={
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
+    })
 
 
 @app.post('/runs/{run_id}/retry', status_code=201)

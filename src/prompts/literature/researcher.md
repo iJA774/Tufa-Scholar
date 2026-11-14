@@ -28,7 +28,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 
 初稿不是最终报告；reporter 会综合研究结果并生成最终报告。不得把未验证的推断写成事实。
 
-输出字段为 action、tool_name、arguments、draft 和 findings。tool 动作必须填写目录中的 tool_name 和参数对象；finish 动作提交 draft（sections、limitations）及 findings（text、citations），每个引用 ID 必须属于输入 evidence。没有可引用的研究发现时 citations 留空。
+输出字段为 action、tool_name、arguments、reason、draft 和 findings。tool 动作必须填写目录中的 tool_name 和参数对象，并用 `reason` 写一句简短、面向用户的工具用途说明；它会直接显示给用户，不要写隐藏推理、思维链或内部分析，也不要把它加入工具参数。finish 动作时 `reason` 留空，并提交 draft（sections、limitations）及 findings（text、citations）；每个引用 ID 必须属于输入 evidence。没有可引用的研究发现时 citations 留空。
 
 ## 可用工具目录
 {% for tool in available_tools -%}

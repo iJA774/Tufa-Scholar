@@ -233,6 +233,27 @@ def get_task(task_id):
         return _task(_one(db, 'SELECT * FROM tasks WHERE id=?', (task_id,)))
 
 
+def record_research_event(run_id, kind, data):
+    with connect_database() as db:
+        db.execute('''INSERT INTO research_events(run_id, kind, data)
+            SELECT id, ?, ? FROM tasks WHERE id=? AND kind='chat' AND status='running' ''',
+                   (kind, json.dumps(data, ensure_ascii=False, separators=(',', ':')), run_id))
+        db.commit()
+
+
+def research_event_batch(run_id, after):
+    with connect_database() as db:
+        # Read status and events from the same snapshot so a final event cannot
+        # be missed if the worker commits completion while an API reader polls.
+        db.execute('BEGIN')
+        task = _one(db, 'SELECT status FROM tasks WHERE id=?', (run_id,))
+        rows = _all(db, '''SELECT id, kind, data FROM research_events
+            WHERE run_id=? AND id>? ORDER BY id LIMIT 100''', (run_id, after)) if task else []
+        return (task['status'] if task else None), [
+            {**row, 'data': json.loads(row['data'])} for row in rows
+        ]
+
+
 def list_tasks(project_id, conversation_id=None):
     with connect_database() as db:
         if conversation_id is None:

@@ -110,6 +110,7 @@ class ModelFixture:
                     action='tool',
                     tool_name='collect_evidence',
                     arguments={'query': 'accuracy', 'candidate_ids': [candidate['candidate_id']]},
+                    reason='核对搜索结果中的准确率。',
                 )
             citations = [item['id'] for item in mode_evidence[:1]]
             draft = workflow.Draft(
@@ -162,7 +163,7 @@ class WorkflowTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.addCleanup(self.tmp.cleanup)
 
-    def run_with_fixture(self, fixture, research=None, *, history=None, on_stage=None, on_subtask=None, papers=None, pages=None):
+    def run_with_fixture(self, fixture, research=None, *, history=None, on_stage=None, on_subtask=None, on_event=None, papers=None, pages=None):
         research = research or {'project_id': 1, 'query': 'accuracy', 'source': 'auto'}
         papers = papers or [paper(7, 'Accuracy study', 'Accuracy was 92%.')]
         pages = pages or [page()]
@@ -170,7 +171,88 @@ class WorkflowTests(unittest.TestCase):
              patch('src.tools.search.retrieve', return_value={'results': papers, 'warnings': []}), \
              patch('src.tools.search.search_web', return_value=pages), \
              patch('src.persistence.repository.project_evidence', return_value=papers):
-            return workflow.run(research, history=history or [], on_stage=on_stage, on_subtask=on_subtask)
+            return workflow.run(research, history=history or [], on_stage=on_stage, on_subtask=on_subtask, on_event=on_event)
+
+    def test_events_report_nodes_tools_and_public_tool_reason(self):
+        fixture = ModelFixture(initial_source='web')
+        events = []
+        with patch('src.tools.search.search_web', return_value=[page()]), \
+             patch.object(workflow.registry, 'invoke', wraps=workflow.registry.invoke) as invoke:
+            self.run_with_fixture(
+                fixture,
+                {'project_id': 1, 'query': 'accuracy', 'source': 'web', 'research_mode': 'deep'},
+                on_event=lambda kind, data: events.append((kind, data)),
+            )
+
+        node_starts = [data['node'] for kind, data in events if kind == 'node.started']
+        self.assertNotIn('dispatcher', node_starts)
+        self.assertIn('planner', node_starts)
+        self.assertIn('supervisor', node_starts)
+        self.assertIn('coder', node_starts)
+        planner_events = [data for kind, data in events if kind == 'node.completed' and data['node'] == 'planner']
+        self.assertTrue(any(
+            item.get('source') == 'web' and item.get('route') == 'web' and item.get('action') == 'research'
+            for item in planner_events
+        ))
+        collect_start = next(data for kind, data in events if kind == 'tool.started' and data['tool'] == 'collect_evidence')
+        self.assertEqual(collect_start['reason'], '核对搜索结果中的准确率。')
+        collect_call = next(call for call in invoke.call_args_list if call.args[0] == 'collect_evidence')
+        self.assertNotIn('reason', collect_call.args[1])
+        collect_complete = next(
+            data for kind, data in events
+            if kind == 'tool.completed' and data['tool'] == 'collect_evidence'
+        )
+        self.assertTrue(any(source.get('title') == 'Official results' for source in collect_complete.get('sources', [])))
+        self.assertTrue(all('arguments' not in data for kind, data in events if kind.startswith('tool.')))
+
+    def test_direct_dispatcher_has_no_node_card_events(self):
+        events = []
+        self.run_with_fixture(
+            ModelFixture(direct=True),
+            {'project_id': 1, 'query': 'hello', 'source': 'auto'},
+            on_event=lambda kind, data: events.append((kind, data)),
+        )
+        self.assertFalse(any(kind in {'node.started', 'node.completed'} for kind, _ in events))
+
+    def test_public_event_urls_strip_secrets_and_reject_private_hosts(self):
+        self.assertEqual(
+            workflow._public_event_url('https://example.org/article?token=secret#fragment'),
+            'https://example.org/article',
+        )
+        self.assertIsNone(workflow._public_event_url('http://127.0.0.1/private'))
+        self.assertIsNone(workflow._public_event_url('http://research.local/private'))
+
+    def test_model_stream_events_use_unique_calls_and_only_forward_public_deltas(self):
+        events = []
+        state = {
+            'research': {'source': 'web', 'research_mode': 'quick'},
+            '_event_context': workflow._EventContext(lambda kind, data: events.append((kind, data))),
+        }
+
+        def model(prompt_id, payload, schema, **kwargs):
+            stream = kwargs['on_stream']
+            stream('model.started', {'attempt': 1, 'phase': 'act'})
+            stream('model.delta', {
+                'attempt': 1,
+                'phase': 'act',
+                'text': 'x' * 4_501 if prompt_id == 'literature/reporter' else 'private planner output',
+            })
+            stream('model.completed', {'attempt': 1, 'phase': 'act'})
+            return object()
+
+        with patch.object(workflow, 'structured', side_effect=model):
+            workflow._model(state, 'literature/planner', {}, workflow.PlannerOutput, node_role='planner')
+            workflow._model(state, 'literature/reporter', {}, workflow.ReporterOutput, node_role='reporter')
+            workflow._model(state, 'runtime/dispatcher', {}, workflow.DispatcherOutput, node_role='dispatcher')
+
+        deltas = [data for kind, data in events if kind == 'model.delta']
+        self.assertEqual([item['node'] for item in deltas], ['reporter', 'reporter', 'reporter', 'dispatcher'])
+        reporter_deltas = [item['text'] for item in deltas if item['node'] == 'reporter']
+        self.assertEqual(''.join(reporter_deltas), 'x' * 4_501)
+        self.assertTrue(all(len(text) <= 2_000 for text in reporter_deltas))
+        calls = {data['call_id'] for kind, data in events}
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all('prompt' not in data for _, data in events))
 
     def test_direct_answer_ends_at_dispatcher_without_tools(self):
         fixture = ModelFixture(direct=True)

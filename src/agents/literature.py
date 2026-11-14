@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -98,6 +99,7 @@ class ResearcherOutput(BaseModel):
     action: Literal["tool", "finish"]
     tool_name: str = Field(default="", max_length=100)
     arguments: dict = Field(default_factory=dict)
+    reason: str = Field(default="", max_length=240)
     draft: Draft = Field(default_factory=Draft)
     findings: list[Claim] = Field(default_factory=list, max_length=12)
 
@@ -146,11 +148,65 @@ class State(TypedDict, total=False):
     prepared_round: int
     final_evidence: list
     final_rejections: list
+    _event_context: object
+
+
+class _EventContext:
+    """Per-run callback and call ID source; held only in the in-memory graph state."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.sequence = 0
+
+    def next_call_id(self):
+        self.sequence += 1
+        return f"call-{self.sequence}"
+
+    def emit(self, kind, data):
+        if self.callback:
+            self.callback(kind, data)
 
 
 def _emit(on_stage, node_name):
     if on_stage:
         on_stage(node_name)
+
+
+def _emit_event(state, kind, data):
+    context = state.get("_event_context")
+    if context:
+        context.emit(kind, data)
+
+
+def _safe_event_text(value, limit=500):
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value).strip()[:limit]
+
+
+def _public_event_url(value):
+    """Return a display URL without credentials, query strings, fragments, or private hosts."""
+    if not isinstance(value, str) or len(value) > 4_096:
+        return None
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        if parts.scheme.lower() not in {"http", "https"} or not host or parts.username or parts.password:
+            return None
+        host = host.rstrip(".").lower()
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".test")) or "." not in host:
+            return None
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return None
+        except ValueError:
+            pass
+        netloc = host
+        if parts.port and not ((parts.scheme.lower() == "http" and parts.port == 80) or (parts.scheme.lower() == "https" and parts.port == 443)):
+            netloc = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme.lower(), netloc, parts.path[:1_000], "", ""))
+    except ValueError:
+        return None
 
 
 def _source_modes(source):
@@ -202,7 +258,47 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
         "local_papers": research.get("local_papers", []),
         "node_role": node_role,
     }
-    return structured(prompt_id, payload, schema, model_options=research, template_context=template_context)
+    context = state.get("_event_context")
+    if not context:
+        return structured(prompt_id, payload, schema, model_options=research, template_context=template_context)
+
+    call_id = context.next_call_id()
+
+    def on_stream(kind, data):
+        # The model adapter exposes only streamed assistant content. Keep the
+        # workflow envelope small and never forward request prompts or options.
+        if kind == "model.delta":
+            phase = data.get("phase") if isinstance(data, dict) else None
+            stream_public_output = (
+                node_role == "reporter"
+                or (node_role == "researcher" and phase == "draft")
+                or (node_role == "dispatcher" and research.get("research_mode") == "quick")
+            )
+            if not stream_public_output:
+                return
+        raw = data if isinstance(data, dict) else {}
+        event_data = {"node": node_role, "call_id": call_id}
+        attempt = raw.get("attempt")
+        if isinstance(attempt, int) and not isinstance(attempt, bool):
+            event_data["attempt"] = attempt
+        phase = raw.get("phase")
+        if isinstance(phase, str):
+            event_data["phase"] = phase[:40]
+        text = raw.get("text")
+        if kind == "model.delta" and isinstance(text, str):
+            for offset in range(0, len(text), 2_000):
+                context.emit(kind, {**event_data, "text": text[offset:offset + 2_000]})
+            return
+        context.emit(kind, event_data)
+
+    return structured(
+        prompt_id,
+        payload,
+        schema,
+        model_options=research,
+        template_context=template_context,
+        on_stream=on_stream,
+    )
 
 
 def _payload(state, **extra):
@@ -692,6 +788,121 @@ def _invoke_tool(state, mode, tool_name, arguments):
     return {"tool_results": list(state.get("tool_results", [])) + [{"tool": tool_name, "result": str(result)[:MAX_CANDIDATE_TEXT]}]}, result
 
 
+def _tool_event_start(state, node, mode, tool_name, arguments, reason=None):
+    context = state.get("_event_context")
+    if not context:
+        return None
+    call_id = context.next_call_id()
+    data = {"node": node, "call_id": call_id, "tool": tool_name}
+    public_reason = _safe_event_text(reason, 240)
+    if public_reason:
+        data["reason"] = public_reason
+    query = _safe_event_text(arguments.get("query"), 500)
+    if query:
+        data["query"] = query
+
+    pool = state.get("candidate_pools", {}).get("web" if tool_name == "read_web_page" else mode, [])
+    candidate_ids = []
+    if arguments.get("candidate_id"):
+        candidate_ids.append(arguments["candidate_id"])
+    candidate_ids.extend(arguments.get("candidate_ids", []) if isinstance(arguments.get("candidate_ids"), list) else [])
+    candidate = next((item for item in pool if item.get("candidate_id") in candidate_ids), None)
+    if not candidate and tool_name == "read_web_page" and arguments.get("url"):
+        candidate = next((item for item in pool if arguments["url"] in {item.get("url"), item.get("original_url")}), None)
+    if candidate:
+        title = _safe_event_text(candidate.get("title"), 240)
+        if title:
+            data["title"] = title
+        url = _public_event_url(candidate.get("url") or candidate.get("original_url"))
+        if url:
+            data["url"] = url
+    elif tool_name == "read_web_page":
+        url = _public_event_url(arguments.get("url"))
+        if url:
+            data["url"] = url
+    context.emit("tool.started", data)
+    return call_id
+
+
+def _tool_sources(mode, tool_name, arguments, result, patch):
+    items = []
+    if tool_name in {"search_web", "search_papers"}:
+        pool_mode = "web" if tool_name == "search_web" else "paper"
+        query_results = patch.get("query_results", {}).get(pool_mode, {})
+        query = " ".join(str(arguments.get("query", "")).casefold().split())
+        items = [entry.get("paper", {}) for entry in query_results.get(query, []) if isinstance(entry, dict)]
+    elif tool_name == "collect_evidence" and isinstance(result, list):
+        items = result
+    elif tool_name == "read_web_page" and isinstance(result, dict):
+        candidate_id = result.get("candidate_id")
+        items = [
+            item for item in patch.get("candidate_pools", {}).get("web", [])
+            if item.get("candidate_id") == candidate_id
+        ]
+
+    sources = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _safe_event_text(item.get("title"), 240)
+        url = _public_event_url(item.get("url") or item.get("original_url"))
+        key = (title, url)
+        if key == ("", None) or key in seen:
+            continue
+        seen.add(key)
+        source = {}
+        if title:
+            source["title"] = title
+        if url:
+            source["url"] = url
+        sources.append(source)
+        if len(sources) >= 8:
+            break
+    return sources
+
+
+def _tool_event_completed(state, node, call_id, mode, tool_name, arguments, result, patch):
+    if not call_id:
+        return
+    data = {"node": node, "call_id": call_id, "tool": tool_name}
+    if isinstance(result, dict):
+        count = result.get("candidate_count")
+        if tool_name == "read_web_page" and count is None:
+            count = 1
+    else:
+        count = len(result) if isinstance(result, list) else None
+    if isinstance(count, int) and not isinstance(count, bool):
+        data["count"] = count
+    sources = _tool_sources(mode, tool_name, arguments, result, patch)
+    if sources:
+        data["sources"] = sources
+    _emit_event(state, "tool.completed", data)
+
+
+def _tool_event_failed(state, node, call_id, tool_name, exc):
+    if not call_id:
+        return
+    safe = _tool_error(tool_name, exc)
+    _emit_event(state, "tool.failed", {
+        "node": node,
+        "call_id": call_id,
+        "tool": tool_name,
+        "message": _safe_event_text(safe.get("message"), 240),
+    })
+
+
+def _invoke_tool_with_events(state, mode, tool_name, arguments, *, node="researcher", reason=None):
+    call_id = _tool_event_start(state, node, mode, tool_name, arguments, reason)
+    try:
+        patch, result = _invoke_tool(state, mode, tool_name, arguments)
+    except Exception as exc:
+        _tool_event_failed(state, node, call_id, tool_name, exc)
+        raise
+    _tool_event_completed(state, node, call_id, mode, tool_name, arguments, result, patch)
+    return patch, result
+
+
 def _background_investigator(state, on_stage):
     _emit(on_stage, "background_investigator")
     if state.get("background"):
@@ -726,17 +937,30 @@ def _background_investigator(state, on_stage):
     context = _tool_context(research, mode)
     for query in queries[:MAX_BACKGROUND_SEARCHES]:
         tool_name = "search_web" if mode == "web" else "search_papers"
+        arguments = {"query": query, "limit": 5} if mode == "web" else {"query": query}
+        call_id = _tool_event_start(state, "background_investigator", mode, tool_name, arguments)
         try:
             if mode == "web":
-                results = registry.invoke(tool_name, {"query": query, "limit": 5}, context=context)
+                results = registry.invoke(tool_name, arguments, context=context)
             else:
-                result = registry.invoke(tool_name, {"query": query}, context=context)
+                result = registry.invoke(tool_name, arguments, context=context)
                 results = result.get("results", [])
                 if result.get("warnings"):
                     warnings.append("paper_search_incomplete")
             search_state = {"candidate_pools": pools, "query_results": query_results}
             pools, query_results = _record_search_results(search_state, mode, query, results)
+            _tool_event_completed(
+                state,
+                "background_investigator",
+                call_id,
+                mode,
+                tool_name,
+                arguments,
+                {"candidate_count": len(results)},
+                {"candidate_pools": pools, "query_results": query_results},
+            )
         except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
+            _tool_event_failed(state, "background_investigator", call_id, tool_name, exc)
             errors.append(_tool_error(tool_name, exc))
     query_state = {**state, "candidate_pools": pools, "query_results": query_results, "errors": errors, "warnings": warnings}
     background_decision = {"source": mode, "queries": queries[:MAX_BACKGROUND_SEARCHES]}
@@ -1005,7 +1229,13 @@ def _researcher(state, on_stage):
                 search_attempts += 1
                 tried_queries.add(" ".join(args["query"].casefold().split()))
                 try:
-                    patch, _ = _invoke_tool(state, mode, name, args)
+                    patch, _ = _invoke_tool_with_events(
+                        state,
+                        mode,
+                        name,
+                        args,
+                        reason="改写查询以恢复失败的检索。",
+                    )
                     state.update(patch)
                     consecutive_search_failures = 0
                     consecutive_web_read_failures = 0
@@ -1060,7 +1290,13 @@ def _researcher(state, on_stage):
                 query = result.arguments.get("query")
                 if isinstance(query, str):
                     tried_queries.add(" ".join(query.casefold().split()))
-            patch, _ = _invoke_tool(state, mode, result.tool_name, result.arguments)
+            patch, _ = _invoke_tool_with_events(
+                state,
+                mode,
+                result.tool_name,
+                result.arguments,
+                reason=result.reason,
+            )
             state.update(patch)
             consecutive_search_failures = 0
             consecutive_web_read_failures = 0
@@ -1597,16 +1833,63 @@ def _dispatch(state, on_stage):
         }
 
 
+def _node_completion_data(node, state, patch):
+    data = {"node": node}
+    if node == "background_investigator":
+        background = patch.get("background", state.get("background", {}))
+        data["source"] = background.get("source", "paper")
+        count = len(background.get("selected_candidates", []))
+        data["message"] = f"已筛选 {count} 条背景候选。"
+    elif node == "planner":
+        plan = patch.get("plan", state.get("plan", {}))
+        action = plan.get("action")
+        if action in {"research", "report"}:
+            data["action"] = action
+        source = plan.get("source")
+        if source in {"web", "paper"}:
+            data["source"] = source
+            data["route"] = source
+        rationale = _safe_event_text(plan.get("rationale"), 240)
+        if rationale:
+            data["message"] = rationale
+    elif node == "supervisor":
+        target = patch.get("next_node", "researcher")
+        data["message"] = f"已安排 {target} 节点继续。"
+    elif node == "researcher":
+        data["source"] = state.get("current_source", "paper")
+        evidence = patch.get("evidence_pool", state.get("evidence_pool", []))
+        data["message"] = f"已整理 {len(evidence)} 条证据，提交本轮审查。"
+    elif node == "analyst":
+        review = patch.get("current_review", state.get("current_review", {}))
+        data["source"] = state.get("current_source", "paper")
+        data["sufficient"] = bool(review.get("sufficient"))
+        gaps = [item for item in review.get("gaps", []) if isinstance(item, str) and item.strip()]
+        data["message"] = _safe_event_text(gaps[0], 240) if gaps else ("已覆盖主要要求。" if review.get("sufficient") else "仍需补充证据。")
+    elif node == "coder":
+        data["message"] = "本轮无需代码执行。"
+    elif node == "reporter":
+        evidence = patch.get("final_evidence", state.get("final_evidence", []))
+        data["message"] = f"已完成终稿整理与引用校验，保留 {len(evidence)} 条引用证据。"
+    return data
+
+
+def _run_node_with_events(state, node, callback):
+    _emit_event(state, "node.started", {"node": node})
+    patch = callback(state)
+    _emit_event(state, "node.completed", _node_completion_data(node, state, patch))
+    return patch
+
+
 def _graph(on_stage, on_subtask):
     graph = StateGraph(State)
     graph.add_node("dispatcher", lambda state: _dispatch(state, on_stage))
-    graph.add_node("background_investigator", lambda state: _background_investigator(state, on_stage))
-    graph.add_node("planner", lambda state: _planner(state, on_stage))
-    graph.add_node("supervisor", lambda state: _supervisor(state, on_stage))
-    graph.add_node("researcher", lambda state: _researcher(state, on_stage))
-    graph.add_node("analyst", lambda state: _analyst(state, on_stage, on_subtask))
-    graph.add_node("coder", lambda state: _coder(state, on_stage))
-    graph.add_node("reporter", lambda state: _reporter(state, on_stage))
+    graph.add_node("background_investigator", lambda state: _run_node_with_events(state, "background_investigator", lambda current: _background_investigator(current, on_stage)))
+    graph.add_node("planner", lambda state: _run_node_with_events(state, "planner", lambda current: _planner(current, on_stage)))
+    graph.add_node("supervisor", lambda state: _run_node_with_events(state, "supervisor", lambda current: _supervisor(current, on_stage)))
+    graph.add_node("researcher", lambda state: _run_node_with_events(state, "researcher", lambda current: _researcher(current, on_stage)))
+    graph.add_node("analyst", lambda state: _run_node_with_events(state, "analyst", lambda current: _analyst(current, on_stage, on_subtask)))
+    graph.add_node("coder", lambda state: _run_node_with_events(state, "coder", lambda current: _coder(current, on_stage)))
+    graph.add_node("reporter", lambda state: _run_node_with_events(state, "reporter", lambda current: _reporter(current, on_stage)))
     graph.add_edge(START, "dispatcher")
     graph.add_conditional_edges(
         "dispatcher",
@@ -1637,7 +1920,7 @@ def _safe_history(history, source):
     return list(history or [])
 
 
-def run(research, *, history, on_stage=None, on_subtask=None):
+def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
     """Run the research graph and return the final Markdown and cited evidence."""
     if not isinstance(research, dict):
         raise TypeError("research must be a dict")
@@ -1668,6 +1951,8 @@ def run(research, *, history, on_stage=None, on_subtask=None):
         "warnings": [],
         "prepared_round": 0,
     }
+    if on_event is not None:
+        initial["_event_context"] = _EventContext(on_event)
     graph = _graph(on_stage, on_subtask)
     result = graph.invoke(initial, config={"recursion_limit": 40})
     if result.get("content") is None:

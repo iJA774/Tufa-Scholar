@@ -22,7 +22,7 @@
 | 分流 `DispatcherOutput` | `needs_research`、`reason`、`answer`。`auto` 下直接回答时 answer 非空并由 dispatcher 结束；`quick` 也要求 answer 非空，由代码忽略 `needs_research` 并强制直接结束；`deep` 不调用 dispatcher 模型。 |
 | 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、至多三条 `queries`、`selected_candidate_ids`、`summary`、`gaps`。查询阶段提出检索词；筛选阶段只能选择实际返回的候选。 |
 | 计划 `PlannerOutput` | `requirements`、`plan`、`source`、`action`（`research` 或 `report`）、`rationale`。首轮必须研究且计划非空；至少完成一轮后才能报告，第二轮结束后代码强制报告。 |
-| 研究 `ResearcherOutput` | `action`（`tool` 或 `finish`）、`tool_name`、`arguments`、`draft`（章节、段落和局限）、`findings`。工具名和参数还须通过当前上下文的工具目录及范围校验。 |
+| 研究 `ResearcherOutput` | `action`（`tool` 或 `finish`）、`tool_name`、`arguments`、`reason`、`draft`（章节、段落和局限）、`findings`。`reason` 是用户可见的简短工具操作目的，与 `arguments` 分开；工具名和参数仍须通过当前工具目录及范围校验。 |
 | 审查 `AnalystOutput` | `sufficient`、`covered_requirements`、`gaps`、`next_steps`、`review`。审查用 requirements、初稿和证据识别缺口，不产生可被当作结论的额外发现段落。 |
 | 终稿 `ReporterOutput` | `sections`，每节含 `heading` 和 `paragraphs`；段落与 `limitations` 均含 `text`、`citations`。 |
 

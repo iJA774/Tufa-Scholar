@@ -219,6 +219,7 @@
 .messageAssistant .messageBubble { border-top-left-radius: 4px; }
 .messageUser .messageBubble { border-color: rgba(187, 184, 221, .14); border-bottom-right-radius: 4px; background: #1a1923; color: #f3f1fa; }
 .messageLabel { margin-bottom: 7px; color: #a99aec; font-size: 10px; letter-spacing: .06em; }
+.streamPreviewLabel { margin-left: 8px; color: #878595; font-size: 10px; font-weight: 400; letter-spacing: 0; }
 .messageUser .messageLabel { color: #89879a; text-align: right; }
 .messageContent { white-space: pre-wrap; word-break: break-word; }
 .citation { margin-top: 9px; color: #9995aa; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }

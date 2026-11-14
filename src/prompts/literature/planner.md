@@ -33,7 +33,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 
 `search_mode` 和可用工具目录由代码提供，必须遵守其范围。source 字段只填写 web 或 paper。local 或 collection 的来源限制由代码执行；不得以模型选择绕过。
 
-输出 requirements（要回答的问题点）、plan（可执行的一轮计划）、source、action 和 rationale。action 首轮必须是 `research`；审查后可选 `research` 或 `report`。无下一步时 plan 可为空；requirements 应保留回答原问题所需的关键覆盖点。
+输出 requirements（要回答的问题点）、plan（可执行的一轮计划）、source、action 和 rationale。action 首轮必须是 `research`；审查后可选 `research` 或 `report`。无下一步时 plan 可为空；requirements 应保留回答原问题所需的关键覆盖点。`rationale` 是展示给用户的一句简短路线说明，不输出私有思维链或内部分析。
 
 ## 可用工具目录
 {% for tool in available_tools -%}

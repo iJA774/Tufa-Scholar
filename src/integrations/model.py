@@ -187,7 +187,136 @@ def _usage_log_fields(usage):
     return ' '.join(f'{key}={value if value is not None else "na"}' for key, value in values.items())
 
 
-def structured(prompt_id, payload, schema, *, model_options=None, template_context=None):
+def _emit_stream(callback, kind, data):
+    """Send public model lifecycle events without letting observers break the call."""
+    if callback is None:
+        return
+    try:
+        callback(kind, data)
+    except Exception:
+        logger.warning('model_stream callback failed kind=%s', kind)
+
+
+def _explicitly_rejects_stream(response):
+    """Recognize only clear request-validation errors for the stream option."""
+    if response.status_code not in (400, 422):
+        return False
+    try:
+        # Responses returned by httpx.stream are not buffered until read().
+        response.read()
+        body = response.json()
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get('error') if isinstance(body.get('error'), dict) else body
+    param = error.get('param', body.get('param'))
+    if isinstance(param, str) and param.lower() == 'stream':
+        return True
+    message = error.get('message', body.get('message', ''))
+    if not isinstance(message, str):
+        return False
+    message = message.lower()
+    return 'stream' in message and any(term in message for term in (
+        'unsupported', 'not supported', 'not support', 'unknown parameter',
+        'unrecognized parameter', 'unexpected parameter', 'invalid parameter',
+    ))
+
+
+def _stream_response(response, on_stream, attempt, phase, secrets=()):
+    """Read an OpenAI-compatible SSE stream, or fall back to a regular JSON body."""
+    content_type = response.headers.get('content-type', '').lower()
+    if 'text/event-stream' not in content_type:
+        # A few compatible endpoints and fixture servers ignore stream=true and
+        # return the normal completion envelope. Keep that path usable.
+        # `httpx.stream` deliberately leaves response bodies unread.
+        response.read()
+        body = response.json()
+        usage = body.get('usage') if isinstance(body, dict) else None
+        content = body['choices'][0]['message']['content']
+        if isinstance(content, str) and content:
+            display = content
+            for secret in secrets:
+                display = display.replace(secret, '[REDACTED]')
+            _emit_stream(on_stream, 'model.delta', {'attempt': attempt, 'phase': phase, 'text': display})
+        return content, usage
+
+    parts = []
+    pending = []
+    pending_size = 0
+    display_buffer = ''
+    usage = None
+
+    def flush(final=False):
+        nonlocal pending_size, display_buffer
+        if pending:
+            text = ''.join(pending)
+            parts.append(text)
+            display_buffer += text
+            pending.clear()
+            pending_size = 0
+        if not display_buffer:
+            return
+        max_secret_length = max((len(secret) for secret in secrets if secret), default=0)
+        cut = len(display_buffer) if final or not max_secret_length else max(0, len(display_buffer) - max_secret_length + 1)
+        if not final:
+            for secret in secrets:
+                if not secret:
+                    continue
+                start = display_buffer.find(secret)
+                while start >= 0:
+                    end = start + len(secret)
+                    if start < cut < end:
+                        cut = start
+                    start = display_buffer.find(secret, start + 1)
+        text, display_buffer = display_buffer[:cut], display_buffer[cut:]
+        if text:
+            for secret in secrets:
+                if secret:
+                    text = text.replace(secret, '[REDACTED]')
+            _emit_stream(on_stream, 'model.delta', {'attempt': attempt, 'phase': phase, 'text': text})
+
+    try:
+        for line in response.iter_lines():
+            if not line or not line.startswith('data:'):
+                continue
+            data = line[5:].strip()
+            if data == '[DONE]':
+                break
+            try:
+                event = json.loads(data)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_usage = event.get('usage')
+            if isinstance(event_usage, dict):
+                usage = event_usage
+            choices = event.get('choices')
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                continue
+            delta = choices[0].get('delta')
+            if not isinstance(delta, dict):
+                continue
+            # Deliberately ignore reasoning_content, tool calls and every field
+            # except user-facing textual content.
+            text = delta.get('content')
+            if isinstance(text, str) and text:
+                pending.append(text)
+                pending_size += len(text)
+                # Avoid a UI event for every tiny token while keeping output live.
+                if pending_size >= 24:
+                    flush()
+    except httpx.RequestError:
+        # Preserve already received content in the UI even if the stream later
+        # fails; the caller will report failure and must not retry this request.
+        flush(final=True)
+        raise
+    flush(final=True)
+    return ''.join(parts), usage
+
+
+def structured(prompt_id, payload, schema, *, model_options=None, template_context=None, on_stream=None):
     config = settings.model_config()
     if model_options and model_options.get('model_name'):
         config = dict(config, model=model_options['model_name'])
@@ -220,21 +349,52 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         context = {'prompt_id': prompt_id, 'attempt': attempt, 'rendered_prompt': prompt, 'model': config['model'], 'model_options': options, 'messages': messages}
         secrets = (config['api_key'],) if config.get('api_key') else ()
         try:
-            response = httpx.post(base_url(config['base_url']) + '/chat/completions', headers=headers,
-                                  json={'model': config['model'], 'messages': list(messages),
-                                        'response_format': {'type': 'json_object'}, **options}, timeout=90)
-            response.raise_for_status()
-            content = response.text
-            body = response.json()
-            usage = body.get('usage') if isinstance(body, dict) else None
-            content = body['choices'][0]['message']['content']
+            request_body = {'model': config['model'], 'messages': list(messages),
+                            'response_format': {'type': 'json_object'}, **options}
+            if on_stream is None:
+                response = httpx.post(base_url(config['base_url']) + '/chat/completions', headers=headers,
+                                      json=request_body, timeout=90)
+                response.raise_for_status()
+                content = response.text
+                body = response.json()
+                usage = body.get('usage') if isinstance(body, dict) else None
+                content = body['choices'][0]['message']['content']
+            else:
+                request_body['stream'] = True
+                _emit_stream(on_stream, 'model.started', {'attempt': attempt, 'phase': phase})
+                fallback_to_nonstream = False
+                with httpx.stream('POST', base_url(config['base_url']) + '/chat/completions', headers=headers,
+                                  json=request_body, timeout=90) as response:
+                    if _explicitly_rejects_stream(response):
+                        fallback_to_nonstream = True
+                    else:
+                        response.raise_for_status()
+                        content, usage = _stream_response(response, on_stream, attempt, phase, secrets)
+                if fallback_to_nonstream:
+                    # Some otherwise compatible providers reject the optional
+                    # stream flag. Retry once without it only on an explicit
+                    # 400/422 validation error naming that parameter.
+                    request_body.pop('stream')
+                    response = httpx.post(base_url(config['base_url']) + '/chat/completions', headers=headers,
+                                          json=request_body, timeout=90)
+                    response.raise_for_status()
+                    body = response.json()
+                    usage = body.get('usage') if isinstance(body, dict) else None
+                    content = body['choices'][0]['message']['content']
+                    if isinstance(content, str) and content:
+                        display = content
+                        for secret in secrets:
+                            display = display.replace(secret, '[REDACTED]')
+                        _emit_stream(on_stream, 'model.delta', {'attempt': attempt, 'phase': phase, 'text': display})
             result = schema.model_validate_json(content)
             logger.info('model_call completed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d %s',
                         run_id if run_id is not None else 'na', prompt_id, phase, attempt,
                         int((time.monotonic() - attempt_started) * 1000), response.status_code,
                         _usage_log_fields(usage))
+            _emit_stream(on_stream, 'model.completed', {'attempt': attempt, 'phase': phase})
             return result
         except httpx.HTTPStatusError as exc:
+            _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
             diagnostic_id = record_failure(kind='http_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__, 'status': exc.response.status_code}, context=context, secrets=secrets)
             logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d error_type=%s diagnostic_id=%s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
@@ -242,6 +402,8 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                            type(exc).__name__, diagnostic_id)
             raise ModelServiceError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
         except httpx.RequestError as exc:
+            # A partial stream may already have been billed; never retry it.
+            _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
             diagnostic_id = record_failure(kind='network_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__}, context=context, secrets=secrets)
             logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
@@ -249,6 +411,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
             raise ModelServiceError('模型服务连接失败或超时，请检查设置') from None
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             errors = _safe_validation_errors(exc, json_schema) if isinstance(exc, ValidationError) else [{'type': 'invalid_response', 'path': []}]
+            _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
             diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)
             logger.warning('model_call invalid run_id=%s prompt_id=%s phase=%s attempt=%d errors=%s diagnostic_id=%s %s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,

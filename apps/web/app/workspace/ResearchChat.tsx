@@ -2,6 +2,8 @@
 
 import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useRunPolling } from "../hooks/useRunPolling";
+import { useRunEvents } from "../hooks/useRunEvents";
+import { buildModelPreviews } from "../hooks/runEvents";
 import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
 import type { ModelChoice } from "./preferences";
@@ -162,6 +164,29 @@ export default function ResearchChat({
   const panelRun = run?.research_mode === "deep" ? run : runs.find(item => item.research_mode === "deep");
   const progressRun = hasConversation && loadedConversationId === conversationId ? panelRun : undefined;
   const progressReport = progressRun ? [...messages].reverse().find(message => message.role === "assistant" && message.run_id === progressRun.id && message.metadata?.report_id !== undefined) : undefined;
+  const updateFromEventStream = (next: Run) => {
+    setRun(previous => previous?.id === next.id ? next : previous);
+    setRuns(previous => previous.some(item => item.id === next.id) ? previous.map(item => item.id === next.id ? next : item) : [next, ...previous]);
+    setHistoryRuns(previous => ({ ...previous, [next.id]: next }));
+  };
+  const liveEvents = useRunEvents({
+    run,
+    projectId,
+    conversationId,
+    fetchRun: (id, signal) => api<Run>(`/runs/${id}`, { signal }),
+    onRunUpdate: updateFromEventStream,
+  });
+  const historyEvents = useRunEvents({
+    run: progressRun?.id !== run?.id ? progressRun : undefined,
+    projectId,
+    conversationId,
+    fetchRun: (id, signal) => api<Run>(`/runs/${id}`, { signal }),
+    onRunUpdate: updateFromEventStream,
+  });
+  const progressEvents = progressRun?.id === run?.id ? liveEvents : historyEvents;
+  const quickDraft = run?.research_mode === "quick"
+    ? buildModelPreviews(liveEvents, run.research_mode).find(preview => preview.node === "dispatcher")?.text
+    : undefined;
   const openProgressPanel = () => {
     setResearchPanelOpen(true);
     requestAnimationFrame(() => requestAnimationFrame(() => progressCloseButton.current?.focus()));
@@ -421,6 +446,13 @@ export default function ResearchChat({
             </div>
           </article>;
         })}
+        {activeRun && run.research_mode === "quick" && quickDraft && <article className={`${styles.message} ${styles.messageAssistant}`} key={`quick-preview-${run.id}`} aria-live="polite">
+          <div className={styles.avatar} aria-hidden="true">✧</div>
+          <div className={styles.messageBubble}>
+            <div className={styles.messageLabel}>TUFA · 快速探索 <small className={styles.streamPreviewLabel}>实时草稿 · 未核验</small></div>
+            <div className={styles.messageContent}>{quickDraft}</div>
+          </div>
+        </article>}
         {!loadingConversation && messages.length === 0 && <p className={styles.loadingMessages}>此会话暂无消息。</p>}
         {activeRun && <div className={styles.liveStatus} role="status"><span className={styles.spinner} />
           <span>{statusText[run.status] || run.status}{stageSuffix(run)}</span>
@@ -478,6 +510,7 @@ export default function ResearchChat({
       key={progressRun.id}
       run={progressRun}
       report={progressReport}
+      events={progressEvents}
       open={researchPanelOpen}
       status={statusText[progressRun.status] || progressRun.status}
       stage={stageLabel(progressRun)}

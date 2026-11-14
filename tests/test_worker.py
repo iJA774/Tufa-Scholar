@@ -44,8 +44,9 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('worker agent')['id']
             first = repository.create_question(project, None, 'first question', 'local')
             observed = []
-            def agent(research, *, history, on_stage, on_subtask):
+            def agent(research, *, history, on_stage, on_subtask, on_event):
                 on_stage('dispatcher')
+                on_event('node.started', {'node': 'planner'})
                 on_subtask({'index': 1, 'source': 'paper', 'task': 'topic', 'status': 'no_evidence', 'findings': [], 'gap': '缺少材料', 'sources': []})
                 on_subtask({'index': 1, 'source': 'paper', 'task': 'duplicate', 'status': 'no_evidence', 'findings': [], 'gap': '缺少材料', 'sources': []})
                 observed.append((research, history, repository.get_task(current['run_id'])['stage']))
@@ -64,6 +65,14 @@ class WorkerTests(unittest.TestCase):
             from apps.api.main import app
             with TestClient(app) as client:
                 self.assertEqual(client.get(f"/runs/{first['run_id']}").json()['subtasks'][0]['task'], 'topic')
+                event_path = f"/runs/{first['run_id']}/events"
+                response = client.get(event_path)
+                self.assertTrue(response.headers['content-type'].startswith('text/event-stream'))
+                events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+                self.assertEqual([(event['kind'], event['data']) for event in events], [('node.started', {'node': 'planner'})])
+                self.assertNotIn('data: ', client.get(event_path, headers={'Last-Event-ID': str(events[0]['id'])}).text)
+                self.assertEqual(client.get(event_path, params={'after': -1}).status_code, 422)
+                self.assertEqual(client.get('/runs/999999/events').status_code, 404)
             collection = repository.create_collection(project, 'snapshot')['id']
             current = repository.create_question(project, first['conversation_id'], 'collection question', 'collection', collection_id=collection)
             with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', side_effect=AssertionError('collection loaded history')) as load:
@@ -81,7 +90,7 @@ class WorkerTests(unittest.TestCase):
             task = repository.create_question(project, None, 'question', 'local', research_mode='deep')
             received = []
 
-            def agent(research, *, history, on_stage, on_subtask):
+            def agent(research, *, history, on_stage, on_subtask, on_event):
                 received.append((research, history))
                 return 'answer', []
 
@@ -116,7 +125,7 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('scope')['id']
             task = repository.create_question(project, None, 'question', 'local')
             ids = []
-            def agent(research, *, history, on_stage, on_subtask):
+            def agent(research, *, history, on_stage, on_subtask, on_event):
                 self.assertNotIn('id', research)
                 ids.append(record_failure(kind='test', payload={}, schema={}))
                 raise RuntimeError('failure')

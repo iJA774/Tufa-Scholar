@@ -151,6 +151,33 @@ def main():
             assert 'web_snippet' in report_csv and 'searx' in report_csv
             assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
 
+            streamed_question = call('POST', f'/projects/{project}/questions', json={
+                'question': 'stream-fixture accuracy', 'source': 'web', 'research_mode': 'deep',
+            })
+            stream_run = streamed_question['run_id']
+            events_path = f'/runs/{stream_run}/events'
+            events = []
+            live_delta = False
+            with client.stream('GET', events_path) as event_response:
+                event_response.raise_for_status()
+                assert event_response.headers['content-type'].startswith('text/event-stream')
+                for line in event_response.iter_lines():
+                    if not line.startswith('data: '):
+                        continue
+                    assert 'private-fixture-sentinel' not in line
+                    event = json.loads(line[6:])
+                    events.append(event)
+                    if not live_delta and event['kind'] == 'model.delta' and event['data']['node'] == 'reporter':
+                        live_delta = call('GET', f'/runs/{stream_run}')['status'] == 'running'
+            assert live_delta, 'Reporter streamed content must arrive before the report commits'
+            assert wait(stream_run)['status'] == 'succeeded'
+            assert any(event['kind'] == 'node.completed' and event['data'].get('node') == 'planner'
+                       and event['data'].get('source') == 'web' for event in events)
+            assert any(event['kind'] == 'tool.started' and event['data'].get('reason') == '核对搜索结果中的准确率。'
+                       for event in events)
+            assert all(event['data'].get('node') != 'dispatcher' for event in events if event['kind'].startswith('node.'))
+            assert 'data: ' not in client.get(events_path, params={'after': events[-1]['id']}).text
+
             rejected_report = call('POST', f'/projects/{project}/questions', json={
                 'question': 'reporter-invalid-citation accuracy', 'source': 'web',
             })
@@ -216,6 +243,7 @@ def main():
             print('Simulated HTTP: quick mode stayed direct despite a contradictory dispatcher, with zero searches.')
             print('Simulated HTTP: deep mode researched a greeting through background search and reporting.')
             print('Simulated HTTP: API web search, background filtering, web evidence and cited report passed.')
+            print('Live SSE: reporter delta arrived while the worker was running; tool reason and reconnect cursor passed.')
             print('Reporter citation rejection: report and CSV preserve valid provisional evidence.')
             print('Provider failure: rewritten search retries stop after two consecutive failures and produce an explicit no-evidence report.')
             print('No real search provider or remote web page was contacted.')
