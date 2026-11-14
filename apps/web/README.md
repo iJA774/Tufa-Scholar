@@ -8,13 +8,16 @@
 
 设置按钮和 `/settings` 都在工作区上方打开 `SettingsPanel`。本地文件标签通过浏览器选择目录并预览文件相对路径，关于入口在新标签页打开 GitHub。所有业务数据请求通过本机 `/api` 代理，不由浏览器直接访问数据库或携带服务密钥访问云端。
 
-深度研究提交后自动展开右侧进度栏，通过已有任务轮询显示真实阶段和小结。关闭进度栏后仍可从聊天中打开，快速探索在聊天内显示状态。
+深度研究使用 DeerFlow 风格的报告与活动面板。桌面聊天列展开为 538px、收起为 768px，面板按视口宽度计算并随两列间距动画展开；窄屏使用居中的可滚动面板。活动内容只呈现本地任务阶段、子任务、发现和真实来源，跟随新增活动滚动；报告使用 Markdown 渲染，并提供下载入口。进行中的深度任务切换历史后自动打开，已完成任务可从聊天重新打开；快速探索不自动显示面板。
+
+研究面板的布局、活动动效、卡片和 tabs 参考并改写自 ByteDance DeerFlow。完整 MIT 许可文本保存在 [DEERFLOW-MIT-LICENSE.txt](app/workspace/THIRD_PARTY_LICENSES/DEERFLOW-MIT-LICENSE.txt)，移植组件在源码头部标注出处。
 
 | 模块 | 职责 |
 |---|---|
 | `app/page.tsx`、`launch/LaunchPage.tsx`、`launch/LaunchPage.module.css` | 独立开始页路由、内容与 LED Canvas 动画 |
 | `app/workspace/page.tsx`、`workspace/WorkspacePage.tsx`、`WorkspacePage.module.css` | 工作区路由、项目范围、单层历史抽屉、设置弹窗及其深色样式 |
-| `workspace/ResearchChat.tsx`、`ResearchChat.module.css` | 当前会话消息、deep/quick 模式、研究进度栏、轮询、重试、证据和下载 |
+| `workspace/ResearchChat.tsx`、`ResearchChat.module.css` | 当前会话消息、deep/quick 模式、聊天列宽度动画、轮询、重试、证据和下载 |
+| `workspace/ResearchPanel.tsx`、`ResearchPanel.module.css` | DeerFlow 风格报告/活动面板、真实研究活动和 Markdown 报告展示 |
 | `app/settings/SettingsPanel.tsx`、`SettingsPanel.module.css`、`app/settings/page.tsx` | 设置弹窗、直接访问入口、服务配置和本地目录预览 |
 | `workspace/PdfImport.tsx`、`workspace/PaperLibrary.tsx`、`workspace/PaperRow.tsx` | 当前项目 PDF 导入、刷新、列表和原文访问 |
 | `app/settings/WebSearchSettings.tsx`、`RuntimeLogsSettings.tsx` | 网页搜索设置及本地运行日志管理 |

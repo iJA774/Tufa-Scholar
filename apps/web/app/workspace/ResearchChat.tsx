@@ -1,11 +1,12 @@
 "use client";
 
-import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
 import type { ModelChoice } from "./preferences";
 import { webSourceLabel } from "./sourceLabels";
+import ResearchPanel from "./ResearchPanel";
 import styles from "./ResearchChat.module.css";
 
 const statusText: Record<string, string> = {
@@ -100,41 +101,6 @@ function ResearchActivity({ items }: { items?: Subtask[] }) {
   </details>;
 }
 
-function ResearchProgressPanel({ run, onClose, closeButtonRef }: { run: Run; onClose: () => void; closeButtonRef: RefObject<HTMLButtonElement | null> }) {
-  const active = ["queued", "pending", "running"].includes(run.status);
-  const status = statusText[run.status] || run.status;
-  const subtasks = run.subtasks || [];
-  return <aside className={styles.progressPanel} aria-label="研究进度">
-    <header className={styles.progressHeader}>
-      <div><h2>研究进度</h2><p>{modeText(run.research_mode)}</p></div>
-      <button ref={closeButtonRef} className={styles.progressClose} type="button" onClick={onClose} aria-label="收起研究进度">×</button>
-    </header>
-    <div className={styles.progressBody}>
-      <section className={styles.progressStage}>
-        <span className={`${styles.progressMarker} ${active ? styles.progressMarkerActive : ""}`} aria-hidden="true" />
-        <div><strong>{stageLabel(run)}</strong>{status !== stageLabel(run) && <small>{status}</small>}</div>
-      </section>
-      {run.error && <p className={styles.progressError}>{run.error}</p>}
-      {subtasks.length ? <ol className={styles.progressSteps}>
-        {subtasks.map(step => <li key={step.index}>
-          <span className={`${styles.progressMarker} ${styles.progressMarkerDone}`} aria-hidden="true" />
-          <div>
-            <strong>{step.index}. {step.task}</strong>
-            {step.findings?.map((finding, index) => <p key={index}>{finding.text}{finding.citations.length ? ` ${finding.citations.map(id => `[${id}]`).join(" ")}` : ""}</p>)}
-            {step.status === "sources_only" && <p>已找到相关资料，结论仍待核验。</p>}
-            {step.status === "no_evidence" && <p>本步暂无可用证据。</p>}
-            {step.sources?.map(source => {
-              const href = safeSourceUrl(source.original_url);
-              return <p className={styles.progressSource} key={source.id}>{href ? <a href={href} target="_blank" rel="noopener noreferrer">{source.title || source.id} ↗</a> : source.title || source.id} [{source.id}]</p>;
-            })}
-            {step.gap && <p>待查：{step.gap}</p>}
-          </div>
-        </li>)}
-      </ol> : <p className={styles.progressEmpty}>{active ? "正在等待研究步骤…" : "此任务没有返回研究步骤。"}</p>}
-    </div>
-  </aside>;
-}
-
 type Props = {
   projectId?: number;
   projectLoading: boolean;
@@ -193,10 +159,12 @@ export default function ResearchChat({
   const activeRun = run && ["queued", "pending", "running"].includes(run.status);
   const hasConversation = conversationId !== undefined;
   const modeName = modeText(mode);
-  const progressRun = hasConversation && loadedConversationId === conversationId && run?.research_mode === "deep" ? run : undefined;
+  const panelRun = run?.research_mode === "deep" ? run : runs.find(item => item.research_mode === "deep");
+  const progressRun = hasConversation && loadedConversationId === conversationId ? panelRun : undefined;
+  const progressReport = progressRun ? [...messages].reverse().find(message => message.role === "assistant" && message.run_id === progressRun.id && message.metadata?.report_id !== undefined) : undefined;
   const openProgressPanel = () => {
     setResearchPanelOpen(true);
-    requestAnimationFrame(() => progressCloseButton.current?.focus());
+    requestAnimationFrame(() => requestAnimationFrame(() => progressCloseButton.current?.focus()));
   };
   const closeProgressPanel = () => {
     setResearchPanelOpen(false);
@@ -402,7 +370,7 @@ export default function ResearchChat({
     { text: "视觉语言模型在科研中有哪些新应用？", prompt: "总结视觉语言模型在科研工作中的典型应用与发展趋势。", tone: "pink", icon: "▤" },
   ];
 
-  return <main className={`${styles.workspace} ${hasConversation ? styles.workspaceConversation : ""} ${density === "compact" ? styles.compact : ""} ${progressRun && researchPanelOpen ? styles.workspaceWithPanel : ""}`}>
+  return <main className={`${styles.workspace} ${hasConversation ? styles.workspaceConversation : ""} ${density === "compact" ? styles.compact : ""} ${progressRun ? styles.workspaceResearchLayout : ""} ${progressRun && researchPanelOpen ? styles.workspaceWithPanel : ""}`}>
     <div className={styles.chatColumn}>
     {!hasConversation ? <section className={styles.welcome} aria-label="开始一项新研究">
       <div className={`${styles.heroLight} ${!ambient ? styles.heroLightMuted : ""}`} aria-hidden="true" />
@@ -466,7 +434,6 @@ export default function ResearchChat({
         <div><strong>{statusText[run.status] || run.status}</strong>{stageSuffix(run) && <span>{stageSuffix(run)}</span>}{run.research_mode && <span> · {modeText(run.research_mode)}</span>}{run.error && <p>{run.error}</p>}</div>
         {(["failed", "interrupted"].includes(run.status)) && <button type="button" disabled={!!busy} onClick={retry}>{busy === "retry" ? "重新执行中…" : "重新执行"}</button>}
       </div>}
-      {run && activeRun && run.subtasks?.length ? <div className={styles.currentActivity}><ResearchActivity items={run.subtasks} /></div> : null}
       <form className={styles.composer} onSubmit={submit} autoComplete="off">
         <label className={styles.visuallyHidden} htmlFor="promptInput">输入你的研究问题</label>
         <textarea
@@ -507,6 +474,16 @@ export default function ResearchChat({
       </>}
     </div>
     </div>
-    {progressRun && researchPanelOpen && <ResearchProgressPanel run={progressRun} onClose={closeProgressPanel} closeButtonRef={progressCloseButton} />}
+    {progressRun && <ResearchPanel
+      key={progressRun.id}
+      run={progressRun}
+      report={progressReport}
+      open={researchPanelOpen}
+      status={statusText[progressRun.status] || progressRun.status}
+      stage={stageLabel(progressRun)}
+      active={["queued", "pending", "running"].includes(progressRun.status)}
+      onClose={closeProgressPanel}
+      closeButtonRef={progressCloseButton}
+    />}
   </main>;
 }
