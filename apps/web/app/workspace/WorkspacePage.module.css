@@ -133,9 +133,6 @@
 .brand[aria-expanded="true"] .brandChevron { transform: rotate(180deg); }
 
 .headerActions { display: flex; align-items: center; gap: 18px; }
-.headerStatus { display: flex; align-items: center; gap: 10px; color: #707080; font: 10px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; letter-spacing: .21em; white-space: nowrap; }
-.statusDot { width: 5px; height: 5px; border-radius: 50%; background: #61d8d6; box-shadow: 0 0 13px #60e4f4; }
-.headerDivider { width: 1px; height: 19px; margin: 0 8px; background: rgba(255, 255, 255, .14); }
 
 .settingsButton {
   display: flex;
@@ -154,7 +151,7 @@
 }
 
 .settingsButton:hover { border-color: rgba(184, 171, 255, .38); background: rgba(255, 255, 255, .065); box-shadow: 0 0 26px rgba(156, 105, 255, .09); }
-.brand:focus-visible, .settingsButton:focus-visible, .historyClose:focus-visible, .newButton:focus-visible, .historyItem:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
+.brand:focus-visible, .settingsButton:focus-visible, .newButton:focus-visible, .historyItem:focus-visible, .historyMore:focus-visible, .historyMenu button:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
 
 .historyPanel {
   position: fixed;
@@ -180,11 +177,8 @@
 
 .historyPanelOpen { opacity: 1; pointer-events: auto; transform: translate(0, 0) scale(1); visibility: visible; }
 .historyTop { flex: none; padding: 25px 20px 16px; }
-.drawerKicker { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; color: #686a7e; font: 10px ui-monospace, "SFMono-Regular", Consolas, monospace; letter-spacing: .23em; }
-.drawerKicker::before { width: 4px; height: 4px; border-radius: 50%; background: #80aaff; box-shadow: 0 0 10px #80aaff; content: ""; }
-.historyHeading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 20px; }
+.historyHeading { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 20px; }
 .historyHeading h2 { margin: 0; font-size: 20px; font-weight: 580; letter-spacing: .02em; }
-.historyClose { display: grid; place-items: center; padding: 5px; border: 0; background: transparent; color: #9a99aa; }
 
 .newButton {
   display: flex;
@@ -213,16 +207,40 @@
 
 .historyList { flex: 1; min-height: 0; overflow-y: auto; padding: 0 11px 20px; scrollbar-color: #363342 transparent; scrollbar-width: thin; }
 .historyGroupTitle { margin: 18px 12px 8px; color: #696879; font-size: 10px; font-weight: 650; letter-spacing: .08em; }
-.historyItem { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 42px; padding: 10px 11px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #bcbbc9; text-align: left; transition: background .2s, color .2s; }
+.historyEntry { margin: 1px 0; }
+.historyRow { display: flex; align-items: center; min-width: 0; border-radius: 8px; }
+.historyItem { display: flex; flex: 1; align-items: center; gap: 11px; width: auto; min-width: 0; min-height: 42px; padding: 10px 7px 10px 11px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #bcbbc9; text-align: left; transition: background .2s, color .2s; }
 .historyItem:hover, .historyItemActive { background: rgba(255, 255, 255, .065); color: #fff; }
 .historyItemActive { border-color: rgba(172, 141, 255, .16); }
 .historyItem:disabled { cursor: wait; opacity: .58; }
 .historyItem .icon { width: 15px; height: 15px; opacity: .58; }
 .historyItem span { flex: 1; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.historyMore { display: grid; flex: 0 0 34px; place-items: center; width: 32px; height: 32px; margin-right: 3px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #aaa8bb; opacity: 0; pointer-events: none; transition: opacity .15s, background .15s, border-color .15s; visibility: hidden; }
+.historyMore svg { width: 17px; height: 17px; fill: currentColor; }
+.historyRow:hover .historyMore, .historyRow:focus-within .historyMore, .historyMore[aria-expanded="true"] { opacity: 1; pointer-events: auto; visibility: visible; }
+.historyMore:hover, .historyMore[aria-expanded="true"] { border-color: rgba(211, 203, 255, .14); background: rgba(255, 255, 255, .08); color: #fff; }
+.historyMenu { display: flex; flex-direction: column; gap: 2px; margin: 2px 7px 8px 35px; padding: 4px; border: 1px solid rgba(236, 229, 255, .1); border-radius: 8px; background: rgba(17, 16, 25, .96); box-shadow: 0 9px 22px rgba(0, 0, 0, .28); }
+.historyMenu button { min-height: 34px; padding: 7px 10px; border: 0; border-radius: 5px; background: transparent; color: #d1cfde; font-size: 12px; text-align: left; }
+.historyMenu button:hover { background: rgba(255, 255, 255, .07); color: #fff; }
+.historyMenu button:disabled { cursor: wait; opacity: .58; }
+.historyMenu .deleteMenuItem { color: #efa9b4; }
+.historyMenu .deleteMenuItem:hover { background: rgba(186, 68, 89, .13); color: #ffc2ca; }
 .historyEmpty, .historyError { margin: 14px 13px; color: #777587; font-size: 12px; line-height: 1.8; }
 .historyError { color: #e293a1; }
-.historyBottom { flex: none; padding: 16px 20px; border-top: 1px solid rgba(255, 255, 255, .08); color: #666477; font: 10px/1.65 ui-monospace, Consolas, monospace; letter-spacing: .03em; }
-.historyBottom strong { color: #a09cac; font-weight: 550; }
+
+.deleteDialog { width: min(420px, calc(100vw - 32px)); max-width: none; padding: 0; overflow: visible; border: 1px solid rgba(236, 229, 255, .16); border-radius: 14px; background: linear-gradient(145deg, #1a1923, #111018); box-shadow: 0 22px 80px rgba(0, 0, 0, .65); color: #f0eff6; }
+.deleteDialog::backdrop { background: rgba(3, 3, 8, .69); backdrop-filter: blur(5px); }
+.deleteDialogContent { padding: 24px; }
+.deleteDialogContent h2 { margin: 0 0 10px; font-size: 18px; font-weight: 620; }
+.deleteDialogContent p { margin: 0; color: #c1bfce; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.deleteDialogContent .deleteError { margin-top: 13px; color: #f1aab6; }
+.deleteDialogActions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+.deleteDialogActions button { min-width: 76px; min-height: 38px; padding: 8px 14px; border: 1px solid rgba(238, 233, 255, .14); border-radius: 7px; background: rgba(255, 255, 255, .04); color: #e3e1eb; font-size: 12px; }
+.deleteDialogActions button:hover { background: rgba(255, 255, 255, .09); }
+.deleteDialogActions .deleteConfirm { border-color: rgba(240, 117, 139, .32); background: rgba(181, 53, 77, .2); color: #ffccd3; }
+.deleteDialogActions .deleteConfirm:hover { background: rgba(181, 53, 77, .34); }
+.deleteDialogActions button:disabled { cursor: wait; opacity: .6; }
+.deleteDialogActions button:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
 
 .pageError { position: absolute; z-index: 65; top: 108px; right: 32px; display: flex; align-items: center; gap: 18px; max-width: min(520px, calc(100vw - 40px)); padding: 12px 16px; border: 1px solid rgba(255, 161, 170, .2); border-radius: 10px; background: rgba(57, 28, 39, .95); box-shadow: 0 12px 36px rgba(0, 0, 0, .35); color: #f2c7cc; font-size: 12px; line-height: 1.6; }
 .pageError button { border: 0; background: transparent; color: inherit; font-size: 18px; }
@@ -238,7 +256,6 @@
 
 @media (max-width: 760px) {
   .header { height: 81px; padding: 0 22px; }
-  .headerStatus, .headerDivider { display: none; }
   .brandCode { font-size: 22px; }
   .brandLabel { font-size: 10px; }
   .brandDivider { height: 25px; }
@@ -246,6 +263,10 @@
   .settingsButton span { display: none; }
   .historyPanel { top: 75px; bottom: 12px; left: 12px; }
   .loadingOverlay { top: 81px; }
+}
+
+@media (hover: none) {
+  .historyMore { opacity: 1; pointer-events: auto; visibility: visible; }
 }
 
 @media (max-height: 610px) {

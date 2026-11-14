@@ -62,7 +62,6 @@ export default function RuntimeLogsSettings() {
 
   return <>
     <section className="card settings-card" aria-labelledby="runtime-logs-title" aria-busy={busy}>
-      <div className="section-kicker">MAINTENANCE</div>
       <h2 id="runtime-logs-title">运行日志</h2>
       <p>清除本机 API 与 worker 的当前日志和轮转备份。项目、报告与私有诊断材料会保留。</p>
       {notice && <p className="settings-alert" role="status">{notice}</p>}

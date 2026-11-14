@@ -4,6 +4,35 @@
 
 ## 当前任务
 
+- 主题：修复网页读取连续失败耗尽工具预算，以及终稿引用全部失效时阶段性发现丢失的问题。
+- 工作分支：`codex/research-history-controls`，延续研究流程修复。
+- 协作：Luna 子代理实现工作流与回归测试，主代理验证实际 API/worker 和报告导出。
+
+## 上一阶段：工作区整合研究模型输入优化
+
+- 主题：将研究模型输入裁剪与 token 用量日志合入工作区分支。
+- 工作分支：`codex/research-history-controls`，已整合 `codex/research-token-budget`。
+
+## 上一阶段：研究模型输入优化
+
+- 主题：减少深度研究反复发送的候选资料和证据，按阶段裁剪模型输入，记录供应商返回的 token 用量。
+- 工作分支：`codex/research-token-budget`，从 `main` 创建。
+- 协作：主代理负责对照测量和验收，Luna 子代理分别负责工作流载荷与模型用量日志。
+
+## 上一阶段：研究面板移植
+
+- 主题：根据界面验收反馈，移植本机 DeerFlow 的研究双栏布局、报告/活动卡片和展开动画，替换上一版自定义进度栏。
+- 工作分支：`codex/research-history-controls`，延续工作区界面调整。
+- 协作：主代理负责原版对照、规划和验收，`gpt-6-luna` / `xhigh` 子代理负责研究界面编程；保留已完成的设置弹窗和星形图标动画。
+
+## 上一阶段：研究历史操作
+
+- 主题：清理开始页与研究工作区的装饰性说明；研究历史改为悬浮抽屉，支持持久化置顶与确认删除。
+- 工作分支：`codex/research-history-controls`，从 `main` 创建。
+- 协作：主代理负责规划、整合和验收；`/root/ui` 实现前端，`/root/history_api` 实现本机 API、SQLite 和后端回归，两位子代理均为 `gpt-6-luna`、`xhigh`。
+
+## 上一阶段：桌面研究工作区与研究模式
+
 - 主题：依据 `tufa_desktop.html` 调整桌面研究工作区：以跨项目平铺历史导航，支持 API/搜索引擎设置、当前项目 PDF 与研究模式控制；“研究偏好”保留为不影响行为的占位。
 - 工作分支：`codex/launch-page`，延续同一 UI 任务分支。
 - 协作：主代理负责规划、最终浏览器验收和审查；`/root/workflow` 负责前端，`/root/prompts` 负责 API、worker、数据库、工作流、模板和后端测试，`/root/verification` 负责隔离 API/worker 验收脚本、UI fixture 与文档。沿用 `gpt-6-luna`、`xhigh` 子代理配置。

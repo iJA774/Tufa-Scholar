@@ -109,8 +109,75 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual([item['project_id'] for item in rows], [second_project, first_project, first_project])
         self.assertEqual(rows[0]['updated_at'], '2026-11-12 09:00:00')
         self.assertIsNone(rows[-1]['updated_at'])
-        self.assertTrue(all(set(item) == {'id', 'project_id', 'title', 'updated_at'} for item in rows))
+        self.assertTrue(all(set(item) == {'id', 'project_id', 'title', 'pinned', 'updated_at'} for item in rows))
+        self.assertTrue(all(item['pinned'] is False for item in rows))
         self.assertEqual(c.get(f'/projects/{first_project}/conversations').status_code, 200)
+
+    def test_conversation_pin_patch_updates_boolean_and_moves_it_ahead_of_recent_history(self):
+        c = self.client
+        project = c.post('/projects', json={'name': 'pinning'}).json()['id']
+        older = c.post(f'/projects/{project}/questions', json={'question': 'older'}).json()
+        newer = c.post(f'/projects/{project}/questions', json={'question': 'newer'}).json()
+
+        response = c.patch(f"/conversations/{older['conversation_id']}", json={'pinned': True})
+        self.assertEqual(response.status_code, 200)
+        updated = response.json()
+        self.assertEqual(updated['id'], older['conversation_id'])
+        self.assertEqual(updated['project_id'], project)
+        self.assertTrue(updated['pinned'] is True)
+        self.assertEqual(updated['title'], 'older')
+        self.assertIsNotNone(updated['updated_at'])
+        rows = c.get('/conversations').json()
+        self.assertEqual([row['id'] for row in rows], [older['conversation_id'], newer['conversation_id']])
+        self.assertEqual([row['pinned'] for row in rows], [True, False])
+
+        unpinned = c.patch(f"/conversations/{older['conversation_id']}", json={'pinned': False})
+        self.assertEqual(unpinned.status_code, 200)
+        self.assertIs(unpinned.json()['pinned'], False)
+        self.assertEqual(c.patch(f"/conversations/{older['conversation_id']}", json={'pinned': 'false'}).status_code, 422)
+        self.assertEqual(c.patch('/conversations/999999', json={'pinned': True}).status_code, 404)
+
+    def test_delete_conversation_rejects_pending_and_running_then_removes_only_its_history(self):
+        c = self.client
+        project = c.post('/projects', json={'name': 'delete conversation'}).json()['id']
+        paper = c.post(f'/projects/{project}/papers', json={'title': 'keep this paper'}).json()
+        target = c.post(f'/projects/{project}/conversations', json={'title': 'target'}).json()
+        other = c.post(f'/projects/{project}/questions', json={'question': 'keep this conversation'}).json()
+        run = c.post(f'/projects/{project}/questions', json={
+            'question': 'target question', 'conversation_id': target['id'],
+        }).json()
+
+        self.assertEqual(c.delete(f"/conversations/{target['id']}").status_code, 409)
+        claimed = repo.claim_task()
+        self.assertEqual(claimed['id'], other['run_id'])
+        repo.fail_task(claimed['id'], 'finished for this test')
+        claimed = repo.claim_task()
+        self.assertEqual(claimed['id'], run['run_id'])
+        self.assertEqual(c.delete(f"/conversations/{target['id']}").status_code, 409)
+        repo.fail_task(run['run_id'], 'retry this task')
+        retry = c.post(f"/runs/{run['run_id']}/retry").json()
+        self.assertEqual(retry['origin_run_id'], run['run_id'])
+        self.assertEqual(c.delete(f"/conversations/{target['id']}").status_code, 409)
+        claimed = repo.claim_task()
+        self.assertEqual(claimed['id'], retry['id'])
+        self.assertEqual(c.delete(f"/conversations/{target['id']}").status_code, 409)
+        repo.finish_chat_task(retry['id'], 'target answer', [])
+
+        from src.persistence.storage import connect_database
+        with connect_database() as db:
+            report_id = db.execute('SELECT id FROM reports WHERE conversation_id=?', (target['id'],)).fetchone()[0]
+        self.assertEqual(c.delete(f"/conversations/{target['id']}").status_code, 204)
+        self.assertEqual(c.delete(f"/conversations/{target['id']}").status_code, 404)
+        self.assertEqual(c.patch(f"/conversations/{target['id']}", json={'pinned': True}).status_code, 404)
+        self.assertEqual(c.get(f"/conversations/{other['conversation_id']}/messages").status_code, 200)
+        self.assertEqual(c.get(f'/reports/{report_id}').status_code, 404)
+        self.assertEqual(c.get(f'/projects/{project}/papers').json()[0]['id'], paper['id'])
+        self.assertEqual(c.get('/projects').json()[0]['id'], project)
+        with connect_database() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM tasks WHERE conversation_id=?', (target['id'],)).fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM messages WHERE conversation_id=?', (target['id'],)).fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reports WHERE conversation_id=?', (target['id'],)).fetchone()[0], 0)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
 
     def test_existing_task_rows_migrate_to_auto_without_rebuilding_database(self):
         from src.persistence.storage import initialize_storage
@@ -139,6 +206,8 @@ class ChatApiTests(unittest.TestCase):
                     self.assertEqual(tuple(row), ('q', 'auto'))
                     message = migrated.execute('SELECT content FROM messages WHERE id=1').fetchone()
                     self.assertEqual(message[0], 'legacy message')
+                    conversation = migrated.execute('SELECT project_id, title, pinned FROM conversations WHERE id=1').fetchone()
+                    self.assertEqual(tuple(conversation), (1, 'legacy conversation', 0))
                     migrated.execute("INSERT INTO tasks (project_id, query, source, status, stage, kind) VALUES (1, 'new', 'auto', 'pending', 'pending', 'chat')")
                     self.assertEqual(migrated.execute('SELECT research_mode FROM tasks WHERE query=?', ('new',)).fetchone()[0], 'auto')
 

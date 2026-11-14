@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Que
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from pypdf import PdfReader
 
 from src.persistence import repository as repo
@@ -102,6 +102,10 @@ class ProjectInput(BaseModel):
 
 class ConversationInput(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+
+
+class ConversationPinnedInput(BaseModel):
+    pinned: StrictBool
 
 
 class PaperInput(BaseModel):
@@ -238,6 +242,24 @@ def conversations(project_id: int):
 @app.get('/conversations')
 def all_conversations():
     return repo.list_all_conversations()
+
+
+@app.patch('/conversations/{conversation_id}')
+def patch_conversation(conversation_id: int, body: ConversationPinnedInput):
+    conversation = repo.update_conversation_pinned(conversation_id, body.pinned)
+    if conversation is None:
+        raise HTTPException(404, '对话不存在')
+    return conversation
+
+
+@app.delete('/conversations/{conversation_id}', status_code=204)
+def delete_conversation(conversation_id: int):
+    result = repo.delete_conversation(conversation_id)
+    if result == 'missing':
+        raise HTTPException(404, '对话不存在')
+    if result == 'active':
+        raise HTTPException(409, '对话有待处理或正在运行的任务，请等待完成后删除')
+    return Response(status_code=204)
 
 
 @app.post('/projects/{project_id}/conversations', status_code=201)

@@ -52,13 +52,15 @@ pnpm dev:web
 
 ## 使用
 
-打开首页后点击“开始使用”进入研究工作区；GitHub 入口会在新标签页打开 [Tufa Scholar 仓库](https://github.com/iJA774/Tufa-Scholar)。首页不依赖 API。研究工作区使用本机 `/api` 代理。历史以跨项目的平铺列表展示；打开历史时工作区切换至其所属项目。
+打开首页后点击“开始使用”进入研究工作区；GitHub 入口会在新标签页打开 [Tufa Scholar 仓库](https://github.com/iJA774/Tufa-Scholar)。首页不依赖 API。研究工作区使用本机 `/api` 代理。将光标移到左上角标志可展开研究历史，移出标志和抽屉会收起。悬浮在会话上时，可用右侧“…”置顶、解除置顶或删除。置顶状态保存在本机；删除需确认，且有待处理或正在运行任务的会话暂不能删除。打开历史时工作区切换至其所属项目。
 
 在提问框切换“深度研究”或“快速探索”并输入问题。深度研究无条件进入研究流程；快速探索无条件直接回答，不调用检索工具。重试沿用原任务模式。设置中的“通用”可选择本次模型、思考强度及发送快捷键；“研究偏好”仅展示禁用的占位控件，不影响后端。
 
-深度研究会先由背景调查实际搜索和筛选资料，再规划至多两轮，最后生成终稿。直接回答不调用检索工具。可展开任务进度查看研究阶段与小结，完成后查看回答、引用和证据。
+深度研究会先由背景调查搜索和筛选资料，再规划至多两轮，最后生成终稿。提交深度研究后，聊天收窄并展开右侧研究卡片；“活动”显示当前阶段、已记录的小结和来源，“报告”在结果可用后展示正文，卡片可关闭和重新打开。双栏布局和动画移植自 DeerFlow。快速探索继续在聊天中显示状态和回答。完成后可查看回答、引用和证据。
 
-在设置的“服务与模型”“网页搜索”中保存 API 和搜索引擎配置；在“本地文件”中导入 PDF、查看文献及打开原文。文件保留原有项目归属，同一范围内的会话共享文件，新研究沿用当前范围。PDF 按可提取文本取证并保留版本与页码；图片型或加密 PDF 可能无法取证，重复文件按内容摘要去重。
+点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文件”可打开浏览器的目录选择器，预览选中目录及子目录中的文件名。“关于”在新标签页打开项目的 GitHub 仓库。
+
+已有文献和通过本机 API 导入的 PDF 按项目保存，新研究沿用当前项目。PDF 按可提取文本取证并保留版本与页码，图片型或加密 PDF 可能无法取证，重复文件按内容摘要去重。
 
 网页搜索工具也可独立调用，结果不自动导入论文库。网页正文读取限制公网地址和重定向；摘要和网页片段不能视作完整原文。Markdown 报告与 CSV 证据表可从完成任务下载。工具注册、参数和来源约束见 [src/tools/README.md](src/tools/README.md)；六个模型提示词 ID 与数据契约见 [docs/PROMPTS.md](docs/PROMPTS.md)。
 
@@ -71,7 +73,9 @@ pnpm dev:web
 | `GET/PUT /settings` | 读取配置状态或保存本机配置，不返回密钥原文 |
 | `POST /settings/models`、`GET /models` | 发现或列出模型 |
 | `GET/POST /projects/{project_id}/conversations` | 列出、创建对话 |
-| `GET /conversations` | 跨项目平铺列出历史会话，按更新时间倒序并返回所属 `project_id` |
+| `GET /conversations` | 跨项目平铺列出历史会话，置顶优先，其余按更新时间倒序，返回 `project_id` 与 `pinned` |
+| `PATCH /conversations/{conversation_id}` | 设置 `pinned` 布尔值，返回更新后的会话 |
+| `DELETE /conversations/{conversation_id}` | 删除该会话、消息、报告及其任务；若有待处理或正在运行的任务则返回 409 |
 | `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
 | `POST /projects/{project_id}/papers/import` | 上传 PDF |
 | `GET /projects/{project_id}/web-search?q=...` | 独立网页搜索 |
@@ -88,6 +92,20 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 ```
 
 ## 验证
+
+### 网页读取与终稿收束（2026-11-14）
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 156 项测试，覆盖失败网页区间不重复请求、正常分页、终稿引用无效以及有无可保留阶段发现。
+- `.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。隔离 API/worker 验证无效终稿引用被拒时，保存的 Markdown 和证据 CSV 仍包含有效的阶段性引用。使用模拟模型与搜索服务。
+- `worker.log` 新增 `research_round_stopped` 与 `report_validation`，便于按任务核对工具循环的收束原因和报告引用校验结果。
+
+### 研究模型输入裁剪与用量日志（2026-11-14）
+
+- 合入工作区分支后复验通过：153 项后端测试、`scripts.verify_chat`、`scripts.verify_web_search`、`pnpm build:web` 和 `pnpm check:web`。两条研究闭环均使用本地模拟服务。
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q`、`.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。两项闭环使用隔离 SQLite、实际本机 API 和 worker，以及模拟模型与搜索服务。
+- 同一组 20 篇合成论文和两轮研究计划下，发送给模型的用户 JSON 正文从 497,460 降至 94,680 字符，下降约 81%；调用从 10 增至 12 次，报告均保留 1 条引用。此对照不含系统提示，只衡量正文体积；真实计费及报告质量仍需真实服务验证。
+- `data/logs/worker.log` 中按 `run_id`、`prompt_id`、`phase`、`attempt` 查询。`model_call started` 报告请求字符数，`completed` 与 `invalid` 记录供应商返回的 token。缓存与推理 token 是供应商提供的明细，不能与 `total_tokens` 再相加；缺失值为 `na`。
 
 ### 诊断
 
@@ -143,3 +161,26 @@ pnpm build:web
 - `pnpm check:web`、未设置 `TUFA_API_URL` 时的 `pnpm build:web`：最终通过；构建产物的 `/api` 代理恢复为 `http://127.0.0.1:8000`。
 - `pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module commonjs --outDir ../../.cache/polling-test --skipLibCheck` 与 `node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)`：通过，轮询回归 5/5；`git diff --check` 通过。
 - 本轮只验收桌面 1280×720，没有执行移动端 viewport 验收。自启的前端、模拟 API 与参考服务已停止；用户原有 `next-env.d.ts` 和 `.idea/` 改动保留，未操作默认用户数据库。
+
+### 研究历史操作验收（2026-11-13）
+
+- `pnpm check:web`、`pnpm build:web`：通过。
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q`：148 项通过。覆盖置顶排序、删除任务冲突、重试链和会话关联数据清理。
+- 使用 `pnpm` 工作区的 Next.js 开发入口与 `scripts.fixture_api --local-config`，以隔离 SQLite 验证 `/`、`/workspace`。1280×720 桌面浏览器验证开始页导航、指定文案移除、指针进出抽屉、悬浮行显示操作、置顶后刷新保留、解除置顶、删除确认弹窗及取消后保留会话。
+- 确认删除的持久化结果通过同一隔离 fixture 的 HTTP `DELETE` 验证：返回 204，目标消息和报告返回 404，其他两条会话保留。浏览器未点击最终删除确认；未测试触屏或真实模型、搜索服务，未操作默认用户数据库。
+
+### 设置与研究进度栏验收（2026-11-13）
+
+- `pnpm check:web`、`pnpm build:web` 和前端说明中的轮询回归通过，轮询共 5 项。
+- 以 `scripts.fixture_api --local-config` 和独立 SQLite 启动本机 API，再通过 Next.js 开发入口验收。浏览器验证设置卡片遮罩、Esc 和点击遮罩关闭、草稿保留、直接访问 `/settings`、GitHub 链接地址和新标签页属性，以及预览测试目录中的 `.txt` 与子目录中的 `.csv` 文件名。
+- 桌面 1280×720 验证聊天与进度分栏，430×760 验证窄屏抽屉可关闭。通过 fixture 逐步推进深度任务，并写入一条测试小结，验证等待、运行、完成、失败、重试后自动展开，以及关闭后重新打开。完成的历史任务可手动重开，切换到快速探索会话时不显示前一会话的进度。
+- 浏览器确认星形描边引用动画渐变，周围光点启用漂浮动画。减少动态效果按样式规则检查。本轮未调用真实模型和搜索服务。
+
+### DeerFlow 研究面板移植验收（2026-11-14）
+
+- 配色调整后，`pnpm check:web`、`pnpm build:web` 通过，首页和工作台返回 HTTP 200。用隔离 fixture 在 1280×720 下查看活动、来源和报告，确认卡片与输入框采用同色系渐变，选中标签和链接使用工作台的蓝紫强调色。
+
+- `pnpm check:web`、`pnpm build:web`、`git diff --check` 通过；首页及工作台实际 HTTP 入口返回 200。
+- 对照本机 DeerFlow 自带 `rag` 回放及源码。1280×720 实测展开时聊天宽 538px、右卡片宽 575px、间距 32px；收起时聊天宽 768px、平移 287.5px，面板保持挂载并缩放到 0、禁用交互。采用原版 300ms ease-out 动画参数。保留 TUFA 顶栏，因此卡片顶部为 95px，原版为 48px。
+- 通过独立 `.cache/deerflow-panel-final` SQLite 和 `scripts.fixture_api --local-config` 验证首次展开、运行阶段、小结与来源、关闭重开、完成自动切报告、新任务清除旧报告、失败重试自动展开、切换快速会话移除旧面板。430×760 下验证卡片无横向溢出且可关闭。
+- 本轮任务由 fixture 推进，不启动 worker，不调用真实模型或搜索服务。原版完整 MIT 许可保留在前端研究组件旁。

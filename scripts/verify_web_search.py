@@ -151,6 +151,24 @@ def main():
             assert 'web_snippet' in report_csv and 'searx' in report_csv
             assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
 
+            rejected_report = call('POST', f'/projects/{project}/questions', json={
+                'question': 'reporter-invalid-citation accuracy', 'source': 'web',
+            })
+            recovered = wait(rejected_report['run_id'])
+            assert recovered['status'] == 'succeeded', recovered
+            recovered_report = recovered['result']
+            assert '证据不足' in recovered_report['content']
+            assert '92%' in recovered_report['content']
+            assert 'fixture-unavailable' not in recovered_report['content']
+            stage_citations = {identifier for step in recovered['subtasks']
+                               for finding in step['findings'] for identifier in finding['citations']}
+            recovered_ids = {item['id'] for item in recovered_report['evidence']}
+            assert recovered_ids and recovered_ids == stage_citations
+            recovered_csv = client.get(f"/reports/{recovered_report['report_id']}/evidence.csv")
+            assert recovered_csv.status_code == 200 and all(identifier in recovered_csv.text for identifier in recovered_ids)
+            recovered_markdown = client.get(f"/reports/{recovered_report['report_id']}/markdown")
+            assert recovered_markdown.status_code == 200 and recovered_markdown.text == recovered_report['content']
+
             two_round = call('POST', f'/projects/{project}/questions', json={
                 'question': 'two-rounds accuracy', 'source': 'web',
             })
@@ -168,6 +186,7 @@ def main():
 
             # A provider failure must still yield a completed, evidence-free report.
             before_failure_searches = len(fixture.search_requests)
+            before_failure_requests = len(fixture.model_requests)
             failed_question = call('POST', f'/projects/{project}/questions', json={
                 'question': 'research-failure accuracy', 'source': 'web',
             })
@@ -177,12 +196,28 @@ def main():
             assert stages(failed_question['run_id'])[-1:] == ['reporter'], stages(failed_question['run_id'])
             assert failed_task['result']['evidence'] == []
             assert '没有可核查证据' in failed_task['result']['content'] or '证据不足' in failed_task['result']['content']
-            assert len(fixture.search_requests) - before_failure_searches >= 4, fixture.search_requests[before_failure_searches:]
+            failure_searches = fixture.search_requests[before_failure_searches:]
+            assert len(failure_searches) == 3, failure_searches
+            assert len(set(failure_searches)) >= 2, failure_searches
+
+            failure_requests = fixture.model_requests[before_failure_requests:]
+            failure_payloads = []
+            for request in failure_requests:
+                system = request['messages'][0]['content']
+                match = re.search(r'运行节点标识：([a-z_]+)', system)
+                payload = json.loads(request['messages'][1]['content'])
+                if payload.get('question') == 'research-failure accuracy':
+                    failure_payloads.append((match.group(1) if match else '', payload))
+            researcher_payloads = [payload for role, payload in failure_payloads if role == 'researcher']
+            assert [payload.get('phase') for payload in researcher_payloads] == ['act', 'act', 'draft'], researcher_payloads
+            reporter_payloads = [payload for role, payload in failure_payloads if role == 'reporter']
+            assert len(reporter_payloads) == 1 and reporter_payloads[0].get('evidence') == [], reporter_payloads
 
             print('Simulated HTTP: quick mode stayed direct despite a contradictory dispatcher, with zero searches.')
             print('Simulated HTTP: deep mode researched a greeting through background search and reporting.')
             print('Simulated HTTP: API web search, background filtering, web evidence and cited report passed.')
-            print('Provider failure: API reports a safe error; bounded researcher retries end in an explicit no-evidence report.')
+            print('Reporter citation rejection: report and CSV preserve valid provisional evidence.')
+            print('Provider failure: rewritten search retries stop after two consecutive failures and produce an explicit no-evidence report.')
             print('No real search provider or remote web page was contacted.')
     finally:
         try:

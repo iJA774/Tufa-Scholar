@@ -87,7 +87,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
         role = match.group(1) if match else ''
         result = self._model_result(role, payload, system)
         content = json.dumps(result, ensure_ascii=False)
-        self._send_json({'choices': [{'message': {'content': content}}]})
+        prompt_tokens = max(1, len(system) // 4) + max(1, len(messages[1].get('content', '')) // 4) if len(messages) > 1 else max(1, len(system) // 4)
+        completion_tokens = max(1, len(content) // 4)
+        self._send_json({
+            'choices': [{'message': {'content': content}}],
+            'usage': {
+                'prompt_tokens': prompt_tokens,
+                'completion_tokens': completion_tokens,
+                'total_tokens': prompt_tokens + completion_tokens,
+                'prompt_tokens_details': {'cached_tokens': 0},
+                'completion_tokens_details': {'reasoning_tokens': 0},
+            },
+        })
 
     @staticmethod
     def _model_result(role, payload, system=''):
@@ -193,8 +204,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if evidence:
                 source = evidence[0].get('source_level')
                 claim = '网页搜索摘要记录准确率为 92%。' if source in {'web_content', 'web_snippet'} else '论文证据记录准确率为 92%。'
+                citation_id = 'fixture-unavailable' if 'reporter-invalid-citation' in folded else evidence[0]['id']
                 return {
-                    'sections': [{'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [evidence[0]['id']]}]}],
+                    'sections': [{'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [citation_id]}]}],
                     'limitations': [],
                 }
             return {
