@@ -189,14 +189,14 @@ class WorkflowFailureTests(unittest.TestCase):
             content, evidence = self._invoke_run(
                 Model(), source="auto", query="question as submitted", retrieve=retrieve, on_stage=stages.append,
             )
-            invoke_calls = [call.args for call in invoke.call_args_list]
+            invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
         self.assertIn(("question as submitted", "all"), searched)
         self.assertLessEqual(len(searched), workflow.MAX_BACKGROUND_SEARCHES)
         self.assertTrue(all(query_text == "question as submitted" for query_text, _ in searched))
         self.assertEqual(len([call for call in calls if call[0] == "literature/reporter"]), 1)
         self.assertIn("reporter", stages)
-        self.assertIn("collect_evidence", [name for name, _, _ in invoke_calls])
+        self.assertIn("collect_evidence", [call[0] for call in invoke_calls])
         self.assertTrue(evidence)
         self.assertNotIn("private upstream detail", content)
         self.assertTrue(all("private upstream detail" not in repr(payload) for _, payload in calls))
@@ -319,13 +319,13 @@ class WorkflowFailureTests(unittest.TestCase):
                 "warnings": ["private upstream message"],
             }
 
-        invoke_names = []
+        invoke_calls = []
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
             content, evidence = self._invoke_run(Model(), source="all", retrieve=retrieve)
-            invoke_names = [call.args[0] for call in invoke.call_args_list]
+            invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
-        self.assertIn("search_papers", invoke_names)
-        self.assertIn("collect_evidence", invoke_names)
+        self.assertIn("search_papers", [name for name, _, _ in invoke_calls])
+        self.assertIn("collect_evidence", [name for name, _, _ in invoke_calls])
         self.assertTrue(evidence)
         self.assertIn("已保留可用的研究资料", content)
         self.assertIn("资料可能不完整", content)
@@ -412,13 +412,12 @@ class WorkflowFailureTests(unittest.TestCase):
             return {"url": url, "title": "Accuracy page", "markdown": full_page, "retrieved_at": "2026-11-12T10:00:00+08:00"}
 
         stages = []
-        invoke_names = []
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
             content, evidence = self._invoke_run(
                 Model(), source="web", query="accuracy", web_results=[sample_web_page(full_page)],
                 fetch_page=fetch, on_stage=stages.append,
             )
-            invoke_calls = [call.args for call in invoke.call_args_list]
+            invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
         self.assertEqual(web_calls, [("visible_first_next_offset", 10), ("second_offset", 10)])
         self.assertEqual(fetch_calls, ["https://example.org/accuracy", "https://example.org/accuracy"])
@@ -479,10 +478,10 @@ class WorkflowFailureTests(unittest.TestCase):
         invoke_calls = []
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
             self._invoke_run(Model(), source="web", query="accuracy", web_results=[sample_web_page()], fetch_page=fetch)
-            invoke_calls = [call.args for call in invoke.call_args_list]
+            invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
         self.assertEqual(fetch_calls, ["https://example.org/accuracy"])
-        self.assertEqual(invoke_names.count("read_web_page"), 1)
+        self.assertEqual([call[0] for call in invoke_calls].count("read_web_page"), 1)
         self.assertIn("duplicate_web_read_skipped", [item.get("code") for item in draft_feedback])
 
     def test_estimated_context_budget_stops_after_two_pages_and_latches(self):
@@ -545,7 +544,7 @@ class WorkflowFailureTests(unittest.TestCase):
             return units
 
         stages = []
-        invoke_names = []
+        invoke_calls = []
         with patch.object(workflow, "MAX_RESEARCH_DECISION_INPUT_UNITS", 100_000), \
              patch.object(workflow, "MAX_CUMULATIVE_RESEARCH_DECISION_INPUT_UNITS", 100_000), \
              patch.object(workflow, "structured_input_units", side_effect=measure_actual_input), \
@@ -554,7 +553,7 @@ class WorkflowFailureTests(unittest.TestCase):
                 Model(), source="web", query="accuracy", web_results=[sample_web_page(full_page)],
                 fetch_page=fetch, on_stage=stages.append,
             )
-            invoke_names = [call.args[0] for call in invoke.call_args_list]
+            invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
         self.assertEqual(len(measured_units), 3)
         self.assertTrue(all(0 < units < 100_000 for units in measured_units))
