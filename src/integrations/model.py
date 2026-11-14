@@ -9,7 +9,7 @@ import httpx
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from pydantic import ValidationError
 from src.infrastructure import settings
-from src.infrastructure.diagnostics import record_failure
+from src.infrastructure.diagnostics import diagnostic_context, record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,27 @@ def _render_prompt(prompt_id, template_context, json_schema, current_time):
     return PROMPT_ENV.get_template(prompt_id + '.md').render(**context)
 
 
+def _usage_log_fields(usage):
+    """Return only standard numeric usage fields, never provider response text."""
+    usage = usage if isinstance(usage, dict) else {}
+
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+
+    prompt_details = usage.get('prompt_tokens_details')
+    completion_details = usage.get('completion_tokens_details')
+    prompt_details = prompt_details if isinstance(prompt_details, dict) else {}
+    completion_details = completion_details if isinstance(completion_details, dict) else {}
+    values = {
+        'prompt_tokens': count(usage.get('prompt_tokens')),
+        'completion_tokens': count(usage.get('completion_tokens')),
+        'total_tokens': count(usage.get('total_tokens')),
+        'cached_tokens': count(prompt_details.get('cached_tokens')),
+        'reasoning_tokens': count(completion_details.get('reasoning_tokens')),
+    }
+    return ' '.join(f'{key}={value if value is not None else "na"}' for key, value in values.items())
+
+
 def structured(prompt_id, payload, schema, *, model_options=None, template_context=None):
     config = settings.model_config()
     if model_options and model_options.get('model_name'):
@@ -174,18 +195,28 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         raise RuntimeError('请先在设置中配置模型地址和模型名称')
     json_schema = schema.model_json_schema()
     headers = {'Authorization': 'Bearer ' + config['api_key']} if config.get('api_key') else {}
-    start = time.monotonic()
+    scope = diagnostic_context()
+    run_id = scope.get('run_id')
+    phase = payload.get('phase') if isinstance(payload, dict) else None
+    if phase not in {'query', 'select', 'act', 'draft'}:
+        phase = 'na'
     payload_json = json.dumps(payload, ensure_ascii=False)
     options = {'reasoning_effort': model_options['reasoning_effort']} if model_options and model_options.get('reasoning_effort') else {}
     validation_feedback = None
     for attempt in (1, 2):
+        attempt_started = time.monotonic()
         now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')
         prompt = _render_prompt(prompt_id, template_context, json_schema, now)
         messages = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': payload_json}]
         if validation_feedback is not None:
             messages.append({'role': 'user', 'content': json.dumps({'validation_feedback': validation_feedback}, ensure_ascii=False)})
-        logger.info('model_call started prompt_id=%s attempt=%d', prompt_id, attempt)
+        system_chars = len(messages[0]['content'])
+        user_chars = sum(len(message['content']) for message in messages[1:])
+        logger.info('model_call started run_id=%s prompt_id=%s phase=%s attempt=%d system_chars=%d user_chars=%d input_chars=%d',
+                    run_id if run_id is not None else 'na', prompt_id, phase, attempt, system_chars, user_chars,
+                    system_chars + user_chars)
         content = None
+        usage = None
         context = {'prompt_id': prompt_id, 'attempt': attempt, 'rendered_prompt': prompt, 'model': config['model'], 'model_options': options, 'messages': messages}
         secrets = (config['api_key'],) if config.get('api_key') else ()
         try:
@@ -194,22 +225,35 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                                         'response_format': {'type': 'json_object'}, **options}, timeout=90)
             response.raise_for_status()
             content = response.text
-            content = response.json()['choices'][0]['message']['content']
+            body = response.json()
+            usage = body.get('usage') if isinstance(body, dict) else None
+            content = body['choices'][0]['message']['content']
             result = schema.model_validate_json(content)
-            logger.info('model_call completed prompt_id=%s attempt=%d elapsed_ms=%d status=%d', prompt_id, attempt, int((time.monotonic() - start) * 1000), response.status_code)
+            logger.info('model_call completed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d %s',
+                        run_id if run_id is not None else 'na', prompt_id, phase, attempt,
+                        int((time.monotonic() - attempt_started) * 1000), response.status_code,
+                        _usage_log_fields(usage))
             return result
         except httpx.HTTPStatusError as exc:
             diagnostic_id = record_failure(kind='http_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__, 'status': exc.response.status_code}, context=context, secrets=secrets)
-            logger.warning('model_call failed prompt_id=%s attempt=%d elapsed_ms=%d status=%d error_type=%s diagnostic_id=%s', prompt_id, attempt, int((time.monotonic() - start) * 1000), exc.response.status_code, type(exc).__name__, diagnostic_id)
+            logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d error_type=%s diagnostic_id=%s',
+                           run_id if run_id is not None else 'na', prompt_id, phase, attempt,
+                           int((time.monotonic() - attempt_started) * 1000), exc.response.status_code,
+                           type(exc).__name__, diagnostic_id)
             raise ModelServiceError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
         except httpx.RequestError as exc:
             diagnostic_id = record_failure(kind='network_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__}, context=context, secrets=secrets)
-            logger.warning('model_call failed prompt_id=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s', prompt_id, attempt, int((time.monotonic() - start) * 1000), type(exc).__name__, diagnostic_id)
+            logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s',
+                           run_id if run_id is not None else 'na', prompt_id, phase, attempt,
+                           int((time.monotonic() - attempt_started) * 1000), type(exc).__name__, diagnostic_id)
             raise ModelServiceError('模型服务连接失败或超时，请检查设置') from None
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             errors = _safe_validation_errors(exc, json_schema) if isinstance(exc, ValidationError) else [{'type': 'invalid_response', 'path': []}]
             diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)
-            logger.warning('model_call invalid prompt_id=%s attempt=%d errors=%s diagnostic_id=%s', prompt_id, attempt, json.dumps(errors, ensure_ascii=False), diagnostic_id)
+            logger.warning('model_call invalid run_id=%s prompt_id=%s phase=%s attempt=%d errors=%s diagnostic_id=%s %s',
+                           run_id if run_id is not None else 'na', prompt_id, phase, attempt,
+                           json.dumps(errors, ensure_ascii=False), diagnostic_id,
+                           _usage_log_fields(usage))
             if attempt == 2:
                 raise StructuredOutputError('模型返回的结构化结果无效') from None
             validation_feedback = errors

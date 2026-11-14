@@ -89,6 +89,12 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
+### 研究模型输入裁剪与用量日志（2026-11-14）
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q`、`.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。两项闭环使用隔离 SQLite、实际本机 API 和 worker，以及模拟模型与搜索服务。
+- 同一组 20 篇合成论文和两轮研究计划下，发送给模型的用户 JSON 正文从 497,460 降至 94,680 字符，下降约 81%；调用从 10 增至 12 次，报告均保留 1 条引用。此对照不含系统提示，只衡量正文体积；真实计费及报告质量仍需真实服务验证。
+- `data/logs/worker.log` 中按 `run_id`、`prompt_id`、`phase`、`attempt` 查询。`model_call started` 报告请求字符数，`completed` 与 `invalid` 记录供应商返回的 token。缓存与推理 token 是供应商提供的明细，不能与 `total_tokens` 再相加；缺失值为 `na`。
+
 ### 诊断
 
 结构化模型响应诊断保存在 `TUFA_DATA_DIR/diagnostics/`，可能包含问题、用户材料和模型响应，应按私有数据保管。仓库根目录可用 `.venv/Scripts/python.exe -B -m scripts.replay_diagnostic <诊断文件路径>` 对当前六个 prompt schema 做离线检查；不联网、不访问数据库。脱敏和环境差异可能影响复现。该工具不支持旧工作流 schema。

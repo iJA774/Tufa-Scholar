@@ -97,8 +97,8 @@ class ModelFixture:
                 if (item.get('source_level') in {'web_content', 'web_snippet'} if mode == 'web'
                     else item.get('source_level') not in {'web_content', 'web_snippet'})
             ]
-            selected = payload.get('background', {}).get('selected_candidates', [])
-            selected = next((item for item in selected if item.get('source') == mode), None)
+            selected_ids = payload.get('selected_candidate_ids', [])
+            selected = next((item for item in candidates if item.get('candidate_id') in selected_ids), None)
             candidate = selected or (candidates[0] if candidates else None)
             if not candidates:
                 tool = 'search_web' if mode == 'web' else 'search_papers'
@@ -253,9 +253,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(retrieve.call_args.args[1], 'accuracy')
         web.assert_not_called()
         self.assertIn('search_papers', [call.args[0] for call in invoke.call_args_list])
-        self.assertEqual(fixture.reporter_payloads[0]['background']['selected_candidates'][0]['title'], 'Accuracy study')
-        self.assertNotIn('Unrelated paper', str(fixture.planner_payloads[0]['background']['selected_candidates']))
-        self.assertIn('Accuracy study', str(fixture.reporter_payloads[0]['background']['selected_candidates']))
+        selected_ids = fixture.reporter_payloads[0]['background']['selected_candidate_ids']
+        self.assertEqual(len(selected_ids), 1)
+        self.assertEqual(fixture.planner_payloads[0]['background']['selected_candidate_ids'], selected_ids)
+        self.assertNotIn('selected_candidates', str(fixture.planner_payloads[0]))
+        self.assertNotIn('selected_candidates', str(fixture.reporter_payloads[0]))
         self.assertIn('92%', content)
         self.assertEqual(len(evidence), 1)
         self.assertEqual([note['status'] for note in notes], ['findings'])
@@ -291,7 +293,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(stages.count('planner'), 3)
                 self.assertEqual(stages[-1], 'reporter')
                 self.assertEqual(len(fixture.reporter_payloads), 1)
-                self.assertEqual(set(fixture.reporter_payloads[0]['candidates']), {'paper', 'web'})
+                self.assertNotIn('candidates', fixture.reporter_payloads[0])
                 self.assertNotIn('# 阶段性研究结果', content)
                 self.assertIn('局限', content)
                 if initial == second:
@@ -342,7 +344,7 @@ class WorkflowTests(unittest.TestCase):
         web.assert_not_called()
         self.assertTrue(calls)
         self.assertTrue(all(call[2] == (7,) for call in calls))
-        self.assertTrue(all(payload['history'] == [] for _, payload, _ in fixture.calls))
+        self.assertTrue(all(payload.get('history', []) == [] for _, payload, _ in fixture.calls))
         self.assertNotIn('OUTSIDE_SECRET', str(fixture.calls))
         self.assertNotIn('HISTORY_SECRET', str(fixture.calls))
         self.assertTrue(all(call.kwargs['context'].source == 'collection' and call.kwargs['context'].paper_ids == (7,) for call in invoke.call_args_list))
@@ -451,6 +453,44 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('C:/private/file.pdf', serialized)
         self.assertLessEqual(len(payload['evidence']), workflow.MAX_EVIDENCE_CONTEXT)
         self.assertLessEqual(sum(len(item.get('text', '')) for item in payload['evidence']), workflow.MAX_EVIDENCE_TEXT)
+
+    def test_payload_does_not_repeat_candidate_pool_inside_background(self):
+        candidate = {
+            'candidate_id': 'paper:one', 'title': 'Candidate title',
+            'abstract': 'A' * 1000, 'source': 'paper',
+        }
+        state = {
+            'research': {'query': 'study', 'source': 'auto'},
+            'background': {
+                'summary': 'Background overview', 'gaps': ['Needs full text'],
+                'selected_candidates': [candidate],
+            },
+            'candidate_pools': {'paper': [candidate], 'web': []},
+        }
+
+        payload = workflow._payload(state, current_candidates=[candidate])
+        wire_size = len(__import__('json').dumps(payload, ensure_ascii=False))
+
+        self.assertEqual(payload['background'], {
+            'summary': 'Background overview', 'gaps': ['Needs full text'],
+            'selected_candidate_ids': ['paper:one'],
+        })
+        self.assertNotIn('candidates', payload)
+        self.assertEqual(payload['current_candidates'], [candidate])
+        self.assertLess(wire_size, 1700)
+
+    def test_candidate_content_block_preview_respects_phase_text_limit(self):
+        candidate = {
+            'candidate_id': 'web:one', 'title': 'Official page',
+            'content_blocks': [
+                {'content': 'A' * 1_000, 'content_offset': 0},
+                {'content': 'B' * 1_000, 'content_offset': 1_000},
+            ],
+        }
+
+        view = workflow._candidate_view(candidate, 'web', text_limit=240)
+
+        self.assertEqual(sum(len(item['content']) for item in view['content_blocks']), 240)
 
     def test_reporter_checks_section_headings_for_markup_links_and_numbers(self):
         evidence = {'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study', 'source_level': 'abstract', 'text': 'Accuracy was 92%.'}

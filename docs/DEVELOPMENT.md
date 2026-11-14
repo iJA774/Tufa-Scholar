@@ -4,6 +4,12 @@
 
 ## 当前任务
 
+- 主题：减少深度研究反复发送的候选资料和证据，按阶段裁剪模型输入，记录供应商返回的 token 用量。
+- 工作分支：`codex/research-token-budget`，从 `main` 创建。
+- 协作：主代理负责对照测量和验收，Luna 子代理分别负责工作流载荷与模型用量日志。
+
+## 上一阶段：研究面板移植
+
 - 主题：依据 `tufa_desktop.html` 调整桌面研究工作区：以跨项目平铺历史导航，支持 API/搜索引擎设置、当前项目 PDF 与研究模式控制；“研究偏好”保留为不影响行为的占位。
 - 工作分支：`codex/launch-page`，延续同一 UI 任务分支。
 - 协作：主代理负责规划、最终浏览器验收和审查；`/root/workflow` 负责前端，`/root/prompts` 负责 API、worker、数据库、工作流、模板和后端测试，`/root/verification` 负责隔离 API/worker 验收脚本、UI fixture 与文档。沿用 `gpt-6-luna`、`xhigh` 子代理配置。

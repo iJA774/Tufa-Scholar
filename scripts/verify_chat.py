@@ -126,6 +126,20 @@ def main():
             retry_stages = stages(retry['id'])
             assert retry_stages[-1:] == ['reporter'], retry_stages
             assert 'background_investigator' in retry_stages, retry_stages
+            worker_log = (Path(temporary.name) / 'logs' / 'worker.log').read_text(encoding='utf-8', errors='replace')
+            usage_events = [line for line in worker_log.splitlines()
+                            if f'run_id={retry["id"]} ' in line and 'model_call completed ' in line]
+            started_events = [line for line in worker_log.splitlines()
+                              if f'run_id={retry["id"]} ' in line and 'model_call started ' in line]
+            retry_model_requests = [item for item in fixture.model_requests
+                                    if json.loads(item['messages'][1]['content']).get('question') == 'accuracy']
+            assert len(usage_events) == len(retry_model_requests), (len(usage_events), len(retry_model_requests))
+            assert all('prompt_id=' in line and 'attempt=1' in line and 'prompt_tokens=' in line
+                       and 'completion_tokens=' in line and 'total_tokens=' in line
+                       for line in usage_events), usage_events
+            assert len(started_events) == len(retry_model_requests), (len(started_events), len(retry_model_requests))
+            assert all('system_chars=' in line and 'user_chars=' in line and 'input_chars=' in line
+                       for line in started_events), started_events
             retry_roles = [
                 line.split('运行节点标识：', 1)[1].splitlines()[0].strip()
                 for item in fixture.model_requests
