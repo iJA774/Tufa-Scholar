@@ -93,6 +93,12 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
+### 网页读取与终稿收束（2026-11-14）
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 156 项测试，覆盖失败网页区间不重复请求、正常分页、终稿引用无效以及有无可保留阶段发现。
+- `.venv/Scripts/python.exe -m scripts.verify_chat`、`.venv/Scripts/python.exe -m scripts.verify_web_search` 通过。隔离 API/worker 验证无效终稿引用被拒时，保存的 Markdown 和证据 CSV 仍包含有效的阶段性引用。使用模拟模型与搜索服务。
+- `worker.log` 新增 `research_round_stopped` 与 `report_validation`，便于按任务核对工具循环的收束原因和报告引用校验结果。
+
 ### 研究模型输入裁剪与用量日志（2026-11-14）
 
 - 合入工作区分支后复验通过：153 项后端测试、`scripts.verify_chat`、`scripts.verify_web_search`、`pnpm build:web` 和 `pnpm check:web`。两条研究闭环均使用本地模拟服务。

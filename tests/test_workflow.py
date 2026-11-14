@@ -507,6 +507,68 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('## 准确率', rendered['content'])
         self.assertEqual([item['id'] for item in rendered['evidence']], ['a1'])
 
+    def test_reporter_with_no_valid_citations_restores_vetted_stage_findings(self):
+        evidence = {
+            'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study',
+            'source_level': 'abstract', 'text': 'Accuracy was 92%.',
+            'research_source': 'paper',
+        }
+        finding = workflow.Claim(text='阶段检查记录准确率为 92%。', citations=['a1']).model_dump()
+        state = {
+            'research': {'project_id': 1, 'query': 'accuracy', 'source': 'local'},
+            'history': [], 'background': {}, 'plan': {}, 'errors': [], 'warnings': [],
+            'rounds': [{
+                'source': 'paper', 'findings': [finding], 'draft': {'sections': [], 'limitations': []},
+                'review': {'sufficient': False, 'gaps': ['仍需与其他来源交叉核对'], 'next_steps': ['补充独立来源']},
+            }],
+            'evidence_pool': [evidence],
+            'candidate_pools': {'paper': [], 'web': []},
+        }
+        invalid_report = workflow.ReporterOutput(sections=[workflow.Section(
+            heading='错误引用', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=['invented'])],
+        )])
+        with patch.object(workflow, 'structured', return_value=invalid_report), self.assertLogs('tufa.agent', level='WARNING') as logs:
+            result = workflow._reporter(state, None)
+
+        self.assertIn('证据不足', result['content'])
+        self.assertIn('阶段性发现（尚未完成核验）', result['content'])
+        self.assertIn('阶段检查记录准确率为 92%。 [a1]', result['content'])
+        self.assertIn('仍需与其他来源交叉核对', result['content'])
+        self.assertNotIn('invented', result['content'])
+        self.assertEqual(result['final_evidence'], [evidence])
+        self.assertIn('report_validation run_id=na', logs.output[0])
+        self.assertIn('fallback_reason=no_valid_report_citations', logs.output[0])
+        self.assertNotIn('阶段检查记录', logs.output[0])
+
+    def test_reporter_with_no_valid_citations_and_no_vetted_findings_says_insufficient(self):
+        evidence = {
+            'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study',
+            'source_level': 'abstract', 'text': 'Accuracy was 92%.',
+            'research_source': 'paper',
+        }
+        state = {
+            'research': {'project_id': 1, 'query': 'accuracy', 'source': 'local'},
+            'history': [], 'background': {}, 'plan': {}, 'errors': [], 'warnings': [],
+            'rounds': [{
+                'source': 'paper', 'findings': [], 'draft': {'sections': [], 'limitations': []},
+                'review': {'sufficient': False, 'gaps': ['仍需核验来源'], 'next_steps': []},
+            }],
+            'evidence_pool': [evidence],
+            'candidate_pools': {'paper': [], 'web': []},
+        }
+        invalid_report = workflow.ReporterOutput(sections=[workflow.Section(
+            heading='错误引用', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=['invented'])],
+        )])
+        with patch.object(workflow, 'structured', return_value=invalid_report):
+            result = workflow._reporter(state, None)
+
+        self.assertIn('证据不足', result['content'])
+        self.assertNotIn('阶段性发现（尚未完成核验）', result['content'])
+        self.assertIn('没有通过引用检查的报告结论或阶段性发现', result['content'])
+        self.assertIn('仍需核验来源', result['content'])
+        self.assertNotIn('invented', result['content'])
+        self.assertEqual(result['final_evidence'], [])
+
     def test_reporter_fallback_bounds_two_large_rounds_and_keeps_analyst_gaps(self):
         evidence = {'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study', 'source_level': 'abstract', 'text': 'Accuracy was 92%.'}
         many_sections = workflow.Draft(sections=[

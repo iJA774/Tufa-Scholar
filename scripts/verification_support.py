@@ -204,8 +204,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if evidence:
                 source = evidence[0].get('source_level')
                 claim = '网页搜索摘要记录准确率为 92%。' if source in {'web_content', 'web_snippet'} else '论文证据记录准确率为 92%。'
+                citation_id = 'fixture-unavailable' if 'reporter-invalid-citation' in folded else evidence[0]['id']
                 return {
-                    'sections': [{'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [evidence[0]['id']]}]}],
+                    'sections': [{'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [citation_id]}]}],
                     'limitations': [],
                 }
             return {

@@ -181,6 +181,52 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(evidence, [])
         self.assertRegex(content, r'证据不足|没有可核查证据|没有获得可用证据')
 
+    def test_repeated_failed_web_read_is_skipped_and_round_stops(self):
+        candidate = {
+            'candidate_id': 'web:inaccessible',
+            'title': 'Inaccessible page',
+            'url': 'https://example.org/inaccessible',
+            'original_url': 'https://example.org/inaccessible',
+        }
+        model_calls = []
+
+        def model(prompt_id, payload, schema, **kwargs):
+            model_calls.append((prompt_id, payload))
+            if payload.get('phase') == 'act':
+                return workflow.ResearcherOutput(
+                    action='tool', tool_name='read_web_page',
+                    arguments={'candidate_id': 'web:inaccessible', 'offset': 0},
+                )
+            return workflow.ResearcherOutput(
+                action='finish',
+                draft=workflow.Draft(limitations=[workflow.Claim(text='网页无法读取，证据不足。', citations=[])]),
+            )
+
+        state = {
+            'research': {'project_id': 1, 'query': 'accuracy', 'source': 'web'},
+            'current_source': 'web',
+            'current_round': 1,
+            'current_plan': ['读取网页正文'],
+            'plan': {'requirements': ['核实准确率']},
+            'background': {},
+            'candidate_pools': {'paper': [], 'web': [candidate]},
+            'evidence_pool': [],
+            'rounds': [],
+            'errors': [],
+            'warnings': [],
+            'tool_results': [],
+        }
+        with patch.object(workflow, 'structured', side_effect=model), \
+             patch.object(workflow.registry, 'invoke', side_effect=workflow.WebPageError(category='timeout')) as invoke:
+            result = workflow._researcher(state, None)
+
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual([payload['phase'] for _, payload in model_calls], ['act', 'act', 'draft'])
+        self.assertEqual(result['current_draft']['limitations'][0]['text'], '网页无法读取，证据不足。')
+        self.assertEqual(result['errors'][-2]['code'], 'web_page_read_failed')
+        self.assertEqual(result['errors'][-1]['code'], 'duplicate_web_read_skipped')
+        self.assertNotIn(candidate['url'], str(result['errors']))
+
 
 if __name__ == '__main__':
     unittest.main()

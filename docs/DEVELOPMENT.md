@@ -4,6 +4,12 @@
 
 ## 当前任务
 
+- 主题：修复网页读取连续失败耗尽工具预算，以及终稿引用全部失效时阶段性发现丢失的问题。
+- 工作分支：`codex/research-history-controls`，延续研究流程修复。
+- 协作：Luna 子代理实现工作流与回归测试，主代理验证实际 API/worker 和报告导出。
+
+## 上一阶段：工作区整合研究模型输入优化
+
 - 主题：将研究模型输入裁剪与 token 用量日志合入工作区分支。
 - 工作分支：`codex/research-history-controls`，已整合 `codex/research-token-budget`。
 

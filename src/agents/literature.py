@@ -16,6 +16,7 @@ from src.agents.report import reference, validate_claim
 from src.integrations.web_page import WebPageError
 from src.integrations.web_search import WebSearchError
 from src.integrations.model import ModelServiceError, StructuredOutputError, structured
+from src.infrastructure.diagnostics import diagnostic_context
 from src.literature.keywords import relevance_score, relevance_terms
 from src.literature.retrieval import _candidate_ids, rank_candidates
 from src.tools import ToolContext, ToolRegistry
@@ -545,11 +546,11 @@ def _safe_error(node, code, message):
 def _tool_error(name, exc):
     if isinstance(exc, ToolCallValidationError):
         return _safe_error("researcher", exc.code, "工具参数不符合当前来源范围或结构要求。")
+    if name == "read_web_page":
+        return _safe_error("researcher", "web_page_read_failed", "网页正文读取失败，可继续尝试其他候选。")
     category = getattr(exc, "category", "")
     if category:
         return _safe_error("researcher", "search_" + str(category)[:40], "搜索服务返回失败，可改写查询或尝试其他允许来源。")
-    if name == "read_web_page":
-        return _safe_error("researcher", "web_page_read_failed", "网页正文读取失败，可继续尝试其他候选。")
     if name in {"search_web", "search_papers"}:
         return _safe_error("researcher", name + "_failed", "搜索失败，可改写查询后继续尝试。")
     return _safe_error("researcher", "tool_failed", "工具调用失败，可根据允许工具继续研究。")
@@ -916,6 +917,31 @@ def _force_search_retry(state, mode, tried_queries):
     return name, args
 
 
+def _web_read_key(state, arguments):
+    """Return an in-memory identity for a candidate page slice, without logging it."""
+    candidate_id = arguments.get("candidate_id")
+    offset = arguments.get("offset", 0)
+    if not isinstance(offset, int) or isinstance(offset, bool):
+        return None
+    pool = state.get("candidate_pools", {}).get("web", [])
+    candidate = next((item for item in pool if item.get("candidate_id") == candidate_id), None)
+    url = (candidate or {}).get("url") or (candidate or {}).get("original_url")
+    url = url or arguments.get("url") or candidate_id
+    return (str(url), offset) if url else None
+
+
+def _log_research_stop(reason, *, failed_reads, tool_actions, consecutive_failures):
+    run_id = diagnostic_context().get("run_id", "na")
+    logger.info(
+        "research_round_stopped run_id=%s reason=%s failed_read_count=%d tool_actions=%d consecutive_failures=%d",
+        run_id,
+        reason,
+        failed_reads,
+        tool_actions,
+        consecutive_failures,
+    )
+
+
 def _researcher(state, on_stage):
     _emit(on_stage, "researcher")
     mode = state.get("current_source", "paper")
@@ -926,6 +952,9 @@ def _researcher(state, on_stage):
     tried_queries = set()
     search_failures = 0
     consecutive_search_failures = 0
+    consecutive_web_read_failures = 0
+    failed_web_reads = set()
+    consecutive_duplicate_reads = 0
     search_attempts = 0
     action_count = 0
     draft = Draft()
@@ -979,17 +1008,51 @@ def _researcher(state, on_stage):
                     patch, _ = _invoke_tool(state, mode, name, args)
                     state.update(patch)
                     consecutive_search_failures = 0
+                    consecutive_web_read_failures = 0
+                    consecutive_duplicate_reads = 0
                 except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
                     search_failures += 1
                     state["errors"].append(_tool_error(name, exc))
                     consecutive_search_failures += 1
                     if consecutive_search_failures >= 2:
                         failure_message = "连续检索失败，本轮停止重试并保留已收集资料。"
+                        _log_research_stop(
+                            "consecutive_search_failures",
+                            failed_reads=len(failed_web_reads),
+                            tool_actions=action_count,
+                            consecutive_failures=consecutive_search_failures,
+                        )
                         break
                 continue
             # The act phase carries compact evidence previews. Rebuild any finish
             # answer from the full evidence in the dedicated draft phase below.
             break
+        if result.tool_name == "read_web_page":
+            read_key = _web_read_key(state, result.arguments)
+            if read_key in failed_web_reads:
+                action_count += 1
+                state["errors"].append(_safe_error("researcher", "duplicate_web_read_skipped", "已跳过本轮失败候选与字符区间的重复请求。"))
+                consecutive_duplicate_reads += 1
+                if consecutive_web_read_failures:
+                    consecutive_web_read_failures += 1
+                    failure_message = "网页内容连续读取失败，已停止本轮检索并保留已收集资料。"
+                    _log_research_stop(
+                        "consecutive_web_read_failures",
+                        failed_reads=len(failed_web_reads),
+                        tool_actions=action_count,
+                        consecutive_failures=consecutive_web_read_failures,
+                    )
+                    break
+                if consecutive_duplicate_reads >= 2:
+                    failure_message = "网页读取重复请求已停止，本轮保留已收集资料。"
+                    _log_research_stop(
+                        "duplicate_web_read",
+                        failed_reads=len(failed_web_reads),
+                        tool_actions=action_count,
+                        consecutive_failures=consecutive_duplicate_reads,
+                    )
+                    break
+                continue
         action_count += 1
         try:
             if result.tool_name in {"search_web", "search_papers"}:
@@ -1000,14 +1063,36 @@ def _researcher(state, on_stage):
             patch, _ = _invoke_tool(state, mode, result.tool_name, result.arguments)
             state.update(patch)
             consecutive_search_failures = 0
+            consecutive_web_read_failures = 0
+            consecutive_duplicate_reads = 0
         except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
             error = _tool_error(result.tool_name, exc)
             state["errors"].append(error)
-            if result.tool_name in {"search_web", "search_papers"}:
+            if result.tool_name == "read_web_page":
+                read_key = _web_read_key(state, result.arguments)
+                if read_key is not None:
+                    failed_web_reads.add(read_key)
+                consecutive_web_read_failures += 1
+                if consecutive_web_read_failures >= 2:
+                    failure_message = "网页内容连续读取失败，已停止本轮检索并保留已收集资料。"
+                    _log_research_stop(
+                        "consecutive_web_read_failures",
+                        failed_reads=len(failed_web_reads),
+                        tool_actions=action_count,
+                        consecutive_failures=consecutive_web_read_failures,
+                    )
+                    break
+            elif result.tool_name in {"search_web", "search_papers"}:
                 search_failures += 1
                 consecutive_search_failures += 1
                 if consecutive_search_failures >= 2:
                     failure_message = "连续检索失败，本轮停止重试并保留已收集资料。"
+                    _log_research_stop(
+                        "consecutive_search_failures",
+                        failed_reads=len(failed_web_reads),
+                        tool_actions=action_count,
+                        consecutive_failures=consecutive_search_failures,
+                    )
                     break
     if not draft.sections and not draft.limitations:
         finalization_payload = {
@@ -1302,6 +1387,83 @@ def _reporter_fallback(state, reason):
     )
 
 
+def _reporter_insufficient_fallback(state, reason):
+    """Show only stage findings that still pass the final citation and scope checks."""
+    reason = reason.rstrip("。.!！ ")
+    evidence = state.get("evidence_pool", [])
+    allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
+    evidence = [item for item in evidence if allowed is None or item.get("paper_id") in allowed]
+    evidence_by_id = {item["id"]: item for item in evidence}
+    findings = []
+    seen = set()
+    for round_item in state.get("rounds", []):
+        for finding in round_item.get("findings", []):
+            text = finding.get("text", "")
+            citations = finding.get("citations", [])
+            _, invalid = validate_claim(text, citations, evidence_by_id, allowed)
+            key = (text, tuple(citations))
+            if invalid or key in seen or len(findings) >= 8:
+                continue
+            seen.add(key)
+            findings.append(Claim.model_validate(finding))
+    if findings:
+        draft = Draft(
+            sections=[Section(heading="阶段性发现（尚未完成核验）", paragraphs=findings)],
+            limitations=[Claim(text=f"证据不足：{reason}。已展示的阶段性发现通过了当前引用和来源范围检查，但仍未解决研究缺口，不能视为完整结论。")],
+        )
+    else:
+        draft = Draft(limitations=[Claim(text=f"证据不足：{reason}。当前没有通过引用检查的报告结论或阶段性发现，现有资料不足以形成完整终稿。")])
+    gaps = []
+    for round_item in state.get("rounds", []):
+        review = round_item.get("review", {})
+        gaps.extend(review.get("gaps", []))
+        if not review.get("sufficient"):
+            gaps.extend(review.get("next_steps", []))
+    gaps.extend(state.get("background", {}).get("gaps", []))
+    for gap in list(dict.fromkeys(value.strip() for value in gaps if isinstance(value, str) and value.strip()))[:5]:
+        claim = Claim(text=gap[:1_000])
+        _, invalid = validate_claim(claim.text, claim.citations, evidence_by_id, allowed, allow_uncited=True, is_limitation=True)
+        if not invalid and len(draft.limitations) < 8:
+            draft.limitations.append(claim)
+    return _render_draft(
+        draft,
+        evidence,
+        state["research"]["source"],
+        title="# 研究报告（证据不足）",
+        caveats=["本结果不构成完整终稿。", *_warning_caveats(state)],
+        allowed_paper_ids=allowed,
+    )
+
+
+def _log_report_validation(*, input_evidence_count, final_evidence_count, rejected_claim_count, fallback_rejected_count, fallback_reason):
+    run_id = diagnostic_context().get("run_id", "na")
+    level = logging.WARNING if fallback_reason != "none" or rejected_claim_count or fallback_rejected_count else logging.INFO
+    logger.log(
+        level,
+        "report_validation run_id=%s input_evidence_count=%d final_evidence_count=%d rejected_claim_count=%d fallback_rejected_count=%d fallback_reason=%s",
+        run_id,
+        input_evidence_count,
+        final_evidence_count,
+        rejected_claim_count,
+        fallback_rejected_count,
+        fallback_reason,
+    )
+
+
+def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, rejected_claim_count=0):
+    result = _reporter_fallback(state, reason)
+    if not result["evidence"]:
+        result = _reporter_insufficient_fallback(state, reason)
+    _log_report_validation(
+        input_evidence_count=input_evidence_count,
+        final_evidence_count=len(result["evidence"]),
+        rejected_claim_count=rejected_claim_count,
+        fallback_rejected_count=len(result.get("rejected", [])),
+        fallback_reason=reason_code,
+    )
+    return result
+
+
 def _warning_caveats(state):
     if "paper_search_incomplete" in state.get("warnings", []):
         return ["论文检索的部分外部来源失败，已保留可用结果，资料可能不完整。"]
@@ -1331,13 +1493,31 @@ def _reporter(state, on_stage):
     try:
         result = _model(state, "literature/reporter", payload, ReporterOutput, node_role="reporter", search_mode="none", available_tools=[])
     except ModelServiceError:
-        result = _reporter_fallback(state, "报告模型服务不可用，未能形成完整终稿。")
+        reason = "报告模型服务不可用，未能形成完整终稿。"
+        result = _reporter_recovery(
+            state,
+            reason=reason,
+            reason_code="model_service_failed",
+            input_evidence_count=len(working),
+        )
         return {"content": result["content"], "final_evidence": result["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "model_service_failed", "报告模型服务不可用，已返回明确缺口和可核查资料。")], "final_rejections": result.get("rejected", []), "last_completed": "reporter"}
     except StructuredOutputError:
-        result = _reporter_fallback(state, "报告结构校验失败，未能形成完整终稿。")
+        reason = "报告结构校验失败，未能形成完整终稿。"
+        result = _reporter_recovery(
+            state,
+            reason=reason,
+            reason_code="invalid_report_output",
+            input_evidence_count=len(working),
+        )
         return {"content": result["content"], "final_evidence": result["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "invalid_output", "报告输出未通过结构校验，已返回明确缺口和可核查资料。")], "final_rejections": result.get("rejected", []), "last_completed": "reporter"}
     if not result.sections and not result.limitations:
-        fallback = _reporter_fallback(state, "报告内容为空，未能形成完整终稿。")
+        reason = "报告内容为空，未能形成完整终稿。"
+        fallback = _reporter_recovery(
+            state,
+            reason=reason,
+            reason_code="empty_report",
+            input_evidence_count=len(working),
+        )
         return {"content": fallback["content"], "final_evidence": fallback["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "empty_report", "报告输出为空，已返回明确缺口和可核查资料。")], "final_rejections": fallback.get("rejected", []), "last_completed": "reporter"}
     visible_ids = {item["id"] for item in working}
     caveats = []
@@ -1357,8 +1537,29 @@ def _reporter(state, on_stage):
     )
     if rendered["rejected"]:
         rendered["content"] += "\n\n部分段落因引用、数值或来源范围校验未通过而省略。"
-    if not rendered["evidence"] and all_evidence:
-        rendered["content"] += "\n\n报告没有通过代码检查的有效引用；现有资料仍需进一步核对。"
+    if not rendered["evidence"]:
+        reason = "报告输出没有可保留的有效引用"
+        fallback = _reporter_insufficient_fallback(state, reason)
+        _log_report_validation(
+            input_evidence_count=len(working),
+            final_evidence_count=len(fallback["evidence"]),
+            rejected_claim_count=len(rendered["rejected"]),
+            fallback_rejected_count=len(fallback.get("rejected", [])),
+            fallback_reason="no_valid_report_citations",
+        )
+        return {
+            "content": fallback["content"],
+            "final_evidence": fallback["evidence"],
+            "final_rejections": rendered["rejected"] + fallback.get("rejected", []),
+            "last_completed": "reporter",
+        }
+    _log_report_validation(
+        input_evidence_count=len(working),
+        final_evidence_count=len(rendered["evidence"]),
+        rejected_claim_count=len(rendered["rejected"]),
+        fallback_rejected_count=0,
+        fallback_reason="none",
+    )
     return {"content": rendered["content"], "final_evidence": rendered["evidence"], "final_rejections": rendered["rejected"], "last_completed": "reporter"}
 
 
