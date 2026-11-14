@@ -93,6 +93,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
         payload = json.loads(messages[1].get('content', '{}')) if len(messages) > 1 else {}
         match = re.search(r'运行节点标识：([a-z_]+)', system)
         role = match.group(1) if match else ''
+        if (request.get('model') == 'fixture-thinking-budget'
+                and request.get('reasoning_effort') == 'low'
+                and request.get('max_completion_tokens') == 4096):
+            error = {'error': {'code': 'invalid_parameter_error', 'param': None,
+                               'message': 'max_completion_tokens [4096] must be greater than thinking_budget [8192]',
+                               'type': 'invalid_request_error'}}
+            self.send_response(400)
+            self.send_header('Content-Type', 'text/event-stream;charset=utf-8')
+            self.end_headers()
+            self.wfile.write(f'data: {json.dumps(error)}\n\n'.encode('utf-8'))
+            return
         result = self._model_result(role, payload, system)
         content = json.dumps(result, ensure_ascii=False)
         prompt_tokens = max(1, len(system) // 4) + max(1, len(messages[1].get('content', '')) // 4) if len(messages) > 1 else max(1, len(system) // 4)

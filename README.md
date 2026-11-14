@@ -94,6 +94,11 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 
 ## 验证
 
+### 终稿提示词与模型参数兼容
+
+- `.venv/Scripts/python.exe -m unittest discover -s tests -q`（180 项）、`.venv/Scripts/python.exe -m scripts.verify_chat` 和 `.venv/Scripts/python.exe -m scripts.verify_web_search` 均通过。模拟上游以 SSE 返回完成上限和推理预算冲突，实际 API 与 worker 继续取证并保存报告。同一模型后续阶段沿用兼容设置。
+- 使用本机配置的 `qwen3.7-flash` 和公开测试题验证模型入口。修复前同时发送两项参数时返回 HTTP 400。修复后同一进程连续两次取得通过结构校验的规划结果。完整深度研究流程使用隔离的模拟模型和搜索服务验收。
+
 ### 深度研究预算与网页续读（2026-11-14）
 
 - `.venv/Scripts/python.exe -m unittest discover -s tests -q` 通过 178 项测试，覆盖预算内分页、同一偏移量去重，以及仍有后续页时触发上下文上限并停止读取。

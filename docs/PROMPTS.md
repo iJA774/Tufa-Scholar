@@ -9,7 +9,7 @@
 | `literature/planner` | `literature/planner.md` | 结合问题、背景与各轮审查，生成要求、本轮计划、来源选择及继续或报告决定。 |
 | `literature/researcher` | `literature/researcher.md` | act 阶段用精简候选与证据预览选择工具；draft 阶段采用独立的输出结构，根据已有证据写初稿。 |
 | `literature/analyst` | `literature/analyst.md` | 审查本轮初稿是否回应要求、引用是否有据，并输出覆盖、缺口和下一步。 |
-| `literature/reporter` | `literature/reporter.md` | 接收全部轮次材料，撰写最终章节及引用段落和局限。 |
+| `literature/reporter` | `literature/reporter.md` | 根据各轮材料撰写关键点、概述、详细分析及局限。代码渲染一级标题与已核验的参考证据。 |
 
 ## 结构化数据
 

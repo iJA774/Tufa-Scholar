@@ -189,6 +189,88 @@ class ModelTests(unittest.TestCase):
                 structured('literature/planner', {}, Output, template_context=self.context())
         self.assertEqual(post.call_count, 1)
 
+    def test_sse_reasoning_budget_conflict_drops_only_cap_and_remembers_pair(self):
+        config = {'base_url': 'https://reasoning-budget.example/v1', 'model': 'qwen3.7-flash'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            headers={'content-type': 'text/event-stream'},
+            content=(
+                'data: {"error":{"code":"invalid_parameter_error","param":null,'
+                '"message":"max_completion_tokens [4096] must be greater than '
+                'thinking_budget [8192]","type":"invalid_request_error"},"id":"evt-1"}\n\n'
+            ),
+        )
+
+        def sse_response(content):
+            encoded = (
+                'data: ' + json.dumps({'choices': [{'delta': {'content': content}}]})
+                + '\n\ndata: [DONE]\n\n'
+            )
+            return httpx.Response(
+                200, request=request, headers={'content-type': 'text/event-stream'}, content=encoded,
+            )
+
+        # The first successful fallback response fails schema validation. Its
+        # correction attempt must keep the dropped cap, as must the next call.
+        responses = [rejected, sse_response('{}'), sse_response('{"answer":"ok"}'), sse_response('{"answer":"ok"}')]
+        sent = []
+
+        def stream(method, url, **kwargs):
+            sent.append(dict(kwargs['json']))
+            return nullcontext(responses.pop(0))
+
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', side_effect=stream), \
+             self.assertLogs('src.integrations.model', level='INFO') as logs:
+            first = structured(
+                'literature/planner', {}, Output,
+                model_options={'reasoning_effort': 'low'}, template_context=self.context(),
+                on_stream=lambda *_: None,
+            )
+            second = structured(
+                'literature/planner', {}, Output,
+                model_options={'reasoning_effort': 'low'}, template_context=self.context(),
+                on_stream=lambda *_: None,
+            )
+
+        self.assertEqual((first.answer, second.answer), ('ok', 'ok'))
+        self.assertEqual(len(sent), 4)
+        self.assertEqual(sent[0]['max_completion_tokens'], 4096)
+        self.assertEqual(sent[0]['reasoning_effort'], 'low')
+        for request_body in sent[1:]:
+            self.assertNotIn('max_completion_tokens', request_body)
+            self.assertEqual(request_body['reasoning_effort'], 'low')
+        pair = 'reasoning_effort=low+max_completion_tokens=4096'
+        self.assertTrue(model_client._parameter_is_known_unsupported(config, pair))
+        self.assertFalse(model_client._parameter_is_known_unsupported({**config, 'model': 'other'}, pair))
+        fallback_logs = [line for line in logs.output if 'model_option_fallback' in line]
+        self.assertEqual(len(fallback_logs), 1)
+        self.assertIn('option=max_completion_tokens', fallback_logs[0])
+        self.assertIn('reason=reasoning_budget_conflict', fallback_logs[0])
+        self.assertIn('status=400', fallback_logs[0])
+        self.assertNotIn('thinking_budget', '\n'.join(logs.output))
+
+    def test_generic_sse_http_400_does_not_trigger_parameter_retry(self):
+        config = {'base_url': 'https://generic-sse-error.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            headers={'content-type': 'text/event-stream'},
+            content='data: {"error":{"message":"Bad request","type":"invalid_request_error"}}\n\n',
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(rejected)) as stream:
+            with self.assertRaises(ModelServiceError):
+                structured('literature/planner', {}, Output, template_context=self.context(), on_stream=lambda *_: None)
+        self.assertEqual(stream.call_count, 1)
+        sent = stream.call_args.kwargs['json']
+        self.assertEqual(sent['reasoning_effort'], 'low')
+        self.assertEqual(sent['max_completion_tokens'], 4096)
+        self.assertEqual(len(model_client.UNSUPPORTED_REQUEST_PARAMS), 0)
+
     def test_rejected_default_effort_value_falls_back_without_disabling_other_effort_levels(self):
         config = {'base_url': 'https://effort-value.example/v1', 'model': 'test'}
         request = httpx.Request('POST', config['base_url'] + '/chat/completions')

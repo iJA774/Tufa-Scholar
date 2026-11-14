@@ -1,6 +1,7 @@
 """OpenAI-compatible structured chat client."""
 import json
 import logging
+import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -283,57 +284,114 @@ def _remember_unsupported_parameter(config, parameter):
         UNSUPPORTED_REQUEST_PARAMS.popitem(last=False)
 
 
+def _reasoning_cap_compatibility_parameter(request_body):
+    cap = request_body.get('max_completion_tokens')
+    if request_body.get('reasoning_effort') == 'low' and type(cap) is int:
+        return f'reasoning_effort=low+max_completion_tokens={cap}'
+    return None
+
+
+def _response_error_payloads(response):
+    """Read JSON or SSE error envelopes without retaining response text."""
+    response.read()
+    text = response.text
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        body = None
+    payloads = [body] if isinstance(body, dict) else []
+
+    # Some compatible APIs return an OpenAI-style error envelope in an SSE
+    # `data:` frame even for a rejected request.
+    frame = []
+
+    def append_frame():
+        if not frame:
+            return
+        data = '\n'.join(frame).strip()
+        frame.clear()
+        if not data or data == '[DONE]':
+            return
+        try:
+            value = json.loads(data)
+        except (ValueError, TypeError):
+            return
+        if isinstance(value, dict):
+            payloads.append(value)
+
+    for line in text.splitlines():
+        if not line:
+            append_frame()
+        elif line.startswith('data:'):
+            frame.append(line[5:].lstrip())
+    append_frame()
+    return payloads
+
+
 def _rejected_optional_parameter(response, request_body):
     """Identify only an explicit 400/422 rejection of a sent option."""
     if response.status_code not in (400, 422):
         return None
     try:
-        response.read()
-        body = response.json()
+        payloads = _response_error_payloads(response)
     except (ValueError, TypeError):
         return None
-    if not isinstance(body, dict):
-        return None
-    error = body.get('error') if isinstance(body.get('error'), dict) else body
-    parameter = error.get('param', body.get('param'))
-    parameter = parameter.rsplit('.', 1)[-1].lower() if isinstance(parameter, str) else None
-    # Retain the prior stream fallback contract, including providers that only
-    # identify the rejected field in `param` and omit a useful message.
-    if parameter == 'stream' and 'stream' in request_body:
-        return 'stream'
-    message = error.get('message', body.get('message', ''))
-    message = message.lower() if isinstance(message, str) else ''
-    code = error.get('code', body.get('code', ''))
-    code = code.lower() if isinstance(code, str) else ''
-    if (
-        request_body.get('reasoning_effort') == 'low'
-        and 'reasoning_effort' in message
-        and 'low' in message
-        and any(term in message for term in ('unsupported value', 'invalid value', 'not a valid value', 'unsupported level', 'not supported'))
-    ):
-        # This only rejects the default effort value. The parameter may still
-        # support another user-selected level, so cache the value separately.
-        return 'reasoning_effort=low'
-    if any(term in message for term in ('unsupported value', 'invalid value', 'not a valid value', 'allowed values')):
-        return None
-    explicit_parameter_rejection = (
-        any(term in code for term in ('unsupported_parameter', 'unknown_parameter', 'unrecognized_parameter', 'unexpected_parameter'))
-        or any(term in message for term in (
-            'unsupported parameter', 'unknown parameter', 'unrecognized parameter',
-            'unexpected parameter', 'invalid parameter', 'parameter is not supported',
-        ))
-    )
-    if explicit_parameter_rejection:
-        for candidate in COMPATIBLE_OPTIONAL_PARAMS:
-            if candidate in request_body and candidate in message:
-                return candidate
-        if parameter in COMPATIBLE_OPTIONAL_PARAMS and parameter in request_body:
-            return parameter
-    if 'stream' in request_body and 'stream' in message and any(term in message for term in (
-        'unsupported', 'not supported', 'not support', 'unknown parameter',
-        'unrecognized parameter', 'unexpected parameter', 'invalid parameter',
-    )):
-        return 'stream'
+    for body in payloads:
+        error = body.get('error') if isinstance(body.get('error'), dict) else body
+        parameter = error.get('param', body.get('param'))
+        parameter = parameter.rsplit('.', 1)[-1].lower() if isinstance(parameter, str) else None
+        # Retain the prior stream fallback contract, including providers that only
+        # identify the rejected field in `param` and omit a useful message.
+        if parameter == 'stream' and 'stream' in request_body:
+            return 'stream'
+        raw_message = error.get('message', body.get('message', ''))
+        message = raw_message.lower() if isinstance(raw_message, str) else ''
+        code = error.get('code', body.get('code', ''))
+        code = code.lower() if isinstance(code, str) else ''
+
+        # DashScope reports the low-effort conflict as a concrete cap versus
+        # thinking-budget comparison. Retry only when those numbers match the
+        # request and removing this cap can resolve the stated constraint.
+        conflict = re.fullmatch(
+            r'max_completion_tokens\s*\[(\d+)\]\s*must be greater than\s*thinking_budget\s*\[(\d+)\]',
+            raw_message.strip(),
+            flags=re.IGNORECASE,
+        ) if isinstance(raw_message, str) else None
+        compatibility_parameter = _reasoning_cap_compatibility_parameter(request_body)
+        if conflict and compatibility_parameter:
+            requested_cap, thinking_budget = (int(value) for value in conflict.groups())
+            if requested_cap == request_body['max_completion_tokens'] and requested_cap <= thinking_budget:
+                return compatibility_parameter
+
+        if (
+            request_body.get('reasoning_effort') == 'low'
+            and 'reasoning_effort' in message
+            and 'low' in message
+            and any(term in message for term in ('unsupported value', 'invalid value', 'not a valid value', 'unsupported level', 'not supported'))
+        ):
+            # This only rejects the default effort value. The parameter may still
+            # support another user-selected level, so cache the value separately.
+            return 'reasoning_effort=low'
+        if any(term in message for term in ('unsupported value', 'invalid value', 'not a valid value', 'allowed values')):
+            continue
+        explicit_parameter_rejection = (
+            any(term in code for term in ('unsupported_parameter', 'unknown_parameter', 'unrecognized_parameter', 'unexpected_parameter'))
+            or any(term in message for term in (
+                'unsupported parameter', 'unknown parameter', 'unrecognized parameter',
+                'unexpected parameter', 'invalid parameter', 'parameter is not supported',
+            ))
+        )
+        if explicit_parameter_rejection:
+            for candidate in COMPATIBLE_OPTIONAL_PARAMS:
+                if candidate in request_body and candidate in message:
+                    return candidate
+            if parameter in COMPATIBLE_OPTIONAL_PARAMS and parameter in request_body:
+                return parameter
+        if 'stream' in request_body and 'stream' in message and any(term in message for term in (
+            'unsupported', 'not supported', 'not support', 'unknown parameter',
+            'unrecognized parameter', 'unexpected parameter', 'invalid parameter',
+        )):
+            return 'stream'
     return None
 
 
@@ -523,6 +581,12 @@ def _disable_rejected_optional_parameter(response, request_body, config, explici
     rejected = _rejected_optional_parameter(response, request_body)
     if not rejected:
         return False
+    if rejected == _reasoning_cap_compatibility_parameter(request_body):
+        request_body.pop('max_completion_tokens', None)
+        _remember_unsupported_parameter(config, rejected)
+        logger.info('model_option_fallback option=max_completion_tokens reason=reasoning_budget_conflict status=%d',
+                    response.status_code)
+        return True
     if rejected in ('reasoning_effort', 'reasoning_effort=low') and explicit_effort:
         response.raise_for_status()
     if rejected == 'reasoning_effort=low':
@@ -581,6 +645,11 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         if parameter == 'reasoning_effort' and _parameter_is_known_unsupported(config, 'reasoning_effort=low'):
             options.pop(parameter, None)
             continue
+        if parameter == 'max_completion_tokens':
+            compatibility_parameter = _reasoning_cap_compatibility_parameter(options)
+            if compatibility_parameter and _parameter_is_known_unsupported(config, compatibility_parameter):
+                options.pop(parameter, None)
+                continue
         if _parameter_is_known_unsupported(config, parameter):
             options.pop(parameter, None)
     validation_feedback = None
@@ -619,6 +688,11 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 secrets=secrets,
                 explicit_effort=explicit_effort,
             )
+            # _post_structured may have removed an explicitly rejected option.
+            # Keep that decision for this call's schema-correction attempt too.
+            for parameter in tuple(options):
+                if parameter not in request_body:
+                    options.pop(parameter, None)
             if on_stream is not None and not streamed and isinstance(content, str) and content:
                 display = content
                 for secret in secrets:

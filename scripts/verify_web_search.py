@@ -174,6 +174,20 @@ def main():
                        or '运行节点标识：reporter' in request['messages'][0]['content']]
             assert len(writing) == 2 and all('max_completion_tokens' not in request for request in writing), writing
 
+            before_conflict = len(fixture.model_requests)
+            conflict = call('POST', f'/projects/{project}/questions', json={
+                'question': 'thinking-budget-fixture accuracy', 'source': 'web',
+                'research_mode': 'deep', 'model_name': 'fixture-thinking-budget',
+            })
+            conflict_task = wait(conflict['run_id'])
+            assert conflict_task['status'] == 'succeeded' and conflict_task['result']['evidence'], conflict_task
+            conflict_decisions = [request for request in fixture.model_requests[before_conflict:]
+                                  if request.get('reasoning_effort') == 'low']
+            assert len(conflict_decisions) >= 4
+            assert conflict_decisions[0].get('max_completion_tokens') == 4096
+            assert all('max_completion_tokens' not in request for request in conflict_decisions[1:])
+            assert conflict_decisions[0]['messages'] == conflict_decisions[1]['messages']
+
             cutoff_question = 'context-cutoff-fixture ' + '核对这项研究的准确率。' * 1_000
             searches_before = len(fixture.search_requests)
             requests_before = len(fixture.model_requests)
@@ -287,6 +301,7 @@ def main():
             print('Simulated HTTP: API web search, background filtering, web evidence and cited report passed.')
             print('Research budgets: dense results are capped, decisions have generation limits, and reporter format repair preserves cited evidence without a second call.')
             print('Context cutoff: an over-budget decision is skipped and the worker goes from draft to report without any further retrieval.')
+            print('Thinking-budget conflict: a streaming HTTP 400 is recovered once and the worker saves a cited report.')
             print('Live SSE: reporter delta arrived while the worker was running; tool reason and reconnect cursor passed.')
             print('Reporter citation rejection: report and CSV preserve valid provisional evidence.')
             print('Provider failure: rewritten search retries stop after two consecutive failures and produce an explicit no-evidence report.')
