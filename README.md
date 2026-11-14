@@ -164,6 +164,8 @@ pnpm build:web
 
 ### DeerFlow 研究面板移植验收（2026-11-14）
 
+- 配色调整后，`pnpm check:web`、`pnpm build:web` 通过，首页和工作台返回 HTTP 200。用隔离 fixture 在 1280×720 下查看活动、来源和报告，确认卡片与输入框采用同色系渐变，选中标签和链接使用工作台的蓝紫强调色。
+
 - `pnpm check:web`、`pnpm build:web`、`git diff --check` 通过；首页及工作台实际 HTTP 入口返回 200。
 - 对照本机 DeerFlow 自带 `rag` 回放及源码。1280×720 实测展开时聊天宽 538px、右卡片宽 575px、间距 32px；收起时聊天宽 768px、平移 287.5px，面板保持挂载并缩放到 0、禁用交互。采用原版 300ms ease-out 动画参数。保留 TUFA 顶栏，因此卡片顶部为 95px，原版为 48px。
 - 通过独立 `.cache/deerflow-panel-final` SQLite 和 `scripts.fixture_api --local-config` 验证首次展开、运行阶段、小结与来源、关闭重开、完成自动切报告、新任务清除旧报告、失败重试自动展开、切换快速会话移除旧面板。430×760 下验证卡片无横向溢出且可关闭。
