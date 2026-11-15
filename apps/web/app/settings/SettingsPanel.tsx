@@ -208,7 +208,7 @@ export default function SettingsPanel({
               <div className={styles.modeChoices} role="radiogroup" aria-label="新问题的默认模式">
                 <label className={preferences.mode === "auto" ? styles.choiceSelected : styles.choice}>
                   <input type="radio" name="default-mode" value="auto" checked={preferences.mode === "auto"} onChange={() => updatePreference("mode", "auto")} />
-                  <span><strong>自动判断</strong><small>由系统决定是否需要研究。</small></span>
+                  <span><strong>自动</strong><small>由系统决定是否需要研究。</small></span>
                 </label>
                 <label className={preferences.mode === "quick" ? styles.choiceSelected : styles.choice}>
                   <input type="radio" name="default-mode" value="quick" checked={preferences.mode === "quick"} onChange={() => updatePreference("mode", "quick")} />

@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { useRunEvents } from "../hooks/useRunEvents";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
@@ -55,8 +55,137 @@ const stageText: Record<string, string> = {
 function modeText(mode?: ResearchMode) {
   if (mode === "quick") return "快速探索";
   if (mode === "deep") return "深度研究";
-  if (mode === "auto") return "自动判断";
+  if (mode === "auto") return "自动";
   return "研究任务";
+}
+
+const modeOptions: { value: ResearchMode; label: string }[] = [
+  { value: "auto", label: "自动" },
+  { value: "deep", label: "深度研究" },
+  { value: "quick", label: "快速探索" },
+];
+
+function ModePicker({ mode, disabled, onModeChange }: { mode: ResearchMode; disabled: boolean; onModeChange: (mode: ResearchMode) => void }) {
+  const [open, setOpen] = useState(false);
+  const selectedIndex = Math.max(0, modeOptions.findIndex(option => option.value === mode));
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menuId = useId();
+
+  useEffect(() => {
+    if (!open) setActiveIndex(selectedIndex);
+  }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  const chooseMode = (index: number) => {
+    const option = modeOptions[index];
+    if (!option) return;
+    onModeChange(option.value);
+    setOpen(false);
+    trigger.current?.focus();
+  };
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (disabled) return;
+    if (event.key === "Tab") {
+      if (open) setOpen(false);
+      return;
+    }
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      setOpen(false);
+      trigger.current?.focus();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      if (!open) {
+        setActiveIndex(selectedIndex);
+        setOpen(true);
+      } else {
+        setActiveIndex(index => (index + delta + modeOptions.length) % modeOptions.length);
+      }
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      setActiveIndex(event.key === "Home" ? 0 : modeOptions.length - 1);
+      setOpen(true);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (open) chooseMode(activeIndex);
+      else {
+        setActiveIndex(selectedIndex);
+        setOpen(true);
+      }
+    }
+  };
+
+  return <div ref={root} className={`${styles.modePicker} ${open ? styles.modePickerOpen : ""}`}>
+    <button
+      ref={trigger}
+      className={styles.modeTrigger}
+      type="button"
+      role="combobox"
+      aria-label={`研究模式：当前${modeOptions[selectedIndex]?.label || "自动"}`}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-controls={menuId}
+      aria-activedescendant={open ? `${menuId}-option-${activeIndex}` : undefined}
+      disabled={disabled}
+      onClick={() => {
+        if (disabled) return;
+        if (open) setOpen(false);
+        else {
+          setActiveIndex(selectedIndex);
+          setOpen(true);
+        }
+      }}
+      onKeyDown={handleKeyDown}
+    >
+      <svg className={styles.modeSpark} viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.8 7.2L21 11l-7.2 1.8L12 20l-1.8-7.2L3 11l7.2-1.8L12 2Z" /></svg>
+      <span>{modeOptions[selectedIndex]?.label || "自动"}</span>
+      <svg className={`${styles.modeChevron} ${open ? styles.modeChevronOpen : ""}`} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+    </button>
+    <div
+      id={menuId}
+      className={`${styles.modeMenu} ${open ? styles.modeMenuOpen : styles.modeMenuClosed}`}
+      role="listbox"
+      aria-label="研究模式"
+      aria-hidden={!open}
+      inert={!open}
+    >
+      {modeOptions.map((option, index) => <div
+        id={`${menuId}-option-${index}`}
+        key={option.value}
+        className={`${styles.modeOption} ${index === activeIndex ? styles.modeOptionActive : ""} ${option.value === mode ? styles.modeOptionSelected : ""}`}
+        style={{ "--mode-option-index": index } as CSSProperties}
+        role="option"
+        aria-selected={option.value === mode}
+        onMouseEnter={() => setActiveIndex(index)}
+        onClick={() => chooseMode(index)}
+      >
+        <span>{option.label}</span>
+        <svg className={`${styles.modeCheck} ${option.value === mode ? styles.modeCheckSelected : ""}`} viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3.2 3.2L13 4.5" /></svg>
+      </div>)}
+    </div>
+  </div>;
 }
 
 const deepResearchNodes = new Set(["background_investigator", "planner", "supervisor", "researcher", "analyst", "coder", "reporter"]);
@@ -176,7 +305,6 @@ export default function ResearchChat({
   const progressCloseButton = useRef<HTMLButtonElement>(null);
   const activeRun = run && ["queued", "pending", "running"].includes(run.status);
   const hasConversation = conversationId !== undefined;
-  const modeName = modeText(mode);
   const historyRunCandidate = isDeepResearchRun(run) ? undefined
     : runs.find(item => item.id !== run?.id && isDeepResearchRun(item))
       ?? runs.find(item => item.id !== run?.id && item.research_mode === "auto");
@@ -546,22 +674,7 @@ export default function ResearchChat({
           aria-label="输入你的研究问题"
         />
         <div className={styles.composerToolbar}>
-          <div className={styles.modeSwitch}>
-            <svg className={styles.modeSpark} viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.8 7.2L21 11l-7.2 1.8L12 20l-1.8-7.2L3 11l7.2-1.8L12 2Z" /></svg>
-            <span className={styles.modeValue} aria-hidden="true">{modeName}</span>
-            <select
-              className={styles.modeSelect}
-              value={mode}
-              aria-label="研究模式"
-              disabled={!!busy || !!activeRun}
-              onChange={event => onModeChange(event.currentTarget.value as ResearchMode)}
-            >
-              <option value="auto">自动判断</option>
-              <option value="deep">深度研究</option>
-              <option value="quick">快速探索</option>
-            </select>
-            <svg className={styles.modeChevron} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-          </div>
+          <ModePicker mode={mode} disabled={!!busy || !!activeRun} onModeChange={onModeChange} />
           <div className={styles.composerRight}><span className={styles.shortcut}>{enterToSend ? "ENTER ↵ TO START" : "CTRL + ENTER TO START"}</span>
             <button className={`${styles.sendButton} ${query.trim() && !busy && !activeRun && !projectLoading ? styles.sendButtonReady : ""}`} type="submit" disabled={!query.trim() || !!busy || !!activeRun || projectLoading} aria-label="发送研究问题">
               {busy === "send" ? <span className={styles.spinner} /> : <svg className={styles.sendIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v12" /></svg>}

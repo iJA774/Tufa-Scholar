@@ -95,12 +95,12 @@
   -webkit-background-clip: text;
 }
 
-.chatBottom { flex: none; width: 100%; max-width: 770px; animation: fadeRise .72s .1s both; }
+.chatBottom { position: relative; z-index: 20; flex: none; width: 100%; max-width: 770px; overflow: visible; animation: fadeRise .72s .1s both; }
 .chatBottomConversation { margin-top: auto; }
 
 .composer {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid rgba(217, 214, 243, .175);
   border-radius: 17px;
   background: linear-gradient(140deg, rgba(24, 24, 33, .94), rgba(15, 15, 23, .98));
@@ -108,9 +108,10 @@
   transition: border-color .25s, box-shadow .25s;
 }
 
-.composer:focus-within { border-color: rgba(159, 144, 244, .49); box-shadow: 0 12px 55px rgba(0, 0, 0, .4), 0 0 32px rgba(122, 103, 252, .095); }
-.composer:hover:not(:focus-within) { border-color: rgba(159, 144, 244, .3); box-shadow: 0 13px 42px rgba(0, 0, 0, .34), 0 0 25px rgba(122, 103, 252, .07); }
-.composer::before { position: absolute; top: 0; left: 8%; right: 8%; height: 1px; background: linear-gradient(90deg, transparent, rgba(83, 204, 248, .32), rgba(181, 116, 255, .25), rgba(237, 106, 163, .21), transparent); content: ""; pointer-events: none; }
+.composer:focus-within { border-color: rgba(193, 180, 255, .82); box-shadow: 0 0 0 1px rgba(83, 204, 248, .34), 0 0 22px rgba(83, 204, 248, .16), 0 0 34px rgba(181, 116, 255, .26), 0 0 48px rgba(237, 106, 163, .13), 0 12px 55px rgba(0, 0, 0, .4); }
+.composer:hover:not(:focus-within) { border-color: rgba(198, 185, 255, .9); box-shadow: 0 0 0 1px rgba(83, 204, 248, .45), 0 0 22px rgba(83, 204, 248, .2), 0 0 36px rgba(181, 116, 255, .34), 0 0 52px rgba(237, 106, 163, .2), 0 13px 42px rgba(0, 0, 0, .34); }
+.composer::before { position: absolute; top: 0; left: 8%; right: 8%; height: 1px; border-radius: 2px; background: linear-gradient(90deg, transparent, rgba(83, 204, 248, .32), rgba(181, 116, 255, .25), rgba(237, 106, 163, .21), transparent); content: ""; pointer-events: none; transition: left .25s, right .25s, height .25s, filter .25s, background .25s; }
+.composer:hover:not(:focus-within)::before, .composer:focus-within::before { left: 4%; right: 4%; height: 2px; background: linear-gradient(90deg, transparent, rgba(83, 204, 248, .95), rgba(181, 116, 255, .9), rgba(237, 106, 163, .82), transparent); filter: drop-shadow(0 0 7px rgba(168, 142, 255, .78)); }
 
 .composer textarea {
   display: block;
@@ -133,8 +134,15 @@
 .composer textarea::placeholder { color: #787688; }
 .composerToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px 14px; }
 
-.modeSwitch {
+.modePicker {
   position: relative;
+  z-index: 1;
+  flex: none;
+}
+
+.modePickerOpen { z-index: 50; }
+
+.modeTrigger {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -143,19 +151,99 @@
   border-radius: 9px;
   background: rgba(114, 95, 190, .095);
   color: #c3b9ea;
+  cursor: pointer;
+  font: inherit;
   font-size: 12px;
-  transition: background .2s, border-color .2s, box-shadow .2s;
+  transition: background .2s, border-color .2s, box-shadow .2s, color .2s, transform .2s;
 }
 
-.modeSwitch:hover { background: rgba(121, 102, 208, .17); }
-.modeSwitch:focus-within { border-color: rgba(177, 159, 248, .45); box-shadow: 0 0 0 2px rgba(146, 161, 255, .12); outline: 2px solid #c7b9ff; outline-offset: 3px; }
-.modeValue { max-width: 140px; overflow: hidden; color: inherit; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-.modeSelect { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; appearance: none; outline: 0; background: transparent; opacity: 0; cursor: pointer; }
-.modeSelect:disabled { cursor: not-allowed; }
-.modeSelect option { background: #171521; color: #e6e3f0; }
+.modeTrigger:hover:not(:disabled) { background: rgba(121, 102, 208, .17); color: #e7e0ff; }
+.modeTrigger:focus-visible { outline: 2px solid #c7b9ff; outline-offset: 3px; border-color: rgba(177, 159, 248, .55); box-shadow: 0 0 0 2px rgba(146, 161, 255, .12); }
+.modeTrigger:disabled { cursor: not-allowed; opacity: .65; }
+.modeTrigger:active:not(:disabled) { transform: scale(.985); }
+.modeTrigger > span { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.modeMenu {
+  position: absolute;
+  z-index: 80;
+  left: 0;
+  bottom: calc(100% + 9px);
+  display: grid;
+  width: max-content;
+  min-width: 196px;
+  max-width: min(260px, calc(100vw - 28px));
+  max-height: min(240px, calc(100dvh - 28px));
+  gap: 3px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid rgba(188, 169, 255, .25);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(28, 25, 43, .98), rgba(15, 14, 24, .99));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .55), 0 0 24px rgba(145, 113, 245, .22), inset 0 1px 0 rgba(255, 255, 255, .055);
+  backdrop-filter: blur(16px);
+  overscroll-behavior: contain;
+  transform-origin: bottom center;
+}
+
+.modeMenuOpen {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  filter: blur(0);
+  transform: translateY(0) scale(1);
+  transition: opacity .27s ease, transform .47s cubic-bezier(.18, 1.15, .25, 1), filter .3s ease, visibility 0s;
+}
+
+.modeMenuClosed {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  filter: blur(5px);
+  transform: translateY(10px) scale(.96);
+  transition: opacity .23s ease, transform .4s cubic-bezier(.2, .88, .27, 1.2), filter .3s ease, visibility 0s linear .4s;
+}
+
+.modeOption {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #c1bdd2;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+  opacity: 0;
+  transform: translateY(7px);
+  transition: opacity .23s ease, transform .36s cubic-bezier(.2, .8, .2, 1), background .14s, border-color .14s, color .14s;
+}
+
+.modeMenuOpen .modeOption {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.modeMenuOpen .modeOption { transition-delay: calc(.055s + var(--mode-option-index, 0) * .048s), calc(.055s + var(--mode-option-index, 0) * .048s), 0s, 0s, 0s; }
+.modeMenuClosed .modeOption {
+  opacity: 0;
+  transform: translateY(7px);
+  transition-delay: 0s;
+}
+
+.modeOptionActive { background: rgba(255, 255, 255, .065); color: #f2efff; }
+.modeOptionSelected { border-color: rgba(173, 151, 255, .22); background: rgba(133, 107, 211, .19); color: #f0eaff; }
+.modeOptionSelected.modeOptionActive { background: rgba(147, 119, 231, .27); box-shadow: inset 2px 0 #a995f5; }
+.modeCheck { width: 15px; height: 15px; flex: none; fill: none; stroke: #d0c1ff; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(.7); transition: opacity .2s ease, transform .25s cubic-bezier(.2, 1.5, .4, 1); }
+.modeCheckSelected { opacity: 1; transform: scale(1); }
+
 .sendButton:focus-visible, .preset:focus-visible, .conversationNew:focus-visible, .progressOpen:focus-visible, .progressClose:focus-visible, .retryButton:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
 .modeSpark { width: 15px; height: 15px; fill: none; stroke: #aa9afa; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.modeChevron { width: 12px; height: 12px; margin-left: 3px; fill: none; stroke: currentColor; stroke-width: 1.7; opacity: .6; }
+.modeChevron { width: 12px; height: 12px; margin-left: 3px; fill: none; stroke: currentColor; stroke-width: 1.7; opacity: .6; transition: transform .48s cubic-bezier(.22, 1.35, .33, 1), color .2s ease; }
+.modeChevronOpen { transform: rotate(180deg); color: #e6dcff; }
 .composerRight { display: flex; align-items: center; gap: 12px; }
 .shortcut { color: #616171; font: 10px ui-monospace, Consolas, monospace; white-space: nowrap; }
 
@@ -340,4 +428,5 @@
   .emblemStar, .emblemCore, .emblemDotOne, .emblemDotTwo, .emblemDotThree, .firefly, .progressMarkerActive, .progressPanel { animation: none !important; }
   .emblemDotOne, .emblemDotTwo, .emblemDotThree { opacity: .22; }
   .firefly { opacity: 0; box-shadow: none; }
+  .modeMenu, .modeMenu .modeOption, .modeChevron, .modeTrigger, .modeCheck { transition: none !important; }
 }
