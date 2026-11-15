@@ -103,15 +103,19 @@
 .liveActivityHeading strong { overflow: hidden; font-weight: 540; text-overflow: ellipsis; }
 .liveActivityHeading small { flex: none; margin-left: auto; color: var(--panel-muted); font-size: 10px; }
 .liveActivityMark { display: grid; flex: none; width: 18px; height: 18px; place-items: center; color: #bcb2f2; }
-.liveActivityMark svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.activityLottie { position: relative; display: block; flex: none; width: 18px; height: 18px; overflow: hidden; }
+.activityLottie svg { position: absolute; top: 50%; left: 50%; display: block; width: 180% !important; height: 180% !important; overflow: visible; translate: -50% -50%; }
+.activityLottieSuccess svg { width: 250% !important; height: 250% !important; }
+.activityPenIcon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.activityPenWriting { transform-box: fill-box; transform-origin: center; animation: activityPenWrite 1s ease-in-out infinite; }
+.activityPenLineWriting { stroke-dasharray: 5; animation: activityPenLineWrite 1s ease-in-out infinite; }
 .liveActivityComplete .liveActivityMark { color: #8bc7bd; }
 .liveActivityComplete .liveActivityHeading small { color: #8bc7bd; }
 .liveActivityFailed .liveActivityMark { width: 7px; height: 7px; margin: 0 5.5px; border: 1px solid rgba(220, 142, 158, .75); border-radius: 50%; background: rgba(220, 142, 158, .5); box-shadow: 0 0 8px rgba(220, 142, 158, .16); }
 .liveActivityFailed .liveActivityHeading small, .liveActivityError { color: #dca0ac; }
 .liveActivityToggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 0; overflow: hidden; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .liveActivityToggle strong { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.liveActivityShimmer { color: transparent; background: linear-gradient(100deg, #e8e6f2 24%, #fff 48%, #e8e6f2 72%); background-size: 240% 100%; background-clip: text; animation: activityTitleShimmer 1.9s linear infinite; }
-.activityGearIcon { width: 18px; height: 18px; background: currentColor; -webkit-mask: url('/icons/gear-icon.png') center / contain no-repeat; mask: url('/icons/gear-icon.png') center / contain no-repeat; }
+.liveActivityShimmer { color: transparent; background-image: linear-gradient(90deg, #898796 0%, #898796 39%, #a1a5b1 43%, #c4cbd7 47%, #e9f1fc 49.3%, #fff 50%, #e9f1fc 50.7%, #c4cbd7 53%, #a1a5b1 57%, #898796 61%, #898796 100%); background-size: 280% 100%; background-position: 100% 50%; background-repeat: no-repeat; -webkit-background-clip: text; background-clip: text; filter: drop-shadow(0 0 2px rgba(233, 241, 252, .36)) drop-shadow(0 0 6px rgba(137, 151, 166, .22)); animation: activityTitleSweep 4.8s linear infinite; }
 .liveActivityChevron { display: grid; flex: none; width: 24px; height: 24px; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--panel-muted); cursor: pointer; }
 .liveActivityChevron:hover { background: rgba(255, 255, 255, .06); color: var(--panel-heading); }
 .liveActivityChevron span { width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translate(-1px, -1px); transition: transform .16s ease; }
@@ -160,7 +164,24 @@
 @keyframes chipEnter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes bouncingAnimation { to { opacity: .1; transform: translateY(-8px); } }
 @keyframes textShine { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
-@keyframes activityTitleShimmer { from { background-position: -140% 0; } to { background-position: 100% 0; } }
+/* The 100% → 0% background travel mirrors the reference's left-to-right highlight. */
+@keyframes activityTitleSweep {
+  0%, 4% { background-position: 100% 50%; animation-timing-function: cubic-bezier(.42, 0, .58, 1); }
+  35%, 43% { background-position: 0% 50%; }
+  43.01%, 48% { background-position: 100% 50%; animation-timing-function: cubic-bezier(.42, 0, .58, 1); }
+  79%, 100% { background-position: 0% 50%; }
+}
+@keyframes activityPenWrite {
+  0%, 50%, 100% { transform: translate(0, 0) rotate(0deg); }
+  12.5%, 62.5% { transform: translate(-.5px, 1px) rotate(-.3deg); }
+  25%, 75% { transform: translate(1px, -.5px) rotate(.2deg); }
+  37.5%, 87.5% { transform: translate(0, 0) rotate(-.4deg); }
+}
+@keyframes activityPenLineWrite {
+  0%, 50%, 100% { stroke-dashoffset: 4; }
+  12.5%, 37.5%, 62.5%, 87.5% { stroke-dashoffset: 2; }
+  25%, 75% { stroke-dashoffset: 0; }
+}
 
 @media (max-width: 1200px) {
   .researchPanel { position: fixed; z-index: 60; top: 103px; left: 50%; width: min(960px, calc(100vw - 32px)); height: min(50dvh, 460px); max-height: calc(100dvh - 235px); flex: none; overflow: hidden; opacity: 0; transform: translate(-50%, 0) scale(0); transform-origin: center top; }
@@ -187,5 +208,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .activityItem, .sourceChip, .loadingAnimation i, .rainbowAnimated, .liveActivityShimmer { animation: none !important; }
+  .activityItem, .sourceChip, .loadingAnimation i, .rainbowAnimated, .activityPenWriting, .activityPenLineWriting { animation: none !important; }
+  .liveActivityShimmer { color: #e8e6f2; background: none; -webkit-background-clip: border-box; background-clip: border-box; filter: none; animation: none !important; }
 }

@@ -10,6 +10,9 @@ importers:
 
   apps/web:
     dependencies:
+      lottie-web:
+        specifier: ^5.13.0
+        version: 5.13.0
       next:
         specifier: ^16.4.5
         version: 16.4.5(@types/node@22.20.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -400,6 +403,9 @@ packages:
 
   longest-streak@3.1.0:
     resolution: {integrity: sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==}
+
+  lottie-web@5.13.0:
+    resolution: {integrity: sha512-+gfBXl6sxXMPe8tKQm7qzLnUy5DUPJPKIyRHwtpCpyUEYjHYRJC/5gjUvdkuO2c3JllrPtHXH5UJJK8LRYl5yQ==}
 
   markdown-table@3.1.0:
     resolution: {integrity: sha512-xpeSCdM+B+6P3ncfgaB7FoDbtJ30xAe6Z18TGT7AgXJsHqCElCICZovQqdRMm7kHgpTyYv36EupqewoFFSB8vw==}
@@ -961,6 +967,8 @@ snapshots:
   is-plain-obj@4.1.0: {}
 
   longest-streak@3.1.0: {}
+
+  lottie-web@5.13.0: {}
 
   markdown-table@3.1.0: {}
 

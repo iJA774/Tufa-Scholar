@@ -5,8 +5,13 @@
 "use client";
 
 import { type CSSProperties, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
+import lottie from "lottie-web";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import searchAnimation from "../../../../assets/animations/Search.json";
+import fileCheckAnimation from "../../../../assets/animations/File Check.json";
+import gearLoadingAnimation from "../../../../assets/animations/Gear Loading.json";
+import successCheckmarkAnimation from "../../../../assets/animations/Success Checkmark.json";
 import type { Message, Run } from "./types";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import styles from "./ResearchPanel.module.css";
@@ -94,32 +99,85 @@ function eventState(event: RunEvent) {
 
 type ActivityEntry = { event: RunEvent; ending?: RunEvent };
 
-function FileActivityIcon() {
-  // The outline follows the page geometry in File Check.json at a static frame.
-  return <svg viewBox="-12 -12 24 24" aria-hidden="true"><g transform="scale(.085)"><path vectorEffect="non-scaling-stroke" d="M85-96v192q0 19.4-19.4 19.4h-131.45q-19.4 0-19.4-19.4v-160l50.25-50.9H65.6Q85-115.4 85-96Z" /><path vectorEffect="non-scaling-stroke" d="M-85.25-64.5H-35v-50.9m-40 85h74m-74 25h74" /></g></svg>;
+const completedCheckAnimation = {
+  ...successCheckmarkAnimation,
+  op: 60,
+  layers: successCheckmarkAnimation.layers.map(layer => ({ ...layer, op: 60 })),
+};
+const gearAnimationSegment: [number, number] = [15, 30];
+
+function ActivityLottie({ animationData, mode, segment, successZoom = false }: { animationData: object; mode: "loop" | "complete" | "static"; segment?: [number, number]; successZoom?: boolean }) {
+  const container = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!container.current) return;
+
+    const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const animation = lottie.loadAnimation({
+      container: container.current,
+      renderer: "svg",
+      loop: mode === "loop" && !motionPreference.matches,
+      autoplay: mode !== "static" && !motionPreference.matches,
+      animationData: structuredClone(animationData),
+      initialSegment: segment,
+    });
+    let loaded = false;
+    const stopAtFrame = () => {
+      const lastFrame = Math.max(0, animation.totalFrames - 1);
+      animation.goToAndStop(mode === "complete" ? lastFrame : 0, true);
+    };
+    const onLoaded = () => {
+      loaded = true;
+      if (mode === "static" || motionPreference.matches) stopAtFrame();
+      else if (mode === "loop") {
+        animation.setLoop(true);
+        animation.play();
+      }
+    };
+    const onMotionPreferenceChange = () => {
+      if (!loaded) return;
+      if (motionPreference.matches) stopAtFrame();
+      else if (mode === "loop") {
+        animation.setLoop(true);
+        animation.play();
+      }
+    };
+
+    animation.addEventListener("DOMLoaded", onLoaded);
+    if (mode === "complete") animation.addEventListener("complete", stopAtFrame);
+    motionPreference.addEventListener("change", onMotionPreferenceChange);
+
+    return () => {
+      animation.removeEventListener("complete", stopAtFrame);
+      animation.removeEventListener("DOMLoaded", onLoaded);
+      motionPreference.removeEventListener("change", onMotionPreferenceChange);
+      animation.destroy();
+    };
+  }, [animationData, mode, segment]);
+
+  return <span className={`${styles.activityLottie} ${successZoom ? styles.activityLottieSuccess : ""}`} ref={container} aria-hidden="true" />;
 }
 
-function ActivityIcon({ event, complete }: { event: RunEvent; complete: boolean }) {
-  if (complete) {
-    // CircleCheck.tsx provides the exact check mark path and circle used here.
-    return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" /></svg>;
-  }
-
-  const tool = textField(event.data, "tool");
+function ActivityIcon({ event, complete, playing }: { event: RunEvent; complete: boolean; playing: boolean }) {
   const node = textField(event.data, "node");
-  if (tool.startsWith("search_") || node === "background_investigator") {
-    // Search.json's Loupe layers supply the circle and handle proportions at a static frame.
-    return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="8.2" /><path d="m15.7 15.7 4.2 4.2" /></svg>;
+  const tool = textField(event.data, "tool");
+  if (complete) return <ActivityLottie animationData={completedCheckAnimation} mode="complete" successZoom />;
+
+  const mode = playing ? "loop" : "static";
+  if (tool === "read_web_page" || tool === "collect_evidence" || node === "analyst") {
+    return <ActivityLottie animationData={fileCheckAnimation} mode={mode} />;
   }
-  if (tool === "read_web_page" || tool === "collect_evidence") {
-    return <FileActivityIcon />;
+  if (tool.startsWith("search_") || node === "background_investigator" || node === "researcher") {
+    return <ActivityLottie animationData={searchAnimation} mode={mode} />;
   }
-  if (["planner", "supervisor", "coder"].includes(node)) return <span className={styles.activityGearIcon} aria-hidden="true" />;
+  if (["planner", "supervisor", "coder"].includes(node)) {
+    return <ActivityLottie animationData={gearLoadingAnimation} mode={mode} segment={gearAnimationSegment} />;
+  }
   if (node === "reporter") {
-    // edit.tsx supplies the pen path, kept as its original static SVG geometry.
-    return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.378 12.626a1 1 0 0 0-3.004-3.004l-4.01 4.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" /><path d="M8 18h1" /></svg>;
+    // edit.tsx's original SVG path and motion keyframes are reproduced with stroke and transform animation.
+    return <svg className={`${styles.activityPenIcon} ${playing ? styles.activityPenWriting : ""}`} viewBox="0 0 24 24" aria-hidden="true"><path d="M21.378 12.626a1 1 0 0 0-3.004-3.004l-4.01 4.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" /><path className={playing ? styles.activityPenLineWriting : ""} d="M8 18h5" /></svg>;
   }
-  return <FileActivityIcon />;
+  return <ActivityLottie animationData={fileCheckAnimation} mode={mode} />;
 }
 
 function mergeActivityEvents(events: RunEvent[]) {
@@ -317,7 +375,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
             const isExpanded = hasDetails && (activityExpanded[activityKey] ?? !collapsedByDefault);
             return <li key={event.id} className={`${styles.liveActivityItem} ${isFailed ? styles.liveActivityFailed : isComplete ? styles.liveActivityComplete : ""}`}>
               <div className={styles.liveActivityHeading}>
-                <span className={styles.liveActivityMark} aria-hidden="true">{isFailed ? null : <ActivityIcon event={event} complete={isComplete} />}</span>
+                <span className={styles.liveActivityMark} aria-hidden="true">{isFailed ? null : <ActivityIcon event={event} complete={isComplete} playing={active && open && tab === "activities"} />}</span>
                 {isComplete && hasDetails ? <button type="button" className={styles.liveActivityToggle} aria-expanded={isExpanded} aria-controls={isExpanded ? detailsId : undefined} aria-label={`${isExpanded ? "收起" : "展开"}活动：${heading}`} onClick={() => setActivityExpanded(current => ({ ...current, [activityKey]: !isExpanded }))}>
                   <strong>{heading}</strong><small>完成</small><span className={`${styles.liveActivityChevron} ${isExpanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
                 </button> : <><strong className={active && !isComplete && !isFailed ? styles.liveActivityShimmer : ""}>{heading}</strong><small>{isFailed ? "失败" : isComplete ? "完成" : active ? eventState(event) : "未完成"}</small></>}
