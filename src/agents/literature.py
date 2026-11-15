@@ -825,7 +825,10 @@ def _invoke_tool(state, mode, tool_name, arguments):
     args = dict(arguments)
     if tool_name == "collect_evidence":
         pool = state.get("candidate_pools", {}).get(mode, [])
-        chosen = _find_candidates(pool, args.pop("candidate_ids", []))
+        candidate_ids = args.pop("candidate_ids", [])
+        chosen = _find_candidates(pool, candidate_ids)
+        if len(chosen) > 6 or "papers" in args:
+            raise ToolCallValidationError("工具参数无效", "invalid_arguments")
         papers = []
         blocks_to_mark = []
         processed = set(state.get("collected_web_blocks", []))
@@ -870,10 +873,13 @@ def _invoke_tool(state, mode, tool_name, arguments):
     if tool_name == "read_web_page":
         read_key = _web_read_key(state, args)
         pool = state.get("candidate_pools", {}).get("web", [])
-        candidate_id = args.pop("candidate_id", "")
-        if candidate_id:
+        if "candidate_id" in args:
+            candidate_id = args.pop("candidate_id")
             match = _find_candidates(pool, [candidate_id])[0]
-            args["url"] = match.get("url") or match.get("original_url")
+            candidate_url = match.get("url") or match.get("original_url")
+            if "url" in args and args["url"] != candidate_url:
+                raise ToolCallValidationError("工具参数无效", "conflicting_candidate_reference")
+            args["url"] = candidate_url
         allowed_urls = {item.get("url") or item.get("original_url") for item in pool}
         if not isinstance(args.get("url"), str) or args["url"] not in allowed_urls:
             raise ToolCallValidationError("工具参数无效", "unknown_candidate_url")
@@ -910,7 +916,7 @@ def _invoke_tool(state, mode, tool_name, arguments):
         tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "query": args.get("query", ""), "candidate_count": len(items), "warnings": tool_warnings}]
         return {"candidate_pools": pools, "query_results": query_results, "tool_results": tool_results, "warnings": warnings}, {"candidate_count": len(items), "warnings": tool_warnings}
     if tool_name == "search_web":
-        if args.get("limit") is None:
+        if "limit" not in args:
             args["limit"] = MAX_RESEARCH_WEB_RESULTS
         elif type(args.get("limit")) is int:
             args["limit"] = min(args["limit"], MAX_RESEARCH_WEB_RESULTS)
@@ -1016,10 +1022,45 @@ def _tool_event_completed(state, node, call_id, mode, tool_name, arguments, resu
     _emit_event(state, "tool.completed", data)
 
 
-def _tool_event_failed(state, node, call_id, tool_name, exc):
+def _candidate_failure_details(state, mode, tool_name, arguments):
+    if tool_name not in {"collect_evidence", "read_web_page"}:
+        return {}
+    field = "candidate_id" if tool_name == "read_web_page" else "candidate_ids"
+    if field not in arguments:
+        shape, requested = "missing", []
+    elif field == "candidate_id":
+        shape, requested = "single", [arguments[field]]
+    elif isinstance(arguments[field], list):
+        shape, requested = "array", arguments[field]
+    else:
+        shape, requested = "invalid_type", []
+
+    def safe_id(value):
+        return value if isinstance(value, str) and re.fullmatch(r"C[0-9a-f]{16}", value) else "<invalid-id>"
+
+    pool = state.get("candidate_pools", {}).get("web" if tool_name == "read_web_page" else mode, [])
+    return {
+        "id_parameter": shape,
+        "requested_count": len(requested),
+        "requested_ids": [safe_id(value) for value in requested[:6]],
+        "pool_count": len(pool),
+        "pool_ids": [safe_id(item.get("candidate_id")) for item in pool[:12]],
+    }
+
+
+def _tool_event_failed(state, node, call_id, mode, tool_name, arguments, exc):
+    safe = _tool_error(tool_name, exc)
+    if isinstance(exc, ToolCallValidationError):
+        details = _candidate_failure_details(state, mode, tool_name, arguments)
+        if exc.errors:
+            details["errors"] = exc.errors[:8]
+        logger.warning(
+            "research_tool rejected run_id=%s call_id=%s node=%s tool=%s source=%s code=%s details=%s",
+            diagnostic_context().get("run_id", "na"), call_id or "na", node, tool_name, mode, safe["code"],
+            json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+        )
     if not call_id:
         return
-    safe = _tool_error(tool_name, exc)
     _emit_event(state, "tool.failed", {
         "node": node,
         "call_id": call_id,
@@ -1033,7 +1074,7 @@ def _invoke_tool_with_events(state, mode, tool_name, arguments, *, node="researc
     try:
         patch, result = _invoke_tool(state, mode, tool_name, arguments)
     except Exception as exc:
-        _tool_event_failed(state, node, call_id, tool_name, exc)
+        _tool_event_failed(state, node, call_id, mode, tool_name, arguments, exc)
         raise
     _tool_event_completed(state, node, call_id, mode, tool_name, arguments, result, patch)
     return patch, result
@@ -1096,7 +1137,7 @@ def _background_investigator(state, on_stage):
                 {"candidate_pools": pools, "query_results": query_results},
             )
         except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
-            _tool_event_failed(state, "background_investigator", call_id, tool_name, exc)
+            _tool_event_failed(state, "background_investigator", call_id, mode, tool_name, arguments, exc)
             errors.append(_tool_error(tool_name, exc))
     query_state = {**state, "candidate_pools": pools, "query_results": query_results, "errors": errors, "warnings": warnings}
     background_decision = {"source": mode, "queries": queries[:MAX_BACKGROUND_SEARCHES]}

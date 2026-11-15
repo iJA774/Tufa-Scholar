@@ -20,6 +20,8 @@
 
 工作流以紧凑状态传递最近的工具结果。完整回放供应商工具消息会增加请求体积，应用仍需校验权限与证据。原生调用能力及供应商兼容性需要按实际模型验证。
 
+工具参数被拒绝时，worker 记录任务、调用、工具、来源、错误码和安全的字段路径。涉及候选池时，日志记录参数形态、候选池大小和有限数量的内部候选 ID，其他参数值经过省略或脱敏。
+
 活动事件按任务保存在 SQLite，前端通过 SSE 按游标续读。单靠轮询阶段只能知道当前节点，无法还原此前的工具操作或流式输出。轮询继续提供任务结果和阶段小结，也能覆盖缺少活动事件的历史任务。
 
 活动详情的展开状态由研究面板管理。完成或失败的活动默认收起详情，可手动查看检索词、来源、操作理由或错误信息。
@@ -33,6 +35,8 @@
 弹窗进场先显现内容，再让位移和缩放缓缓停稳。退场缩短并向终点加速，减少关闭设置后等待工作台重新可用的时间。页签选框在屏幕内连续移动，使用同一条曲线保持两处操作手感一致。[Atlassian Motion](https://atlassian.design/foundations/motion/applying-motion) · [GitHub Primer Dialog](https://primer.style/view-components/lookbook/inspect/primer/alpha/dialog/playground/) · [IBM Carbon Motion](https://www.carbondesignsystem.com/building-blocks/foundations/motion/overview)
 
 ## 终稿结构与证据不足
+
+结构化回复先做严格解析和类型校验。对于服务标记正常结束、键和值均完整的语法错误，使用 `json_repair` 修复，再交给 Pydantic；缺失值、类型错误及截断交给既有重试或失败处理。保留标量内容和顺序的检查限制了修复范围，避免修复器补造字段或吞掉重复键。成功修复会在 worker 日志中留下记录。[json_repair](https://github.com/mangiucugna/json_repair)
 
 曾经只靠提示词要求五段报告结构，但自由章节输出可以漏掉栏目并通过校验。现在模型提供分开的内容字段，渲染器负责固定栏目和引用列表，代码继续检查引用、数值和来源范围。没有可引用材料时，终稿以证据缺口与可核查范围为主体。已有的阶段性发现只有重新通过校验后才可带引用写入结果。
 

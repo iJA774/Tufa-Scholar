@@ -38,11 +38,13 @@ class ModelTests(unittest.TestCase):
         }
 
     @staticmethod
-    def response(content='{"answer":"ok"}', status=200):
+    def response(content='{"answer":"ok"}', status=200, *, finish_reason=None):
         request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
         if status != 200:
             return httpx.Response(status, request=request, text=content)
-        return httpx.Response(200, request=request, json={'choices': [{'message': {'content': content}}]})
+        return httpx.Response(200, request=request, json={'choices': [
+            {'message': {'content': content}, 'finish_reason': finish_reason},
+        ]})
 
     @staticmethod
     def native_tools():
@@ -266,6 +268,8 @@ class ModelTests(unittest.TestCase):
 
         invalid_calls = [
             [{'type': 'function', 'function': {'name': 'search_papers', 'arguments': '{"query":'}}],
+            [{'type': 'function', 'function': {'name': 'search_papers', 'arguments': '{"query":"ok",}'}}],
+            [{'type': 'function', 'function': {'name': 'search_papers', 'arguments': '{"query":"first","query":"second"}'}}],
             [{'type': 'function', 'function': {'name': 'search_papers'}}],
             [{'type': 'function', 'function': {'name': 'not_registered', 'arguments': '{}'}}],
             [{'type': 'function', 'function': {'name': 'search_papers', 'arguments': '[]'}}],
@@ -588,6 +592,46 @@ class ModelTests(unittest.TestCase):
                            on_stream=lambda kind, data: observed.append((kind, data)))
         self.assertEqual(stream.call_count, 1)
         self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.failed'])
+
+    def test_repairs_delimiters_and_publishes_the_validated_preview_without_retry(self):
+        events = []
+        malformed = '{"answer":"证据中含 \\"引号\\"",}}'
+        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://repair.example/v1', 'model': 'test'}), \
+             patch('src.integrations.model.httpx.stream', return_value=nullcontext(
+                 self.response(malformed, finish_reason='stop'),
+             )) as stream, self.assertLogs('src.integrations.model', 'INFO') as logs:
+            result = structured('runtime/dispatcher', {}, Output,
+                                on_stream=lambda kind, data: events.append((kind, data)))
+        self.assertEqual(result.answer, '证据中含 "引号"')
+        stream.assert_called_once()
+        self.diagnostics_mock.assert_not_called()
+        self.assertFalse(any(kind == 'model.failed' for kind, _ in events))
+        self.assertEqual(json.loads(events[-1][1]['text']), {'answer': result.answer})
+        self.assertIn('model_call repaired', '\n'.join(logs.output))
+        self.assertNotIn(result.answer, '\n'.join(logs.output))
+
+    def test_retries_without_accepting_missing_wrong_type_duplicate_or_truncated_values(self):
+        config = {'base_url': 'https://strict-repair.example/v1', 'model': 'test'}
+        for content, reason, repair_called in (
+            ('{}', 'stop', False),
+            ('{"answer":["unexpected"]}', 'stop', False),
+            ('{"answer":,"other":"value"}', 'stop', True),
+            ('{"answer":"first","answer":"second",}', 'stop', True),
+            ('{"answer":"first","answer":"second"}', 'stop', False),
+            ('{"answer":"truncated"', 'stop', False),
+            ('{"answer":"otherwise repairable",}', 'length', False),
+            ('{"answer":"otherwise repairable",}', None, False),
+        ):
+            with self.subTest(content=content, reason=reason), \
+                 patch('src.integrations.model.settings.model_config', return_value=config), \
+                 patch('src.integrations.model.repair_json', wraps=model_client.repair_json) as repair, \
+                 patch('src.integrations.model.httpx.post', side_effect=[
+                     self.response(content, finish_reason=reason), self.response(),
+                 ]) as post:
+                result = structured('runtime/dispatcher', {}, Output)
+            self.assertEqual(result.answer, 'ok')
+            self.assertEqual(post.call_count, 2)
+            self.assertEqual(repair.called, repair_called)
 
     def test_valid_json_is_accepted_even_when_provider_marks_length_finish_reason(self):
         config = {'base_url': 'https://valid-length.example/v1', 'model': 'test'}

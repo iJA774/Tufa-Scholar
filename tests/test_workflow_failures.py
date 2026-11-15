@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+from src.infrastructure.diagnostics import diagnostic_scope
 from src.integrations.model import ModelServiceError
 
 
@@ -118,7 +119,6 @@ class WorkflowFailureTests(unittest.TestCase):
             return {"query": query_text, "source": source_name, "method": "fixture", "results": [paper], "warnings": []}
 
         stages = []
-        invoke_calls = []
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
             content, evidence = self._invoke_run(Model(), source="local", retrieve=retrieve, on_stage=stages.append)
             invoke_calls = [call.args[0] for call in invoke.call_args_list]
@@ -252,19 +252,41 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.ReporterOutput(limitations=[workflow.Claim(text="没有可核查证据，报告无法给出事实结论。")])
                 raise AssertionError(prompt_id)
 
-        invoke_calls = []
-        with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
+        with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke, \
+             diagnostic_scope(run_id=42), self.assertLogs("tufa.agent", "WARNING") as logs:
             content, evidence = self._invoke_run(Model(), source="local", retrieve=lambda project, query, source: {
                 "query": query, "source": source, "method": "fixture", "results": [paper], "warnings": [],
             })
             invoke_names = [call.args[0] for call in invoke.call_args_list]
 
         self.assertNotIn("collect_evidence", invoke_names)
+        rejection = next(line for line in logs.output if "research_tool rejected" in line)
+        self.assertIn("run_id=42", rejection)
+        self.assertIn("tool=collect_evidence source=paper code=unknown_candidate", rejection)
+        self.assertIn('"requested_ids":["<invalid-id>"]', rejection)
+        self.assertRegex(rejection, r'"pool_ids":\["C[0-9a-f]{16}"\]')
+        self.assertNotIn("C-forged-candidate", rejection)
+        self.assertNotIn("FORGED_PRIVATE", rejection)
+        self.assertNotIn("accuracy", rejection)
         self.assertFalse(evidence)
         self.assertEqual(reporter_payloads[0]["evidence"], [])
         self.assertNotIn("FORGED_PRIVATE", content)
         self.assertNotIn("99%", content)
         self.assertRegex(content, "没有可核查证据|资料不足")
+
+    def test_conflicting_web_candidate_references_never_reach_the_tool(self):
+        candidate = {**sample_web_page(), "candidate_id": "C" + "1" * 16}
+        other = {**sample_web_page(), "candidate_id": "C" + "2" * 16, "url": "https://example.org/other"}
+        state = {
+            "research": {"project_id": 1, "query": "accuracy", "source": "web"},
+            "candidate_pools": {"web": [candidate, other]},
+        }
+        with patch.object(workflow.registry, "invoke") as invoke, self.assertRaises(workflow.ToolCallValidationError) as error:
+            workflow._invoke_tool(state, "web", "read_web_page", {
+                "candidate_id": candidate["candidate_id"], "url": other["url"],
+            })
+        self.assertEqual(error.exception.code, "conflicting_candidate_reference")
+        invoke.assert_not_called()
 
     def test_partial_paper_search_warning_is_sanitized_and_evidence_is_reported(self):
         paper = sample_paper()

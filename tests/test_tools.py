@@ -51,7 +51,10 @@ class ResearchToolsTests(unittest.TestCase):
             self.registry.invoke('missing', {}, context=self.web)
 
     def test_validation_does_not_echo_input(self):
-        for arguments in ({'query': 'secret', 'source': 'all'}, {'query': '  '}, {'query': 'secret', 'limit': 6}):
+        for arguments in (
+            {'query': 'secret', 'source': 'all'}, {'query': '  '},
+            {'query': 'secret', 'limit': 6}, {'query': 'secret', 'limit': '3'},
+        ):
             with self.assertRaises(ValueError) as error:
                 self.registry.invoke('search_web', arguments, context=self.web)
             self.assertNotIn('secret', str(error.exception))

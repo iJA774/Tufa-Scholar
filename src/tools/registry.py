@@ -74,7 +74,7 @@ class ToolRegistry:
         if context.source not in tool[3]:
             raise ToolCallValidationError('工具不存在或不适用于当前范围', 'disallowed_tool')
         try:
-            params = tool[1].model_validate(arguments)
+            params = tool[1].model_validate(arguments, strict=True)
         except ValidationError as exc:
             raise ToolCallValidationError('工具参数无效', 'invalid_arguments', _safe_errors(exc, tool[1].model_json_schema())) from None
         return tool[2](params, context)

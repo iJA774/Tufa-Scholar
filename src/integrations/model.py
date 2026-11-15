@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from json_repair import repair_json
 from pydantic import ValidationError
 from src.infrastructure import settings
 from src.infrastructure.diagnostics import diagnostic_context, record_failure
@@ -443,6 +444,50 @@ def _json_without_duplicate_keys(pairs):
     return value
 
 
+def _reject_json_constant(_):
+    raise ValueError('non-finite JSON number')
+
+
+_JSON_TOKEN = re.compile(
+    r'(?P<string>"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")'
+    r'|(?P<value>-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)'
+    r'|(?P<delimiter>[{}\[\]:,])|(?P<invalid>\S)'
+)
+
+
+def _json_tokens(content):
+    return [
+        (match.lastgroup, json.loads(match[0]) if match.lastgroup == 'string' else match[0])
+        for match in _JSON_TOKEN.finditer(content)
+    ]
+
+
+def _repair_structured_json(content, finish_reason):
+    """Repair delimiters in complete structured replies while preserving every scalar token."""
+    if finish_reason != 'stop' or not isinstance(content, str):
+        return None
+    content = content.strip()
+    if not content.startswith('{') or not content.endswith('}'):
+        return None
+    try:
+        original = _json_tokens(content)
+        delimiters = [value for kind, value in original if kind == 'delimiter']
+        if (
+            any(kind == 'invalid' for kind, _ in original)
+            or delimiters.count('{') > delimiters.count('}')
+            or delimiters.count('[') > delimiters.count(']')
+        ):
+            return None
+        repaired = repair_json(content, skip_json_loads=True, ensure_ascii=False)
+        if not isinstance(json.loads(repaired, object_pairs_hook=_json_without_duplicate_keys), dict):
+            return None
+        original_values = [token for token in original if token[0] != 'delimiter']
+        repaired_values = [token for token in _json_tokens(repaired) if token[0] != 'delimiter']
+        return repaired if original_values == repaired_values else None
+    except (ValueError, RecursionError):
+        return None
+
+
 class NativeToolProtocolError(ValueError):
     """A malformed or unusable function-call response from the model."""
 
@@ -493,7 +538,8 @@ def _native_decision_from_message(message, native_tools, finish_reason):
     if not isinstance(raw_arguments, str):
         raise NativeToolProtocolError('incomplete native function arguments')
     try:
-        arguments = json.loads(raw_arguments, object_pairs_hook=_json_without_duplicate_keys)
+        arguments = json.loads(raw_arguments, object_pairs_hook=_json_without_duplicate_keys,
+                               parse_constant=_reject_json_constant)
     except (TypeError, ValueError):
         raise NativeToolProtocolError('invalid native function arguments') from None
     if not isinstance(arguments, dict):
@@ -565,7 +611,7 @@ def _repair_reporter_legacy_limitations(content, validation_error, schema):
     report['limitations'] = top_level + legacy_limitations
     repaired = json.dumps(report, ensure_ascii=False)
     try:
-        schema.model_validate_json(repaired)
+        schema.model_validate_json(repaired, strict=True)
     except ValidationError:
         return None
     return repaired
@@ -891,26 +937,41 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 for secret in secrets:
                     display = display.replace(secret, '[REDACTED]')
                 _emit_stream(on_stream, 'model.delta', {'attempt': attempt, 'phase': phase, 'text': display})
+            repaired = None
             try:
                 result = (
-                    schema.model_validate(native_decision)
+                    schema.model_validate(native_decision, strict=True)
                     if native_tools is not None
-                    else schema.model_validate_json(content)
+                    else schema.model_validate_json(content, strict=True)
                 )
             except ValidationError as exc:
-                repaired = (
-                    _repair_reporter_legacy_limitations(content, exc, schema)
-                    if prompt_id == 'literature/reporter'
-                    else None
-                )
+                if native_tools is not None or finish_reason == 'length':
+                    raise
+                error_types = {error['type'] for error in exc.errors(include_input=False)}
+                if error_types == {'json_invalid'}:
+                    repaired = _repair_structured_json(content, finish_reason)
+                elif prompt_id == 'literature/reporter':
+                    repaired = _repair_reporter_legacy_limitations(content, exc, schema)
                 if repaired is None:
                     raise
-                result = schema.model_validate_json(repaired)
+                result = schema.model_validate_json(repaired, strict=True)
+            else:
+                if native_tools is None:
+                    json.loads(content, object_pairs_hook=_json_without_duplicate_keys,
+                               parse_constant=_reject_json_constant)
+            completed = {'attempt': attempt, 'phase': phase}
+            if repaired is not None:
+                logger.info('model_call repaired run_id=%s prompt_id=%s phase=%s attempt=%d',
+                            run_id if run_id is not None else 'na', prompt_id, phase, attempt)
+                display = repaired
+                for secret in secrets:
+                    display = display.replace(secret, '[REDACTED]')
+                completed['text'] = display
             logger.info('model_call completed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d %s',
                         run_id if run_id is not None else 'na', prompt_id, phase, attempt,
                         int((time.monotonic() - attempt_started) * 1000), response.status_code,
                         _usage_log_fields(usage))
-            _emit_stream(on_stream, 'model.completed', {'attempt': attempt, 'phase': phase})
+            _emit_stream(on_stream, 'model.completed', completed)
             return result
         except httpx.HTTPStatusError as exc:
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
@@ -928,13 +989,20 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
                            int((time.monotonic() - attempt_started) * 1000), type(exc).__name__, diagnostic_id)
             raise ModelServiceError('模型服务连接失败或超时，请检查设置') from None
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            errors = _safe_validation_errors(exc, json_schema) if isinstance(exc, ValidationError) else [{'type': 'invalid_response', 'path': []}]
+        except (ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
+            if isinstance(exc, ValidationError):
+                errors = _safe_validation_errors(exc, json_schema)
+            elif isinstance(exc, NativeToolProtocolError):
+                errors = [{'type': 'invalid_native_tool_call', 'path': []}]
+            else:
+                errors = [{'type': 'invalid_response', 'path': []}]
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
             diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)
-            logger.warning('model_call invalid run_id=%s prompt_id=%s phase=%s attempt=%d errors=%s diagnostic_id=%s %s',
+            logger.warning('model_call invalid run_id=%s prompt_id=%s phase=%s attempt=%d errors=%s finish_reason=%s diagnostic_id=%s %s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
-                           json.dumps(errors, ensure_ascii=False), diagnostic_id,
+                           json.dumps(errors, ensure_ascii=False),
+                           finish_reason if finish_reason in ('stop', 'length', 'content_filter', 'tool_calls') else 'na',
+                           diagnostic_id,
                            _usage_log_fields(usage))
             output_cap_reached = finish_reason == 'length' and 'max_completion_tokens' in request_body
             if attempt == 2 or native_tools is not None or output_cap_reached:

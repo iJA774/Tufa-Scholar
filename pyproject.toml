@@ -13,6 +13,7 @@ dependencies = [
     "pypdf>=5,<7",
     "python-multipart>=0.0.20,<1",
     "uvicorn>=0.34,<1",
+    "json-repair>=0.64.8,<0.65",
 ]
 
 [tool.uv]
