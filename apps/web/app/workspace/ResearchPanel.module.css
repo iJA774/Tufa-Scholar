@@ -91,11 +91,11 @@
 .activityStatus { display: flex; align-items: center; gap: 10px; min-height: 30px; margin: 0 0 8px; padding: 8px 16px; color: #d8d5e8; font-size: 16px; font-weight: 530; }
 .statusLabel { margin-left: auto; color: var(--panel-muted); font-size: 11px; font-weight: 400; }
 .rainbowText { color: #d8d5e8; }
-.rainbowAnimated { background: linear-gradient(to right, rgba(150, 193, 246, .74) 15%, rgba(188, 177, 255, .92) 38%, rgba(231, 166, 218, .82) 65%, rgba(150, 193, 246, .74) 85%); background-size: 500% auto; background-clip: text; color: transparent; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: textShine 2s ease-in-out infinite alternate; }
+.rainbowAnimated { background: linear-gradient(to right, rgba(150, 193, 246, .74) 15%, rgba(188, 177, 255, .92) 38%, rgba(231, 166, 218, .82) 65%, rgba(150, 193, 246, .74) 85%); background-size: 500% auto; background-clip: text; color: transparent; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: textShine 2.5s ease-in-out infinite alternate; }
 .loadingAnimation { display: inline-flex; flex: none; align-items: center; }
-.loadingAnimation i { width: 8px; height: 8px; margin: 2px 3px; border-radius: 50%; background: #a99aec; box-shadow: 0 0 10px rgba(169, 154, 236, .24); opacity: 1; animation: bouncingAnimation .5s infinite alternate; }
-.loadingAnimation i:nth-child(2) { animation-delay: .2s; }
-.loadingAnimation i:nth-child(3) { animation-delay: .4s; }
+.loadingAnimation i { width: 8px; height: 8px; margin: 2px 3px; border-radius: 50%; background: #a99aec; box-shadow: 0 0 10px rgba(169, 154, 236, .24); opacity: 1; animation: bouncingAnimation .625s infinite alternate; }
+.loadingAnimation i:nth-child(2) { animation-delay: .25s; }
+.loadingAnimation i:nth-child(3) { animation-delay: .5s; }
 
 .liveActivityList { display: flex; flex-direction: column; margin: 0; padding: 0 16px; list-style: none; }
 .liveActivityItem { min-width: 0; color: var(--panel-text); animation: activityEnter .22s ease-out both; }
@@ -105,20 +105,20 @@
 .liveActivityMark { display: grid; flex: none; width: 18px; height: 18px; place-items: center; color: #bcb2f2; }
 .activityLottie { position: relative; display: block; flex: none; width: 18px; height: 18px; overflow: hidden; }
 .activityLottie svg { position: absolute; top: 50%; left: 50%; display: block; width: 180% !important; height: 180% !important; overflow: visible; translate: -50% -50%; }
-.activityLottieSuccess { translate: -2px 0; }
+.activityLottieSuccess, .activityLottieFailure { translate: -2px 0; }
 .activityLottieSuccess svg { width: 250% !important; height: 250% !important; }
 .activityLottieFailure svg { width: 140% !important; height: 140% !important; }
 .activityLottieFailure svg [stroke] { stroke: currentColor !important; }
 .activityPenIcon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
-.activityPenWriting { transform-box: fill-box; transform-origin: center; animation: activityPenWrite 1s ease-in-out infinite; }
-.activityPenLineWriting { stroke-dasharray: 5; animation: activityPenLineWrite 1s ease-in-out infinite; }
+.activityPenWriting { transform-box: fill-box; transform-origin: center; animation: activityPenWrite 1.25s ease-in-out infinite; }
+.activityPenLineWriting { stroke-dasharray: 5; animation: activityPenLineWrite 1.25s ease-in-out infinite; }
 .liveActivityComplete .liveActivityMark { color: #8bc7bd; }
 .liveActivityComplete .liveActivityHeading small { color: #8bc7bd; }
 .liveActivityFailed .liveActivityMark { width: 18px; height: 18px; margin: 0; border: 0; border-radius: 0; background: none; box-shadow: none; color: #dca0ac; }
 .liveActivityFailed .liveActivityHeading small, .liveActivityError { color: #dca0ac; }
 .liveActivityToggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 0; overflow: hidden; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .liveActivityToggle strong { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.liveActivityShimmer { color: transparent; background-image: linear-gradient(90deg, #898796 0%, #898796 39%, #a1a5b1 43%, #c4cbd7 47%, #e9f1fc 49.3%, #fff 50%, #e9f1fc 50.7%, #c4cbd7 53%, #a1a5b1 57%, #898796 61%, #898796 100%); background-size: 280% 100%; background-position: 100% 50%; background-repeat: no-repeat; -webkit-background-clip: text; background-clip: text; filter: drop-shadow(0 0 2px rgba(233, 241, 252, .36)) drop-shadow(0 0 6px rgba(137, 151, 166, .22)); animation: activityTitleSweep 4.8s linear infinite; }
+.liveActivityShimmer { color: transparent; background-image: linear-gradient(90deg, #898796 0%, #898796 39%, #a1a5b1 43%, #c4cbd7 47%, #e9f1fc 49.3%, #fff 50%, #e9f1fc 50.7%, #c4cbd7 53%, #a1a5b1 57%, #898796 61%, #898796 100%); background-size: 280% 100%; background-position: 100% 50%; background-repeat: no-repeat; -webkit-background-clip: text; background-clip: text; filter: drop-shadow(0 0 2px rgba(233, 241, 252, .36)) drop-shadow(0 0 6px rgba(137, 151, 166, .22)); animation: activityTitleSweep 5.3s linear infinite; }
 .liveActivityChevron { display: grid; flex: none; width: 24px; height: 24px; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--panel-muted); cursor: pointer; }
 .liveActivityChevron:hover { background: rgba(255, 255, 255, .06); color: var(--panel-heading); }
 .liveActivityChevron span { width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translate(-1px, -1px); transition: transform .16s ease; }

@@ -454,7 +454,7 @@ export default function ResearchChat({
           </div>
         </article>}
         {!loadingConversation && messages.length === 0 && <p className={styles.loadingMessages}>此会话暂无消息。</p>}
-        {activeRun && <div className={styles.liveStatus} role="status"><span className={styles.spinner} />
+        {activeRun && <div className={styles.liveStatus} role="status"><span className={`${styles.spinner} ${styles.spinnerResearch}`} />
           <span>{statusText[run.status] || run.status}{stageSuffix(run)}</span>
           <small>{modeText(run.research_mode)}</small>
         </div>}

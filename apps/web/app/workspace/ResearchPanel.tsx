@@ -122,6 +122,7 @@ function ActivityLottie({ animationData, mode, segment, visualState }: { animati
       animationData: structuredClone(animationData),
       initialSegment: segment,
     });
+    animation.setSpeed(0.8);
     let loaded = false;
     const stopAtFrame = () => {
       const lastFrame = Math.max(0, animation.totalFrames - 1);
