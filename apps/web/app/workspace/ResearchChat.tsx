@@ -291,8 +291,28 @@ export default function ResearchChat({
   useEffect(() => {
     const element = textarea.current;
     if (!element) return;
-    element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
+    const resize = () => {
+      if (query.length === 0) {
+        element.style.height = "";
+        return;
+      }
+      element.style.height = "auto";
+      element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
+    };
+    resize();
+    if (query.length === 0) return;
+
+    const container = element.form;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    let previousWidth = container.clientWidth;
+    const observer = new ResizeObserver(entries => {
+      const nextWidth = entries[0]?.contentRect.width ?? container.clientWidth;
+      if (Math.abs(nextWidth - previousWidth) < 0.5) return;
+      previousWidth = nextWidth;
+      resize();
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
   }, [query]);
 
   useRunPolling({
