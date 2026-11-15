@@ -57,7 +57,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(load.call_count, 1)
             self.assertEqual(observed[0][2], 'dispatcher')
             self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
-            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'local_papers'})
+            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'local_papers'})
             self.assertEqual(observed[0][0]['research_mode'], 'auto')
             self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
             self.assertEqual([n['task'] for n in repository.get_task(first['run_id'])['subtasks']], ['topic'])

@@ -26,11 +26,10 @@ from src.tools.registry import ToolCallValidationError
 logger = logging.getLogger("tufa.agent")
 registry = ToolRegistry()
 
-MAX_ROUNDS = 2
 MAX_RESEARCH_ACTIONS = 6
-MAX_RESEARCH_ACTIONS_TOTAL = 10
 MAX_RESEARCH_DECISION_INPUT_UNITS = 10_000
 MAX_CUMULATIVE_RESEARCH_DECISION_INPUT_UNITS = 24_000
+# Kept as a standard-depth compatibility cap for existing diagnostics/tests.
 MAX_BACKGROUND_SEARCHES = 2
 MAX_BACKGROUND_WEB_RESULTS = 3
 MAX_RESEARCH_WEB_RESULTS = 3
@@ -38,6 +37,17 @@ MAX_CANDIDATE_CONTEXT = 6
 MAX_EVIDENCE_CONTEXT = 8
 MAX_EVIDENCE_TEXT = 9_600
 MAX_CANDIDATE_TEXT = 1_600
+
+DEPTH_BUDGETS = {
+    "light": {"rounds": 1, "actions": 4, "background_searches": 1},
+    "standard": {"rounds": 2, "actions": 10, "background_searches": MAX_BACKGROUND_SEARCHES},
+    "deep": {"rounds": 3, "actions": 15, "background_searches": 3},
+}
+
+
+def _budget(state):
+    depth = (state.get("research") or {}).get("research_depth", "standard")
+    return DEPTH_BUDGETS.get(depth, DEPTH_BUDGETS["standard"])
 
 
 class Claim(BaseModel):
@@ -564,6 +574,7 @@ def _record_search_results(state, mode, query, items):
     query_key = " ".join(str(query).casefold().split())
     entries = source_results.setdefault(query_key, [])
     by_key = {_candidate_key(entry.get("paper", {}), mode): i for i, entry in enumerate(entries)}
+    items = [item for item in items if mode != "web" or not _obvious_web_junk(item)]
     for position, item in enumerate(items, 1):
         rank = item.get("rank")
         if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
@@ -585,12 +596,93 @@ def _record_search_results(state, mode, query, items):
     return pools, query_results
 
 
+def _obvious_web_junk(item):
+    title = str(item.get("title") or "").strip().casefold()
+    content = str(item.get("content") or item.get("snippet") or "").strip().casefold()
+    title = re.sub(r"\s+", " ", title)
+    content = re.sub(r"\s+", " ", content)
+    if not title and not content:
+        return True
+    placeholder_titles = {"access denied", "403 forbidden", "security challenge", "attention required", "just a moment..."}
+    if title in placeholder_titles and len(content) < 300:
+        return True
+    boilerplate = {
+        "verify you are human", "are you a robot", "checking your browser",
+        "enable javascript and cookies", "access denied", "403 forbidden",
+        "captcha required", "security challenge",
+    }
+    return content in boilerplate
+
+
 def _candidate_summaries(state, mode, ids=None, *, limit=MAX_CANDIDATE_CONTEXT, include_text=True, text_limit=MAX_CANDIDATE_TEXT):
     pool = state.get("candidate_pools", {}).get(mode, [])
     if ids is not None:
         wanted = set(ids)
         pool = [item for item in pool if item.get("candidate_id") in wanted]
+    pool = _prioritized_candidates(state, pool)
     return [_candidate_view(item, mode, include_text=include_text, text_limit=text_limit) for item in pool[:limit]]
+
+
+def _relevance_facets(state):
+    research = state.get("research", {})
+    facets = [research.get("query", "")]
+    facets.extend(state.get("current_plan", []))
+    facets.extend((state.get("plan") or {}).get("requirements", []))
+    return [relevance_terms(value) for value in facets if isinstance(value, str) and value.strip()]
+
+
+def _candidate_relevance(state, candidate, facets):
+    body = " ".join(str(candidate.get(field) or "") for field in ("title", "abstract", "content", "snippet")).casefold()
+    return sum(relevance_score(facet, body) for facet in facets), body
+
+
+def _primary_evidence_score(item):
+    """Prefer locatable source text; this scores evidence properties, not domains."""
+    level = str(item.get("source_level") or "").casefold()
+    located = item.get("page") is not None or item.get("char_start") is not None or item.get("content_offset") is not None
+    direct = level in {"full_text", "web_content"}
+    return (2 if direct else 0) + (1 if located else 0)
+
+
+def _primary_candidate_score(item):
+    """Use observable material metadata; never infer quality from a domain."""
+    level = str(item.get("source_level") or "").casefold()
+    located = item.get("page") is not None or item.get("content_offset") is not None
+    return (2 if level in {"full_text", "web_content"} else 0) + (1 if located else 0)
+
+
+def _prioritized_candidates(state, candidates):
+    preference = (state.get("research") or {}).get("relevance_filter", "standard")
+    facets = _relevance_facets(state)
+    query_has_cjk = bool(re.search(r"[\u3400-\u9fff]", (state.get("research") or {}).get("query", "")))
+    scored = []
+    for index, candidate in enumerate(candidates):
+        score, body = _candidate_relevance(state, candidate, facets)
+        title = str(candidate.get("title") or "").casefold()
+        title_score = sum(relevance_score(facet, title) for facet in facets)
+        # Lexical matching is only a prioritization signal. Avoid excluding likely
+        # translations and short metadata where the heuristic is particularly weak.
+        candidate_has_cjk = bool(re.search(r"[\u3400-\u9fff]", body))
+        comparable_language = not query_has_cjk or candidate_has_cjk
+        substantial = len(body) >= 80
+        scored.append((index, candidate, score, title_score, comparable_language, substantial))
+    # Strict narrows to title-level direct matches when such matches exist.
+    # If there is no direct lexical signal, retain candidates rather than treating
+    # this language heuristic as proof of irrelevance.
+    if preference in {"standard", "strict"}:
+        scored = [row for row in scored if not (row[2] == 0 and row[5] and row[4])]
+    if preference == "strict":
+        has_direct_match = any(row[3] > 0 for row in scored)
+        if has_direct_match:
+            scored = [row for row in scored if not (row[3] == 0 and row[4] and row[5])]
+        scored.sort(key=lambda row: (-row[2], -row[3], row[0]))
+    elif preference == "standard":
+        scored.sort(key=lambda row: (-row[2], row[0]))
+    # Relevance remains the primary order; when equally relevant, prefer candidates
+    # whose supplied metadata indicates direct text and a verifiable location.
+    if (state.get("research") or {}).get("prefer_primary_evidence", True):
+        scored.sort(key=lambda row: (-row[2], -row[3] if preference == "strict" else 0, -_primary_candidate_score(row[1]), row[0]))
+    return [candidate for _, candidate, _, _, _, _ in scored]
 
 
 def _compact_tool_results(results, *, limit=4, text_limit=400):
@@ -694,6 +786,10 @@ def _select_evidence(state, include_ids=None):
         body = (item.get("title", "") + " " + item.get("text", "")).casefold()
         return sum(relevance_score(facet, body) for facet in terms)
 
+    def evidence_rank(item):
+        primary = _primary_evidence_score(item) if (state.get("research") or {}).get("prefer_primary_evidence", True) else 0
+        return (-primary, -score(item))
+
     previous_ids = set(state.get("rounds", [])[-1].get("evidence_ids", [])) if state.get("rounds") else set()
     cited = [item for item in pool if item.get("id") in include_ids]
     for item in cited:
@@ -701,14 +797,14 @@ def _select_evidence(state, include_ids=None):
 
     new_evidence = sorted(
         ((index, item) for index, item in enumerate(pool) if item.get("id") not in previous_ids and item not in cited),
-        key=lambda pair: (-score(pair[1]), -pair[0]),
+        key=lambda pair: (*evidence_rank(pair[1]), -pair[0]),
     )
     for _, item in new_evidence:
         add(item)
 
     ranked = sorted(
         enumerate(pool),
-        key=lambda pair: (-score(pair[1]), -pair[0]),
+        key=lambda pair: (*evidence_rank(pair[1]), -pair[0]),
     )
     for _, item in ranked:
         add(item)
@@ -823,10 +919,26 @@ def _invoke_tool(state, mode, tool_name, arguments):
         raise ToolCallValidationError("工具参数无效", "tool_not_available")
     context = _tool_context(research, mode)
     args = dict(arguments)
+    # Only candidates presented in this round's ranked queue may be explicitly
+    # fetched. The full pool remains available for stable identity and validation.
+    visible_ids = {item["candidate_id"] for item in _candidate_summaries(state, mode)}
+    previously_selected = {
+        item.get("candidate_id")
+        for item in (state.get("background", {}).get("selected_candidates", []) or [])
+        if item.get("candidate_id")
+    }
+    previously_read = {
+        item.get("candidate_id")
+        for item in state.get("evidence_pool", [])
+        if item.get("candidate_id")
+    }
+    allowed_queue_ids = visible_ids | previously_selected | previously_read
     if tool_name == "collect_evidence":
         pool = state.get("candidate_pools", {}).get(mode, [])
         candidate_ids = args.pop("candidate_ids", [])
         chosen = _find_candidates(pool, candidate_ids)
+        if any(item.get("candidate_id") not in allowed_queue_ids for item in chosen):
+            raise ToolCallValidationError("工具参数无效", "candidate_not_in_priority_queue")
         if len(chosen) > 6 or "papers" in args:
             raise ToolCallValidationError("工具参数无效", "invalid_arguments")
         papers = []
@@ -873,18 +985,19 @@ def _invoke_tool(state, mode, tool_name, arguments):
     if tool_name == "read_web_page":
         read_key = _web_read_key(state, args)
         pool = state.get("candidate_pools", {}).get("web", [])
+        visible_pool = [item for item in pool if item.get("candidate_id") in allowed_queue_ids]
         if "candidate_id" in args:
             candidate_id = args.pop("candidate_id")
-            match = _find_candidates(pool, [candidate_id])[0]
+            match = _find_candidates(visible_pool, [candidate_id])[0]
             candidate_url = match.get("url") or match.get("original_url")
             if "url" in args and args["url"] != candidate_url:
                 raise ToolCallValidationError("工具参数无效", "conflicting_candidate_reference")
             args["url"] = candidate_url
-        allowed_urls = {item.get("url") or item.get("original_url") for item in pool}
+        allowed_urls = {item.get("url") or item.get("original_url") for item in visible_pool}
         if not isinstance(args.get("url"), str) or args["url"] not in allowed_urls:
             raise ToolCallValidationError("工具参数无效", "unknown_candidate_url")
         result = registry.invoke(tool_name, args, context=context)
-        original = next((item for item in pool if (item.get("url") or item.get("original_url")) == args["url"]), {})
+        original = next((item for item in visible_pool if (item.get("url") or item.get("original_url")) == args["url"]), {})
         content = result.get("markdown", "")
         page_item = {
             **original,
@@ -1092,14 +1205,20 @@ def _background_investigator(state, on_stage):
         query_plan = _model(
             state,
             "literature/background_investigator",
-            _payload(state, phase="query", available_sources=allowed_modes),
+            _payload(
+                state, phase="query", available_sources=allowed_modes,
+                research_depth=research.get("research_depth", "standard"),
+                prefer_primary_evidence=research.get("prefer_primary_evidence", True),
+                relevance_filter=research.get("relevance_filter", "standard"),
+                background_search_limit=_budget(state)["background_searches"],
+            ),
             BackgroundOutput,
             node_role="background_investigator",
             search_mode="none" if research["source"] == "auto" else preferred,
             available_tools=query_tools,
         )
         mode = query_plan.source if research["source"] == "auto" and query_plan.source in allowed_modes else preferred
-        queries = [value.strip() for value in query_plan.queries if value.strip()][:MAX_BACKGROUND_SEARCHES]
+        queries = [value.strip() for value in query_plan.queries if value.strip()][:_budget(state)["background_searches"]]
     except (ModelServiceError, StructuredOutputError):
         mode = preferred
         queries = []
@@ -1112,7 +1231,7 @@ def _background_investigator(state, on_stage):
     errors = list(state.get("errors", []))
     warnings = list(state.get("warnings", []))
     context = _tool_context(research, mode)
-    for query in queries[:MAX_BACKGROUND_SEARCHES]:
+    for query in queries[:_budget(state)["background_searches"]]:
         tool_name = "search_web" if mode == "web" else "search_papers"
         arguments = {"query": query, "limit": MAX_BACKGROUND_WEB_RESULTS} if mode == "web" else {"query": query}
         call_id = _tool_event_start(state, "background_investigator", mode, tool_name, arguments)
@@ -1140,7 +1259,7 @@ def _background_investigator(state, on_stage):
             _tool_event_failed(state, "background_investigator", call_id, mode, tool_name, arguments, exc)
             errors.append(_tool_error(tool_name, exc))
     query_state = {**state, "candidate_pools": pools, "query_results": query_results, "errors": errors, "warnings": warnings}
-    background_decision = {"source": mode, "queries": queries[:MAX_BACKGROUND_SEARCHES]}
+    background_decision = {"source": mode, "queries": queries[:_budget(state)["background_searches"]]}
     candidates = _candidate_summaries(query_state, mode, text_limit=500)
     try:
         selected = _model(
@@ -1198,13 +1317,14 @@ def _planner(state, on_stage):
     _emit(on_stage, "planner")
     rounds = state.get("rounds", [])
     allowed = _source_modes(state["research"]["source"])
-    if len(rounds) >= MAX_ROUNDS:
+    budget = _budget(state)
+    if len(rounds) >= budget["rounds"]:
         data = dict(state.get("plan") or _fallback_plan(state))
         data["action"] = "report"
         return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
     if rounds and (
         state.get("research_context_limit_reached")
-        or state.get("research_actions_used", 0) >= MAX_RESEARCH_ACTIONS_TOTAL
+        or state.get("research_actions_used", 0) >= budget["actions"]
     ):
         data = dict(state.get("plan") or _fallback_plan(state))
         data["action"] = "report"
@@ -1224,6 +1344,9 @@ def _planner(state, on_stage):
         evidence=_evidence_views(_select_evidence(state), text_limit=240),
         allowed_sources=allowed,
         source_preference=state.get("background", {}).get("source", _preferred_mode(state["research"]["source"])),
+        research_depth=state.get("research", {}).get("research_depth", "standard"),
+        research_budget=budget,
+        analyst_sufficient=bool(state.get("current_review", {}).get("sufficient")),
     )
     try:
         result = _model(
@@ -1249,7 +1372,7 @@ def _planner(state, on_stage):
         return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
     except (ModelServiceError, StructuredOutputError):
         data = _fallback_plan(state)
-        if rounds and len(rounds) >= MAX_ROUNDS:
+        if rounds and len(rounds) >= budget["rounds"]:
             data["action"] = "report"
         return {
             "plan": data,
@@ -1388,7 +1511,7 @@ def _researcher(state, on_stage):
     ]
     while (
         action_count < MAX_RESEARCH_ACTIONS
-        and actions_used < MAX_RESEARCH_ACTIONS_TOTAL
+        and actions_used < _budget(state)["actions"]
         and not state.get("research_context_limit_reached")
     ):
         payload = {
@@ -1408,10 +1531,12 @@ def _researcher(state, on_stage):
             "tool_feedback": state.get("errors", [])[-4:],
             "calls_remaining": min(
                 MAX_RESEARCH_ACTIONS - action_count,
-                MAX_RESEARCH_ACTIONS_TOTAL - actions_used,
+                _budget(state)["actions"] - actions_used,
             ),
             "search_attempts": search_attempts,
             "search_failures": search_failures,
+            "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
+            "relevance_filter": state.get("research", {}).get("relevance_filter", "standard"),
         }
         template_context = _model_template_context(state, mode, "researcher", prompt_tools)
         input_units = structured_input_units(
@@ -1468,7 +1593,7 @@ def _researcher(state, on_stage):
                 search_failures
                 and search_attempts < 3
                 and action_count < MAX_RESEARCH_ACTIONS
-                and actions_used < MAX_RESEARCH_ACTIONS_TOTAL
+                and actions_used < _budget(state)["actions"]
                 and not state.get("research_context_limit_reached")
             ):
                 name, args = _force_search_retry(state, mode, tried_queries)
@@ -1601,6 +1726,8 @@ def _researcher(state, on_stage):
             "tool_results": _compact_tool_results(state.get("tool_results", [])),
             "tool_feedback": state.get("errors", [])[-6:],
             "calls_remaining": 0,
+            "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
+            "relevance_filter": state.get("research", {}).get("relevance_filter", "standard"),
         }
         try:
             final_draft = _model(
@@ -2090,7 +2217,7 @@ def _warning_caveats(state):
         caveats.append("论文检索的部分外部来源失败，已保留可用结果，资料可能不完整。")
     if state.get("research_context_limit_reached"):
         caveats.append("研究决策输入达到本机估算上下文预算后停止新增工具调用；未覆盖的来源和未提取证据仍需补查。")
-    elif state.get("research_actions_used", 0) >= MAX_RESEARCH_ACTIONS_TOTAL:
+    elif state.get("research_actions_used", 0) >= _budget(state)["actions"]:
         caveats.append("研究工具总预算已用完，未覆盖的来源和缺口仍需补查。")
     return caveats
 
@@ -2117,6 +2244,7 @@ def _reporter(state, on_stage):
         evidence=_evidence_views(working),
         final_requirements=(state.get("plan") or {}).get("requirements", []),
         outstanding_gaps=[gap for item in state.get("rounds", []) for gap in item.get("review", {}).get("gaps", [])],
+        prefer_primary_evidence=state.get("research", {}).get("prefer_primary_evidence", True),
         errors=state.get("errors", []),
     )
     try:
@@ -2292,7 +2420,7 @@ def _graph(on_stage, on_subtask):
     graph.add_edge("background_investigator", "planner")
     graph.add_conditional_edges(
         "planner",
-        lambda state: "reporter" if len(state.get("rounds", [])) >= MAX_ROUNDS or (state.get("rounds") and (state.get("plan") or {}).get("action") == "report") else "supervisor",
+        lambda state: "reporter" if len(state.get("rounds", [])) >= _budget(state)["rounds"] or (state.get("rounds") and (state.get("plan") or {}).get("action") == "report") else "supervisor",
         {"reporter": "reporter", "supervisor": "supervisor"},
     )
     graph.add_conditional_edges(
@@ -2323,6 +2451,12 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
         raise ValueError("research input is missing required fields")
     if research.get("research_mode", "auto") not in {"auto", "deep", "quick"}:
         raise ValueError("research_mode must be auto, deep, or quick")
+    if research.get("research_depth", "standard") not in DEPTH_BUDGETS:
+        raise ValueError("research_depth must be light, standard, or deep")
+    if not isinstance(research.get("prefer_primary_evidence", True), bool):
+        raise ValueError("prefer_primary_evidence must be a boolean")
+    if research.get("relevance_filter", "standard") not in {"relaxed", "standard", "strict"}:
+        raise ValueError("relevance_filter must be relaxed, standard, or strict")
     initial = {
         "research": dict(research),
         "history": _safe_history(history, research["source"]),

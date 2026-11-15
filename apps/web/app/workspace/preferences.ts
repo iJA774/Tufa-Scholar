@@ -1,8 +1,15 @@
 import type { ResearchMode } from "./types";
 
 export type ModelChoice = { model_name: string; reasoning_effort: string };
+export type ResearchDepth = "light" | "standard" | "deep";
+export type RelevanceFilter = "relaxed" | "standard" | "strict";
+export type ReportFormat = "academic" | "exploratory";
 export type WorkspacePreferences = {
   mode: ResearchMode;
+  researchDepth: ResearchDepth;
+  preferPrimaryEvidence: boolean;
+  relevanceFilter: RelevanceFilter;
+  reportFormat: ReportFormat;
   enterToSend: boolean;
   glow: boolean;
   grid: boolean;
@@ -13,6 +20,10 @@ export type WorkspacePreferences = {
 export const PREFERENCES_KEY = "tufa-scholar-workspace-prefs-v1";
 export const DEFAULT_PREFERENCES: WorkspacePreferences = {
   mode: "auto",
+  researchDepth: "standard",
+  preferPrimaryEvidence: true,
+  relevanceFilter: "standard",
+  reportFormat: "academic",
   enterToSend: true,
   glow: true,
   grid: true,
@@ -25,6 +36,10 @@ export function readWorkspacePreferences(): WorkspacePreferences {
     const stored = JSON.parse(window.localStorage.getItem(PREFERENCES_KEY) || "null") as Partial<WorkspacePreferences> | null;
     return {
       mode: stored?.mode === "quick" || stored?.mode === "deep" || stored?.mode === "auto" ? stored.mode : "auto",
+      researchDepth: stored?.researchDepth === "light" || stored?.researchDepth === "deep" ? stored.researchDepth : "standard",
+      preferPrimaryEvidence: typeof stored?.preferPrimaryEvidence === "boolean" ? stored.preferPrimaryEvidence : DEFAULT_PREFERENCES.preferPrimaryEvidence,
+      relevanceFilter: stored?.relevanceFilter === "relaxed" || stored?.relevanceFilter === "strict" ? stored.relevanceFilter : "standard",
+      reportFormat: stored?.reportFormat === "exploratory" ? "exploratory" : "academic",
       enterToSend: typeof stored?.enterToSend === "boolean" ? stored.enterToSend : DEFAULT_PREFERENCES.enterToSend,
       glow: typeof stored?.glow === "boolean" ? stored.glow : DEFAULT_PREFERENCES.glow,
       grid: typeof stored?.grid === "boolean" ? stored.grid : DEFAULT_PREFERENCES.grid,

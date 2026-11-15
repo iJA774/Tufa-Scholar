@@ -6,7 +6,7 @@ import { useRunEvents } from "../hooks/useRunEvents";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
-import type { ModelChoice } from "./preferences";
+import type { ModelChoice, ResearchDepth, RelevanceFilter } from "./preferences";
 import { webSourceLabel } from "./sourceLabels";
 import HeroEmblem from "./HeroEmblem";
 import ResearchPanel from "./ResearchPanel";
@@ -262,6 +262,9 @@ type Props = {
   conversationTitle?: string;
   resetKey: number;
   mode: ResearchMode;
+  researchDepth: ResearchDepth;
+  preferPrimaryEvidence: boolean;
+  relevanceFilter: RelevanceFilter;
   enterToSend: boolean;
   modelChoice: ModelChoice;
   ambient: boolean;
@@ -281,6 +284,9 @@ export default function ResearchChat({
   conversationTitle,
   resetKey,
   mode,
+  researchDepth,
+  preferPrimaryEvidence,
+  relevanceFilter,
   enterToSend,
   modelChoice,
   ambient,
@@ -517,6 +523,9 @@ export default function ResearchChat({
           question,
           conversation_id: submittedConversation ?? null,
           research_mode: mode,
+          research_depth: researchDepth,
+          prefer_primary_evidence: preferPrimaryEvidence,
+          relevance_filter: relevanceFilter,
           model_name: modelChoice.model_name.trim() || undefined,
           reasoning_effort: modelChoice.reasoning_effort || undefined,
         }), signal: controller.signal },

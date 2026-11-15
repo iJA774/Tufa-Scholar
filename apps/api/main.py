@@ -135,6 +135,9 @@ class QuestionInput(BaseModel):
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
     source: Literal['auto', 'all', 'local', 'openalex', 'collection', 'web'] = 'auto'
     research_mode: Literal['auto', 'deep', 'quick'] = 'auto'
+    research_depth: Literal['light', 'standard', 'deep'] = 'standard'
+    prefer_primary_evidence: StrictBool = True
+    relevance_filter: Literal['relaxed', 'standard', 'strict'] = 'standard'
     conversation_id: int | None = None
     collection_id: int | None = None
 
@@ -350,6 +353,9 @@ def ask_question(project_id: int, body: QuestionInput):
     result = repo.create_question(
         project_id, body.conversation_id, body.question.strip(), body.source,
         body.collection_id, model_name, effort, research_mode=body.research_mode,
+        research_depth=body.research_depth,
+        prefer_primary_evidence=body.prefer_primary_evidence,
+        relevance_filter=body.relevance_filter,
     )
     if result is None:
         raise HTTPException(404, '项目或对话不存在')

@@ -103,11 +103,19 @@ def main():
             pending = call('POST', f'/projects/{project}/questions', json={
                 'question': 'accuracy', 'source': 'local', 'model_name': 'fixture-selected',
                 'research_mode': 'deep',
+                'research_depth': 'light', 'prefer_primary_evidence': False,
+                'relevance_filter': 'relaxed',
             })
             failed = wait(pending['run_id'])
             assert failed['status'] == 'failed' and '配置模型' in failed.get('error', ''), failed
             failed_detail = call('GET', f"/runs/{pending['run_id']}")
             assert failed_detail['research_mode'] == 'deep', failed_detail
+            preferences = {
+                'research_depth': 'light',
+                'prefer_primary_evidence': False,
+                'relevance_filter': 'relaxed',
+            }
+            assert {key: failed_detail[key] for key in preferences} == preferences, failed_detail
 
             call('PUT', '/settings', json={
                 'openai_base_url': f'http://127.0.0.1:{fixture.server_port}/v1',
@@ -115,9 +123,11 @@ def main():
             })
             retry = call('POST', f"/runs/{pending['run_id']}/retry")
             assert retry['research_mode'] == 'deep', retry
+            assert {key: retry[key] for key in preferences} == preferences, retry
             completed = wait(retry['id'])
             assert completed['status'] == 'succeeded', completed
             assert completed['research_mode'] == 'deep', completed
+            assert {key: completed[key] for key in preferences} == preferences, completed
             result = completed['result']
             assert '92%' in result['content']
             assert result['evidence'] and result['evidence'][0]['page'] == 1
@@ -191,7 +201,7 @@ def main():
 
             messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
             assert len(messages) == 2
-            print('Simulated model: API/worker, deep-mode retry persistence, direct answer, PDF evidence, report and empty collection passed.')
+            print('Simulated model: API/worker, research preference retry persistence, direct answer, PDF evidence, report and empty collection passed.')
             print('Cloud model and real-provider quality were not exercised.')
     finally:
         try:

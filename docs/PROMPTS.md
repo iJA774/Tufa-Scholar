@@ -31,4 +31,6 @@
 
 研究模式字段保存在 task：`auto` 是旧 API 客户端的缺省兼容模式，collection 来源在 auto 下强制研究；`quick` 优先于 collection 约束，不读取收藏夹且直接回答；`deep` 绕过 dispatcher 判断并启动研究。用户可通过 API 请求选择模式，API 校验后由 worker 传入可信模板上下文；问题、历史或检索材料中的指令不能改变该模式。任务重试复制原模式，既有 task 通过 additive migration 补为 `auto`。
 
+研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证；Researcher 根据偏好使用候选和已提取证据，Reporter 优先采用符合本次偏好的可核查材料。最终引用与数值仍按同一规则校验。
+
 更改节点输入输出时，同步更新对应 Markdown、类型和 [工作流回归](../tests/AGENTS.md)。不要在提示词里重复工具参数 schema、来源范围约束或代码检查规则；工具契约位于 [工具说明](../src/tools/README.md)。

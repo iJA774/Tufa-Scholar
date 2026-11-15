@@ -202,14 +202,15 @@ class ChatApiTests(unittest.TestCase):
                 initialize_storage()
                 from src.persistence.storage import connect_database
                 with connect_database() as migrated:
-                    row = migrated.execute('SELECT query, research_mode FROM tasks WHERE id=1').fetchone()
-                    self.assertEqual(tuple(row), ('q', 'auto'))
+                    row = migrated.execute('SELECT query, source, status, stage, research_mode, research_depth, prefer_primary_evidence, relevance_filter FROM tasks WHERE id=1').fetchone()
+                    self.assertEqual(tuple(row), ('q', 'auto', 'pending', 'pending', 'auto', 'standard', 1, 'standard'))
                     message = migrated.execute('SELECT content FROM messages WHERE id=1').fetchone()
                     self.assertEqual(message[0], 'legacy message')
                     conversation = migrated.execute('SELECT project_id, title, pinned FROM conversations WHERE id=1').fetchone()
                     self.assertEqual(tuple(conversation), (1, 'legacy conversation', 0))
                     migrated.execute("INSERT INTO tasks (project_id, query, source, status, stage, kind) VALUES (1, 'new', 'auto', 'pending', 'pending', 'chat')")
-                    self.assertEqual(migrated.execute('SELECT research_mode FROM tasks WHERE query=?', ('new',)).fetchone()[0], 'auto')
+                    defaults = migrated.execute('SELECT research_mode, research_depth, prefer_primary_evidence, relevance_filter FROM tasks WHERE query=?', ('new',)).fetchone()
+                    self.assertEqual(tuple(defaults), ('auto', 'standard', 1, 'standard'))
 
     def test_retry_keeps_original_history_boundary(self):
         c = self.client

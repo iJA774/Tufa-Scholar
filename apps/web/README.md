@@ -4,7 +4,7 @@
 
 `app/workspace/page.tsx` 是研究工作区入口，装配 `workspace/WorkspacePage.tsx`。光标悬浮在左上角标志时展开历史抽屉，移出标志和抽屉后收起。工作区通过 `GET /conversations` 加载跨项目历史，打开会话时根据 `project_id` 切换项目。历史项菜单支持置顶、解除置顶和确认删除，置顶状态由本机 API 保存。项目仍限定可用 PDF、文献与新研究范围。
 
-工作区提供平铺历史导航和设置弹窗。提问框的模式菜单提供“自动”“深度研究”和“快速探索”，每次明确提交 `research_mode: auto|deep|quick`。首次默认使用 auto，由 dispatcher 选择流程；已有浏览器偏好会继续生效。deep 强制进入研究流程，quick 强制直接回答并跳过背景调查与检索。重试沿用原任务模式。设置中的“研究偏好”标签保留为不生效的占位，不影响后端；“通用”和“外观”偏好保存在本地，模型选择只用于下一次提问。
+工作区提供平铺历史导航和设置弹窗。提问框的模式菜单提供“自动”“深度研究”和“快速探索”，每次明确提交 `research_mode: auto|deep|quick`。首次默认使用 auto，由 dispatcher 选择流程；已有浏览器偏好会继续生效。deep 强制进入研究流程，quick 强制直接回答并跳过背景调查与检索。“研究偏好”的深度、原始证据优先和相关性过滤随新问题提交，重试沿用原任务模式和偏好。报告格式只保存在浏览器中。
 
 设置按钮和 `/settings` 都在工作区上方打开 `SettingsPanel`。本地文件标签通过浏览器选择目录并预览文件相对路径，关于入口在新标签页打开 GitHub。所有业务数据请求通过本机 `/api` 代理，不由浏览器直接访问数据库或携带服务密钥访问云端。
 
@@ -22,7 +22,7 @@
 | `workspace/PdfImport.tsx`、`workspace/PaperLibrary.tsx`、`workspace/PaperRow.tsx` | 当前项目 PDF 导入、刷新、列表和原文访问 |
 | `app/settings/WebSearchSettings.tsx`、`RuntimeLogsSettings.tsx` | 网页搜索设置及本地运行日志管理 |
 | `workspace/api.ts`、`workspace/types.ts`、`workspace/sourceLabels.ts` | 工作区请求辅助、API 数据类型及来源标签 |
-| `workspace/preferences.ts` | deep/quick、Enter 发送、外观选项和模型选择的本地工作区偏好 |
+| `workspace/preferences.ts` | 研究模式、研究偏好、Enter 发送、外观选项和模型选择的本地工作区偏好 |
 | `app/hooks/useRunPolling.ts`、`app/hooks/runPolling.ts` | 任务轮询的 React 生命周期适配与独立调度逻辑 |
 | `app/ModelControls.tsx` | 提问模型和思考强度选择 |
 

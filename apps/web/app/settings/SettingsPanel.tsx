@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, type CSSProperties, type KeyboardEvent, useCallback, useEffect, useId, useRef, useState } from "react";
+import { type ChangeEvent, type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
 import { api } from "../workspace/api";
 import type { WorkspacePreferences } from "../workspace/preferences";
@@ -25,7 +25,13 @@ const tabs: { id: PanelTab; label: string }[] = [
   { id: "files", label: "本地文件" },
 ];
 
-function SettingsHelp({ label, children }: { label: string; children: string }) {
+const relevanceOptions = [
+  { value: "relaxed", label: "宽松", description: "保留更多主题相邻资料，适合探索新方向和跨学科关联；仍会去重、检查安全并拦截明显垃圾结果。" },
+  { value: "standard", label: "标准（推荐）", description: "结合研究问题、Planner 子任务和候选标题摘要评分；明显不相关的结果不进入优先取证队列。" },
+  { value: "strict", label: "严格", description: "优先采用直接回答当前研究子问题的材料，降低噪声；可能漏掉有价值的间接证据。" },
+] as const;
+
+function SettingsHelp({ label, children }: { label: string; children: ReactNode }) {
   const descriptionId = useId();
   const [open, setOpen] = useState(false);
   return <div className={styles.settingHelp} data-open={open}>
@@ -234,25 +240,62 @@ export default function SettingsPanel({
             </section>
           </div>}
 
-          {activeTab === "research" && <section className={styles.card}>
-            <h2>研究偏好</h2>
-            <p>以下偏好控件暂未接入后端，不会影响检索或研究预算。当前生效的模式和本次模型请在“通用”中设置。</p>
-            <label className={styles.placeholderRow}>
-              <span><strong>搜索深度</strong><small>暂不生效 · 深度研究的预算由工作流固定控制。</small></span>
-              <input type="range" min="3" max="12" defaultValue="6" disabled aria-label="搜索深度，暂不生效" />
-            </label>
-            <label className={styles.toggleRow}>
-              <span><strong>优先展示可追溯证据</strong><small>暂不生效 · 报告引用仍由当前证据校验规则处理。</small></span>
-              <input type="checkbox" defaultChecked disabled aria-label="优先展示可追溯证据，暂不生效" />
-            </label>
-            <label className={styles.toggleRow}>
-              <span><strong>相关性过滤</strong><small>暂不生效 · 该选项不会更改候选筛选。</small></span>
-              <input type="checkbox" defaultChecked disabled aria-label="相关性过滤，暂不生效" />
-            </label>
-            <label className={styles.placeholderRow}>
+          {activeTab === "research" && <section className={`${styles.card} ${styles.researchPreferences}`}>
+            <div className={styles.settingControl}>
+              <div className={styles.settingHeading}>
+                <strong>研究深度</strong>
+                <SettingsHelp label="研究深度说明">档位设置研究预算上限，不代表必须完成的轮数或搜索次数。研究者会按计划收集资料，Analyst 检查证据缺口后可建议补充检索；证据充分时 Planner 可以提前结束。预算依次为：轻量 1 轮、4 次 researcher 工具动作、1 次背景搜索；标准 2 轮、10 次工具动作、2 次背景搜索；深入 3 轮、15 次工具动作、3 次背景搜索。分析证据缺口始终开启，补充检索受当前档位预算约束，预计消耗由低到高。</SettingsHelp>
+              </div>
+              <fieldset className={styles.depthOptions} aria-label="研究深度">
+                <label className={preferences.researchDepth === "light" ? styles.depthOptionSelected : styles.depthOption}>
+                  <input type="radio" name="research-depth" value="light" checked={preferences.researchDepth === "light"} onChange={() => updatePreference("researchDepth", "light")} />
+                  <span>轻量</span>
+                </label>
+                <label className={preferences.researchDepth === "standard" ? styles.depthOptionSelected : styles.depthOption}>
+                  <input type="radio" name="research-depth" value="standard" checked={preferences.researchDepth === "standard"} onChange={() => updatePreference("researchDepth", "standard")} />
+                  <span>标准（默认）</span>
+                </label>
+                <label className={preferences.researchDepth === "deep" ? styles.depthOptionSelected : styles.depthOption}>
+                  <input type="radio" name="research-depth" value="deep" checked={preferences.researchDepth === "deep"} onChange={() => updatePreference("researchDepth", "deep")} />
+                  <span>深入</span>
+                </label>
+              </fieldset>
+            </div>
+
+            <div className={`${styles.settingControl} ${styles.settingControlBordered}`}>
+              <div className={styles.toggleHelpRow}>
+                <label className={styles.toggleRow}>
+                  <span><strong>优先使用原始证据</strong></span>
+                  <input type="checkbox" checked={preferences.preferPrimaryEvidence} onChange={event => updatePreference("preferPrimaryEvidence", event.target.checked)} />
+                </label>
+                <SettingsHelp label="优先使用原始证据说明">开启后优先读取质量更高、来源更直接的材料，并尽可能引用带页码或网页定位的原文。关闭后可接受更多间接来源以扩大覆盖、减少部分检索开销。两种情况下都会校验引用真实性、来源范围和数值，关闭此偏好不放宽这些校验。</SettingsHelp>
+              </div>
+            </div>
+
+            <div className={`${styles.settingControl} ${styles.settingControlBordered}`}>
+              <div className={styles.settingHeading}>
+                <strong>相关性过滤强度</strong>
+              </div>
+              <fieldset className={`${styles.relevanceOptions} ${preferences.relevanceFilter === "strict" ? styles.relevanceOptionsStrict : ""}`} aria-label="相关性过滤强度">
+                {relevanceOptions.map(option => <label key={option.value} className={preferences.relevanceFilter === option.value ? `${styles.relevanceOption} ${styles.relevanceOptionSelected} ${option.value === "strict" ? styles.relevanceOptionStrict : ""}` : styles.relevanceOption}>
+                  <input type="radio" name="relevance-filter" value={option.value} checked={preferences.relevanceFilter === option.value} onChange={() => updatePreference("relevanceFilter", option.value)} />
+                  {option.value === "strict" && preferences.relevanceFilter === "strict" && <svg className={styles.warningIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 22 20.5H2L12 3.5Z" /><path d="M12 9v5.3M12 17.6v.1" /></svg>}
+                  <span>{option.label}</span>
+                </label>)}
+              </fieldset>
+              <p className={`${styles.relevanceDescription} ${preferences.relevanceFilter === "strict" ? styles.relevanceDescriptionStrict : ""}`} aria-live="polite">
+                <strong>{relevanceOptions.find(option => option.value === preferences.relevanceFilter)?.label}：</strong>
+                {relevanceOptions.find(option => option.value === preferences.relevanceFilter)?.description}
+              </p>
+            </div>
+
+            <div className={`${styles.settingControl} ${styles.settingControlBordered} ${styles.reportFormatRow}`}>
               <span><strong>报告格式</strong><small>暂不生效 · 终稿按当前工作流生成。</small></span>
-              <select defaultValue="academic" disabled aria-label="报告格式，暂不生效"><option value="academic">学术综述</option><option value="structured">结构化报告</option><option value="brief">研究摘要</option></select>
-            </label>
+              <select value={preferences.reportFormat} onChange={event => updatePreference("reportFormat", event.target.value as WorkspacePreferences["reportFormat"])} aria-label="报告格式">
+                <option value="academic">学术综述</option>
+                <option value="exploratory">探索发现</option>
+              </select>
+            </div>
           </section>}
 
           {activeTab === "appearance" && <section className={styles.card}>
@@ -314,8 +357,8 @@ export default function SettingsPanel({
           </section>}
           </main>
         </div>
-        <footer className={styles.footer}>
-          <span>{currentTab.label}</span>
+        <footer className={`${styles.footer} ${activeTab === "research" ? styles.footerResearch : ""}`}>
+          {activeTab !== "research" && <span>{currentTab.label}</span>}
           <button className={styles.doneButton} type="button" onClick={requestClose}>完成</button>
         </footer>
       </div>
