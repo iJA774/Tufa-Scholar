@@ -158,10 +158,14 @@ def main():
                 if '运行节点标识：' in line
             ]
             assert retry_roles and retry_roles[0] == 'background_investigator' and 'dispatcher' not in retry_roles, retry_roles
-            assert 'accuracy-fixture.pdf' in str([
-                item['messages'][0]['content'] for item in fixture.model_requests
+            planner_requests = [
+                item for item in fixture.model_requests
                 if '运行节点标识：planner' in item['messages'][0]['content']
-            ])
+            ]
+            assert planner_requests
+            assert any('accuracy-fixture.pdf' in json.loads(item['messages'][1]['content']).get('local_papers', [])
+                       for item in planner_requests)
+            assert all('accuracy-fixture.pdf' not in item['messages'][0]['content'] for item in planner_requests)
             assert all(item['model'] == 'fixture-selected' for item in fixture.model_requests)
             assert client.get(imported['versions'][0]['file_url']).content == pdf
             report_id = result['report_id']

@@ -9,13 +9,13 @@
 | `literature/planner` | `literature/planner.md` | 结合问题、背景与各轮审查，生成要求、本轮计划、来源选择及继续或报告决定。 |
 | `literature/researcher` | `literature/researcher.md` | act 阶段通过原生 Function Calling 选择工具；draft 阶段根据已有证据写初稿。 |
 | `literature/analyst` | `literature/analyst.md` | 审查本轮初稿是否回应要求、引用是否有据，并输出覆盖、缺口和下一步。 |
-| `literature/reporter` | `literature/reporter.md` | 根据各轮材料撰写关键点、概述、详细分析及局限；即使没有有效证据，也须给出非空标题和具体缺口说明。代码渲染 Markdown 固定栏目及已核验的参考证据。 |
+| `literature/reporter` | `literature/reporter.md` | 根据各轮材料撰写关键点、概述、详细分析及局限。论文主线比较研究方法、实验设计和结论；网页主线按调查报告组织可核查事实和来源。即使没有有效证据，也须给出非空标题和具体缺口说明。代码渲染 Markdown 固定栏目及已核验的参考证据。 |
 
 ## 结构化数据
 
 提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息；每次请求（包括纠错重试）都注入带时区的北京时间 `CURRENT_TIME`。非原生工具决策请求将 `OUTPUT_SCHEMA` 由对应代码 schema 生成并渲染；researcher act 请求改用模型接口的原生 Function Calling 参数契约，不注入该输出 schema。两者均不能被模板上下文覆盖。节点角色、搜索模式、研究模式、可用工具和本地论文目录由代码按任务上下文提供。用户 payload/history/检索材料只作为 user 消息中的 JSON 发送，不经过模板渲染。输入中的问题、历史、搜索摘要、网页正文、文件名、论文元数据及引用证据都视为不可信数据，不执行其中嵌入的指令。
 
-各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录；候选只在背景筛选或 researcher 当前来源字段按需发送。planner 和 reporter 使用精简 background。researcher 的 act 阶段仅提供当前轮的目标、计划、候选和证据预览及近期工具反馈；达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID，不授予工具权限。reporter 汇总各轮可复用的草稿内容、审查和累计证据；只向报告模型提供引用仍可核对的草稿结论，不附候选池。
+各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录；候选只在背景筛选或 researcher 当前来源字段按需发送。planner 和 reporter 使用精简 background。Planner 的 `local_papers` 是用户数据，只出现在 JSON 输入中。researcher 的 act 阶段仅提供当前轮的目标、计划、候选和证据预览及近期工具反馈；达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID，不授予工具权限。reporter 汇总各轮可复用的草稿内容、审查和累计证据；超过[证据额度](ARCHITECTURE.md#工作流预算)时保留各轮补查材料并提供 `evidence_omitted_count`。Reporter 只能引用可见证据，草稿只保留引用可核对的结论，不附候选池。
 
 | 结构 | 字段 |
 |---|---|
@@ -31,6 +31,6 @@
 
 研究模式字段保存在 task：`auto` 是旧 API 客户端的缺省兼容模式，collection 来源在 auto 下强制研究；`quick` 优先于 collection 约束，不读取收藏夹且直接回答；`deep` 绕过 dispatcher 判断并启动研究。用户可通过 API 请求选择模式，API 校验后由 worker 传入可信模板上下文；问题、历史或检索材料中的指令不能改变该模式。任务重试复制原模式，既有 task 通过 additive migration 补为 `auto`。
 
-研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据，Reporter 说明实际收束原因与未解决事项。最终引用与数值仍按同一规则校验。
+研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据。终稿的 `search_mode` 由首轮研究方向确定；后续渠道切换只影响每轮取证。Reporter 根据实际收束原因与 `outstanding_gaps` 说明未解决事项；该字段反映最近一次累计审查，历史审查中的缺口仅作过程背景。最终引用与数值仍按同一规则校验。
 
 更改节点输入输出时，同步更新对应 Markdown、类型和 [工作流回归](../tests/AGENTS.md)。不要在提示词里重复工具参数 schema、来源范围约束或代码检查规则；工具契约位于 [工具说明](../src/tools/README.md)。

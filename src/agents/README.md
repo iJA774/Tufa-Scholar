@@ -39,7 +39,7 @@ supervisor 不调用模型，只依据完成节点将控制顺序交给 research
 | analyst | `literature/analyst` | 深入审查问题覆盖、初稿与证据缺口；无工具 |
 | reporter | `literature/reporter` | 综合各轮初稿与证据，始终生成最终报告；无工具 |
 
-supervisor 和 coder 是确定性节点，不设置虚构 prompt ID。模型调用位于 `src/integrations/model.py`。Jinja2 仅渲染受信的六个 system 模板，使用 `StrictUndefined` 且关闭 autoescape；每次 HTTP 请求（包括格式纠错重试）注入当前北京时间。非原生工具决策请求渲染代码生成的 Pydantic `OUTPUT_SCHEMA`；researcher act 使用模型原生 Function Calling 工具参数契约，不注入该输出 schema。工作流另提供 `node_role`、`search_mode`、节点权限过滤后的 `available_tools` 与本地文献文件名 `local_papers`。这些上下文由代码注入，不能被用户数据或模板上下文替换。问题、历史、网页、论文、候选、初稿和审查意见单独作为 user JSON 数据发送，不能进行二次模板求值；文件名也只是待处理数据。更多规则见 [提示词说明](../../docs/PROMPTS.md) 与 [模板维护规则](../prompts/AGENTS.md)。
+supervisor 和 coder 是确定性节点，不设置虚构 prompt ID。模型调用位于 `src/integrations/model.py`。Jinja2 仅渲染受信的六个 system 模板，使用 `StrictUndefined` 且关闭 autoescape；每次 HTTP 请求（包括格式纠错重试）注入当前北京时间。非原生工具决策请求渲染代码生成的 Pydantic `OUTPUT_SCHEMA`；researcher act 使用模型原生 Function Calling 工具参数契约，不注入该输出 schema。工作流另提供 `node_role`、`search_mode`、`research_mode` 和节点权限过滤后的 `available_tools`。这些上下文由代码提供，不能被用户数据取代。问题、历史、网页、论文、候选、初稿、审查意见和本地文件名均作为 user JSON 数据发送，不经过模板求值。更多规则见 [提示词说明](../../docs/PROMPTS.md) 与 [模板维护规则](../prompts/AGENTS.md)。
 
 模型请求按阶段裁剪。背景筛选接收检索候选摘要；planner 和 reporter 接收筛选摘要、缺口及候选 ID，不接收重复的候选正文。researcher act 每轮仅接收当前来源的短候选预览、证据预览、少量最近工具反馈和筛选候选 ID；结束时单独调用 draft 并传入所需证据，以保持证据引用校验能力。各阶段候选及证据条数、文本和上下文预算见[架构预算表](../../docs/ARCHITECTURE.md#工作流预算)。连续两次搜索失败或网页正文连续两次读取失败会提前结束当轮检索；同一轮会跳过此前读取失败的相同候选与字符区间，保留已有证据并继续生成初稿和报告。成功的后续工具调用会重置连续失败计数，分页偏移变化仍可读取。planner 可看到项目文献文件名清单以判断现有范围，但文件名不代表已读取原文。工具目录由代码按节点和来源过滤；图层将候选 ID 映射为 registry 的真实参数，不能由模型构造项目范围或网页 URL。
 

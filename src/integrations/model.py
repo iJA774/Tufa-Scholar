@@ -35,7 +35,6 @@ DEFAULT_TEMPLATE_CONTEXT = {
     'search_mode': 'none',
     'research_mode': 'auto',
     'available_tools': [],
-    'local_papers': [],
     'native_tool_decision': False,
 }
 

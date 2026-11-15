@@ -10,6 +10,6 @@
 | `literature/analyst` | 深入分析问题覆盖、证据质量和可执行缺口 | 无 |
 | `literature/reporter` | 无论证据是否完整，综合研究初稿和审查生成最终报告 | 无 |
 
-`search_mode` 区分 `web`、`paper` 和 `none`；系统提示按模式说明身份及证据边界。planner 可收到本地文献文件名列表；文件名仅用于判断范围，不代表已经读取文献。
+`search_mode` 按节点表示 `web`、`paper` 或尚未确定的方向。节点职责固定，模板按模式提供取证或写作指导；reporter 使用首轮研究方向，允许整合后续渠道的补充材料。planner 在 user JSON 中收到本地文献文件名列表；文件名仅用于判断范围，不代表已经读取文献。
 
 问题、历史、候选、用户文档、论文和网页文本始终作为待处理数据。需要校验内容字段的回复使用公共的 [输出契约](../runtime/structured_output.md)。模板加载和上下文见 [提示词规则](../AGENTS.md) 与 [提示词规范](../../../docs/PROMPTS.md)。

@@ -92,7 +92,8 @@ class ModelTests(unittest.TestCase):
                 expected_time = clock_values[index].isoformat(timespec='seconds')
                 self.assertTrue(system['content'].startswith(f'---\nCURRENT_TIME: {expected_time}\n---\n'))
                 self.assertIn(role, system['content'])
-                self.assertIn(f'`{mode}`', system['content'])
+                if prompt_id != 'runtime/dispatcher':
+                    self.assertIn(f'`{mode}`', system['content'])
                 for tool in tools:
                     self.assertNotIn(tool['name'], system['content'])
                     self.assertNotIn(tool['description'], system['content'])
@@ -790,16 +791,16 @@ class ModelTests(unittest.TestCase):
         )
         context['CURRENT_TIME'] = 'forged time'
         context['OUTPUT_SCHEMA'] = 'forged schema'
-        payload = {'question': 'private question {{ CURRENT_TIME }}', 'history': ['{{ OUTPUT_SCHEMA }}']}
+        payload = {'question': 'private question {{ CURRENT_TIME }}', 'history': ['{{ OUTPUT_SCHEMA }}'], 'local_papers': ['<研究图表>.pdf {{ CURRENT_TIME }}']}
         with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
             structured('literature/planner', payload, Output, template_context=context)
         system, user = post.call_args.kwargs['json']['messages']
         self.assertIn('科研计划制定者', system['content'])
         self.assertIn('paper', system['content'])
-        self.assertIn('论文规划身份', system['content'])
+        self.assertIn('实验条件', system['content'])
         self.assertNotIn('search_papers', system['content'])
         self.assertNotIn('只检索允许范围内的论文', system['content'])
-        self.assertIn('<研究图表>.pdf {{ CURRENT_TIME }}', system['content'])
+        self.assertNotIn('<研究图表>.pdf {{ CURRENT_TIME }}', system['content'])
         self.assertNotIn('forged time', system['content'])
         self.assertNotIn('forged schema', system['content'])
         self.assertNotIn('private question', system['content'])
@@ -809,13 +810,25 @@ class ModelTests(unittest.TestCase):
 
     def test_web_and_paper_researcher_identity_is_selected_by_search_mode(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
-        modes = [('web', '网页研究身份'), ('paper', '论文研究身份')]
+        modes = [('web', '网页研究重点'), ('paper', '论文研究重点')]
         with patch('src.integrations.model.settings.model_config', return_value=config):
             for mode, identity in modes:
                 with self.subTest(mode=mode), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
                     structured('literature/researcher', {}, Output, template_context=self.context('专业研究者', mode))
                 system = post.call_args.kwargs['json']['messages'][0]['content']
                 self.assertIn(identity, system)
+
+    def test_reporter_prompt_follows_mainline_and_marks_partial_evidence(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            for mode, expected, other in [('paper', '实验设计', '调查报告形式'), ('web', '调查报告形式', '学术论文为主线')]:
+                with self.subTest(mode=mode), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured('literature/reporter', {'evidence_omitted_count': 1}, Output, template_context=self.context('reporter', mode))
+                system, user = post.call_args.kwargs['json']['messages']
+                self.assertIn(expected, system['content'])
+                self.assertNotIn(other, system['content'])
+                self.assertIn('evidence_omitted_count', system['content'])
+                self.assertEqual(json.loads(user['content'])['evidence_omitted_count'], 1)
 
     def test_time_and_schema_cannot_be_overridden_and_retry_gets_fresh_time(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
