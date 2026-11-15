@@ -12,6 +12,7 @@ import searchAnimation from "../../../../assets/animations/Search.json";
 import fileCheckAnimation from "../../../../assets/animations/File Check.json";
 import gearLoadingAnimation from "../../../../assets/animations/Gear Loading.json";
 import successCheckmarkAnimation from "../../../../assets/animations/Success Checkmark.json";
+import alertCircleAnimation from "../../../../assets/animations/alert-circle.json";
 import type { Message, Run } from "./types";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import styles from "./ResearchPanel.module.css";
@@ -106,7 +107,7 @@ const completedCheckAnimation = {
 };
 const gearAnimationSegment: [number, number] = [15, 30];
 
-function ActivityLottie({ animationData, mode, segment, successZoom = false }: { animationData: object; mode: "loop" | "complete" | "static"; segment?: [number, number]; successZoom?: boolean }) {
+function ActivityLottie({ animationData, mode, segment, visualState }: { animationData: object; mode: "loop" | "complete" | "static"; segment?: [number, number]; visualState?: "success" | "failure" }) {
   const container = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
@@ -155,13 +156,15 @@ function ActivityLottie({ animationData, mode, segment, successZoom = false }: {
     };
   }, [animationData, mode, segment]);
 
-  return <span className={`${styles.activityLottie} ${successZoom ? styles.activityLottieSuccess : ""}`} ref={container} aria-hidden="true" />;
+  const visualClass = visualState === "success" ? styles.activityLottieSuccess : visualState === "failure" ? styles.activityLottieFailure : "";
+  return <span className={`${styles.activityLottie} ${visualClass}`} ref={container} aria-hidden="true" />;
 }
 
-function ActivityIcon({ event, complete, playing }: { event: RunEvent; complete: boolean; playing: boolean }) {
+function ActivityIcon({ event, complete, failed, playing }: { event: RunEvent; complete: boolean; failed: boolean; playing: boolean }) {
   const node = textField(event.data, "node");
   const tool = textField(event.data, "tool");
-  if (complete) return <ActivityLottie animationData={completedCheckAnimation} mode="complete" successZoom />;
+  if (complete) return <ActivityLottie animationData={completedCheckAnimation} mode="complete" visualState="success" />;
+  if (failed) return <ActivityLottie animationData={alertCircleAnimation} mode="complete" visualState="failure" />;
 
   const mode = playing ? "loop" : "static";
   if (tool === "read_web_page" || tool === "collect_evidence" || node === "analyst") {
@@ -368,19 +371,19 @@ export default function ResearchPanel({ run, report, events, open, status, stage
             const isFailed = displayEvent.kind.endsWith("failed");
             const isComplete = !isFailed && displayEvent.kind.endsWith("completed");
             const activityKey = `${run.id}:${event.id}`;
-            const collapsedByDefault = isComplete && !isFailed;
             const heading = eventHeading(combinedEvent);
             const detailsId = `activity-details-${run.id}-${event.id}`;
             const hasDetails = !!(message || reason || query || title || url || sourceItems.length || (displayEvent.kind === "node.completed" && node === "planner" && (source || action)));
-            const isExpanded = hasDetails && (activityExpanded[activityKey] ?? !collapsedByDefault);
+            const isCollapsible = hasDetails && (isComplete || isFailed);
+            const isExpanded = isCollapsible && (activityExpanded[activityKey] ?? false);
             return <li key={event.id} className={`${styles.liveActivityItem} ${isFailed ? styles.liveActivityFailed : isComplete ? styles.liveActivityComplete : ""}`}>
               <div className={styles.liveActivityHeading}>
-                <span className={styles.liveActivityMark} aria-hidden="true">{isFailed ? null : <ActivityIcon event={event} complete={isComplete} playing={active && open && tab === "activities"} />}</span>
-                {isComplete && hasDetails ? <button type="button" className={styles.liveActivityToggle} aria-expanded={isExpanded} aria-controls={isExpanded ? detailsId : undefined} aria-label={`${isExpanded ? "收起" : "展开"}活动：${heading}`} onClick={() => setActivityExpanded(current => ({ ...current, [activityKey]: !isExpanded }))}>
-                  <strong>{heading}</strong><small>完成</small><span className={`${styles.liveActivityChevron} ${isExpanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
+                <span className={styles.liveActivityMark} aria-hidden="true"><ActivityIcon event={event} complete={isComplete} failed={isFailed} playing={active && open && tab === "activities"} /></span>
+                {isCollapsible ? <button type="button" className={styles.liveActivityToggle} aria-expanded={isExpanded} aria-controls={isExpanded ? detailsId : undefined} aria-label={`${isExpanded ? "收起" : "展开"}活动：${heading}`} onClick={() => setActivityExpanded(current => ({ ...current, [activityKey]: !isExpanded }))}>
+                  <strong>{heading}</strong><small>{isFailed ? "失败" : "完成"}</small><span className={`${styles.liveActivityChevron} ${isExpanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
                 </button> : <><strong className={active && !isComplete && !isFailed ? styles.liveActivityShimmer : ""}>{heading}</strong><small>{isFailed ? "失败" : isComplete ? "完成" : active ? eventState(event) : "未完成"}</small></>}
               </div>
-              {hasDetails && (!isComplete || isExpanded) && <div id={detailsId} className={styles.liveActivityDetails}>
+              {hasDetails && (!isCollapsible || isExpanded) && <div id={detailsId} className={styles.liveActivityDetails}>
               {displayEvent.kind === "node.completed" && node === "planner" && (source || action) && <p className={styles.liveActivityDetail}>{[source && `选择${sourceName(source)}线路`, action && actionName(action)].filter(Boolean).join(" · ")}</p>}
               {message && <p className={isFailed ? styles.liveActivityError : styles.liveActivityDetail}>{message}</p>}
               {event.kind === "tool.started" && reason && <p className={styles.toolReason}>{reason}</p>}

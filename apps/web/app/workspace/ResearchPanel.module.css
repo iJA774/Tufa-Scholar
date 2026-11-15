@@ -105,13 +105,16 @@
 .liveActivityMark { display: grid; flex: none; width: 18px; height: 18px; place-items: center; color: #bcb2f2; }
 .activityLottie { position: relative; display: block; flex: none; width: 18px; height: 18px; overflow: hidden; }
 .activityLottie svg { position: absolute; top: 50%; left: 50%; display: block; width: 180% !important; height: 180% !important; overflow: visible; translate: -50% -50%; }
+.activityLottieSuccess { translate: -2px 0; }
 .activityLottieSuccess svg { width: 250% !important; height: 250% !important; }
+.activityLottieFailure svg { width: 140% !important; height: 140% !important; }
+.activityLottieFailure svg [stroke] { stroke: currentColor !important; }
 .activityPenIcon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 .activityPenWriting { transform-box: fill-box; transform-origin: center; animation: activityPenWrite 1s ease-in-out infinite; }
 .activityPenLineWriting { stroke-dasharray: 5; animation: activityPenLineWrite 1s ease-in-out infinite; }
 .liveActivityComplete .liveActivityMark { color: #8bc7bd; }
 .liveActivityComplete .liveActivityHeading small { color: #8bc7bd; }
-.liveActivityFailed .liveActivityMark { width: 7px; height: 7px; margin: 0 5.5px; border: 1px solid rgba(220, 142, 158, .75); border-radius: 50%; background: rgba(220, 142, 158, .5); box-shadow: 0 0 8px rgba(220, 142, 158, .16); }
+.liveActivityFailed .liveActivityMark { width: 18px; height: 18px; margin: 0; border: 0; border-radius: 0; background: none; box-shadow: none; color: #dca0ac; }
 .liveActivityFailed .liveActivityHeading small, .liveActivityError { color: #dca0ac; }
 .liveActivityToggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 0; overflow: hidden; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .liveActivityToggle strong { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
