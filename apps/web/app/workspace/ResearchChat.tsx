@@ -59,6 +59,20 @@ function modeText(mode?: ResearchMode) {
   return "研究任务";
 }
 
+function usePrefersReducedMotion() {
+  const [reducedMotion, setReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReducedMotion(preference.matches);
+    update();
+    preference.addEventListener("change", update);
+    return () => preference.removeEventListener("change", update);
+  }, []);
+
+  return reducedMotion;
+}
+
 const modeOptions: { value: ResearchMode; label: string }[] = [
   { value: "auto", label: "自动" },
   { value: "deep", label: "深度研究" },
@@ -83,11 +97,18 @@ function ModePicker({ mode, disabled, onModeChange }: { mode: ResearchMode; disa
 
   useEffect(() => {
     if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    const onDocumentClick = (event: MouseEvent) => {
+      if (!(event.target instanceof Node) || root.current?.contains(event.target)) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("[data-research-preset]")) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      setOpen(false);
     };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
+
+    document.addEventListener("click", onDocumentClick, true);
+    return () => document.removeEventListener("click", onDocumentClick, true);
   }, [open]);
 
   const chooseMode = (index: number) => {
@@ -284,6 +305,7 @@ export default function ResearchChat({
   onHistoryUpdated,
   onError,
 }: Props) {
+  const prefersReducedMotion = usePrefersReducedMotion();
   const [messages, setMessages] = useState<Message[]>([]);
   const [query, setQuery] = useState("");
   const [run, setRun] = useState<Run>();
@@ -600,7 +622,7 @@ export default function ResearchChat({
           <defs>
             <linearGradient id="emblemGradFlow" gradientUnits="userSpaceOnUse" x1="0" y1="19" x2="38" y2="19">
               <stop stopColor="#68DDEB" /><stop offset=".33" stopColor="#A89DFF" /><stop offset=".66" stopColor="#F89AC3" /><stop offset="1" stopColor="#68DDEB" />
-              {ambient && <animateTransform attributeName="gradientTransform" type="rotate" from="0 19 19" to="360 19 19" dur="12s" repeatCount="indefinite" />}
+              {ambient && !prefersReducedMotion && <animateTransform attributeName="gradientTransform" type="rotate" from="0 19 19" to="360 19 19" dur="18s" repeatCount="indefinite" />}
             </linearGradient>
             <linearGradient id="emblemGradStatic" gradientUnits="userSpaceOnUse" x1="2" y1="13" x2="36" y2="26"><stop stopColor="#68DDEB" /><stop offset=".48" stopColor="#A89DFF" /><stop offset="1" stopColor="#F89AC3" /></linearGradient>
           </defs>
@@ -685,7 +707,7 @@ export default function ResearchChat({
       {!hasConversation && <>
         <div className={styles.presetsHeading}><span>TRY ASKING TUFA</span><span>从灵感开始探索 ↗</span></div>
         <div className={styles.presets} aria-label="预设研究问题">
-          {presets.map(preset => <button key={preset.prompt} className={styles.preset} type="button" onClick={() => choosePreset(preset.prompt)}>
+          {presets.map(preset => <button key={preset.prompt} data-research-preset className={styles.preset} type="button" onClick={() => choosePreset(preset.prompt)}>
             <span className={`${styles.presetIcon} ${styles[preset.tone]}`}>{preset.icon}</span><span>{preset.text}</span><svg className={styles.presetArrow} viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
           </button>)}
         </div>
