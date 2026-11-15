@@ -390,14 +390,85 @@ class ModelTests(unittest.TestCase):
                 self.assertNotIn('reasoning_effort', request)
                 self.assertNotIn('max_completion_tokens', request)
 
+    def test_deep_automatic_efforts_are_role_specific_and_uncapped_above_low(self):
+        config = {'base_url': 'https://deep-effort.example/v1', 'model': 'test'}
+        cases = (
+            ('literature/background_investigator', {'phase': 'query'}, 'medium'),
+            ('literature/planner', {}, 'high'),
+            ('literature/researcher', {'phase': 'act'}, 'medium'),
+            ('literature/researcher', {'phase': 'draft'}, 'high'),
+            ('literature/analyst', {}, 'high'),
+            ('literature/reporter', {}, 'high'),
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            for prompt_id, payload, expected_effort in cases:
+                with self.subTest(prompt_id=prompt_id, phase=payload.get('phase')), \
+                     patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured(
+                        prompt_id, payload, Output,
+                        model_options={'research_depth': 'deep'},
+                        template_context=self.context(),
+                    )
+                request = post.call_args.kwargs['json']
+                self.assertEqual(request['reasoning_effort'], expected_effort)
+                self.assertNotIn('max_completion_tokens', request)
+
+            for prompt_id, payload in (
+                ('runtime/dispatcher', {'phase': 'query'}),
+            ):
+                with self.subTest(prompt_id=prompt_id), \
+                     patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured(
+                        prompt_id, payload, Output,
+                        model_options={'research_depth': 'deep'},
+                        template_context=self.context(),
+                    )
+                request = post.call_args.kwargs['json']
+                self.assertNotIn('reasoning_effort', request)
+                self.assertNotIn('max_completion_tokens', request)
+
+    def test_depth_profile_preserves_light_and_standard_default_decisions(self):
+        config = {'base_url': 'https://default-depth.example/v1', 'model': 'test'}
+        cases = (
+            ('light', 'literature/background_investigator', {'phase': 'query'}),
+            ('standard', 'literature/planner', {}),
+            ('light', 'literature/analyst', {}),
+            ('standard', 'literature/researcher', {'phase': 'act'}),
+        )
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            for depth, prompt_id, payload in cases:
+                with self.subTest(depth=depth, prompt_id=prompt_id), \
+                     patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+                    structured(
+                        prompt_id, payload, Output,
+                        model_options={'research_depth': depth},
+                        template_context=self.context(),
+                    )
+                request = post.call_args.kwargs['json']
+                self.assertEqual(request['reasoning_effort'], 'low')
+                self.assertEqual(request['max_completion_tokens'], 4096)
+
     def test_explicit_effort_overrides_default_and_higher_effort_has_no_output_cap(self):
         config = {'base_url': 'https://explicit-effort.example/v1', 'model': 'test'}
         with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
             structured('literature/planner', {}, Output,
-                       model_options={'reasoning_effort': 'high'}, template_context=self.context())
+                       model_options={'research_depth': 'deep', 'reasoning_effort': 'medium'}, template_context=self.context())
         request = post.call_args.kwargs['json']
-        self.assertEqual(request['reasoning_effort'], 'high')
+        self.assertEqual(request['reasoning_effort'], 'medium')
         self.assertNotIn('max_completion_tokens', request)
+
+    def test_explicit_low_overrides_deep_automatic_effort_and_keeps_decision_cap(self):
+        config = {'base_url': 'https://explicit-low-deep.example/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+            structured(
+                'literature/planner', {}, Output,
+                model_options={'research_depth': 'deep', 'reasoning_effort': 'low'},
+                template_context=self.context(),
+            )
+        request = post.call_args.kwargs['json']
+        self.assertEqual(request['reasoning_effort'], 'low')
+        self.assertEqual(request['max_completion_tokens'], 4096)
 
     def test_optional_decision_parameters_retry_only_after_explicit_rejection_and_cache_support(self):
         config = {'base_url': 'https://option-compat.example/v1', 'model': 'test'}
@@ -424,7 +495,7 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(all(request['reasoning_effort'] == 'low' for request in sent))
         self.assertLessEqual(len(model_client.UNSUPPORTED_REQUEST_PARAMS), model_client.MAX_UNSUPPORTED_REQUEST_PARAMS)
 
-    def test_explicit_unsupported_user_effort_is_not_silently_dropped(self):
+    def test_explicit_unsupported_user_effort_retries_without_only_that_option(self):
         config = {'base_url': 'https://explicit-unsupported.example/v1', 'model': 'test'}
         request = httpx.Request('POST', config['base_url'] + '/chat/completions')
         rejected = httpx.Response(
@@ -432,13 +503,58 @@ class ModelTests(unittest.TestCase):
             request=request,
             json={'error': {'message': 'Unsupported parameter: reasoning_effort', 'param': 'reasoning_effort'}},
         )
-        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=rejected) as post:
-            with self.assertRaises(ModelServiceError):
-                structured('literature/planner', {}, Output,
-                           model_options={'reasoning_effort': 'high'}, template_context=self.context())
-        self.assertEqual(post.call_count, 1)
-        self.assertEqual(post.call_args.kwargs['json']['reasoning_effort'], 'high')
-        self.assertNotIn('max_completion_tokens', post.call_args.kwargs['json'])
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(dict(kwargs['json']))
+            return rejected if len(sent) == 1 else self.response()
+
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', side_effect=post):
+            result = structured(
+                'literature/planner', {}, Output,
+                model_options={'reasoning_effort': 'high'},
+                template_context=self.context(),
+            )
+        self.assertEqual(result.answer, 'ok')
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0]['reasoning_effort'], 'high')
+        self.assertNotIn('max_completion_tokens', sent[0])
+        self.assertNotIn('reasoning_effort', sent[1])
+        self.assertNotIn('max_completion_tokens', sent[1])
+        self.assertTrue(model_client._parameter_is_known_unsupported(config, 'reasoning_effort'))
+
+    def test_rejected_explicit_effort_value_is_cached_without_disabling_other_levels(self):
+        config = {'base_url': 'https://specific-effort.example/v1', 'model': 'test'}
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        rejected = httpx.Response(
+            400,
+            request=request,
+            json={'error': {'message': 'Invalid value for reasoning_effort: high is not supported', 'param': 'reasoning_effort'}},
+        )
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(dict(kwargs['json']))
+            return rejected if len(sent) == 1 else self.response()
+
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', side_effect=post):
+            for effort in ('high', 'medium', 'high'):
+                structured(
+                    'literature/planner', {}, Output,
+                    model_options={'reasoning_effort': effort},
+                    template_context=self.context(),
+                )
+
+        self.assertEqual(len(sent), 4)
+        self.assertEqual(sent[0]['reasoning_effort'], 'high')
+        self.assertNotIn('reasoning_effort', sent[1])
+        self.assertEqual(sent[2]['reasoning_effort'], 'medium')
+        self.assertNotIn('reasoning_effort', sent[3])
+        self.assertTrue(model_client._parameter_is_known_unsupported(config, 'reasoning_effort=high'))
+        self.assertFalse(model_client._parameter_is_known_unsupported(config, 'reasoning_effort=medium'))
+        self.assertFalse(model_client._parameter_is_known_unsupported(config, 'reasoning_effort'))
 
     def test_invalid_parameter_value_does_not_trigger_compatibility_retry(self):
         config = {'base_url': 'https://invalid-value.example/v1', 'model': 'test'}

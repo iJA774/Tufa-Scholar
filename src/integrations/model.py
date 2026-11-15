@@ -269,28 +269,38 @@ def structured_input_units(prompt_id, payload, schema, *, template_context=None,
 
 def _decision_request_options(prompt_id, payload, model_options):
     explicit_effort = model_options.get('reasoning_effort') if model_options else None
-    if explicit_effort:
-        effort = explicit_effort
-    elif prompt_id in DECISION_PROMPTS or (
+    research_depth = model_options.get('research_depth', 'standard') if model_options else 'standard'
+    decision_prompt = prompt_id in DECISION_PROMPTS or (
         prompt_id == 'literature/researcher'
         and isinstance(payload, dict)
         and payload.get('phase') == 'act'
-    ):
+    )
+    if explicit_effort:
+        effort = explicit_effort
+    elif research_depth == 'deep':
+        effort = {
+            'literature/background_investigator': 'medium',
+            'literature/planner': 'high',
+            'literature/researcher': 'medium' if isinstance(payload, dict) and payload.get('phase') == 'act' else (
+                'high' if isinstance(payload, dict) and payload.get('phase') == 'draft' else None
+            ),
+            'literature/analyst': 'high',
+            'literature/reporter': 'high',
+        }.get(prompt_id)
+    elif decision_prompt:
         effort = 'low'
     else:
         effort = None
 
     options = {'reasoning_effort': effort} if effort else {}
-    bounded_decision = prompt_id in DECISION_PROMPTS or (
-        prompt_id == 'literature/researcher'
-        and isinstance(payload, dict)
-        and payload.get('phase') == 'act'
-    )
+    bounded_decision = decision_prompt
     # Higher explicit effort can be needed for difficult planning or review;
-    # preserve its room by disabling the output cap. Explicit low remains capped.
+    # deep automatic medium/high also needs room for internal reasoning. Low
+    # remains capped for bounded decision stages in every depth profile.
     if bounded_decision and (not explicit_effort or str(explicit_effort).lower() == 'low'):
-        options['max_completion_tokens'] = DECISION_OUTPUT_CAP
-    return options, bool(explicit_effort)
+        if str(effort or 'low').lower() == 'low':
+            options['max_completion_tokens'] = DECISION_OUTPUT_CAP
+    return options
 
 
 def _request_compatibility_key(config, parameter):
@@ -328,6 +338,12 @@ def _reasoning_cap_compatibility_parameter(request_body):
     cap = request_body.get('max_completion_tokens')
     if request_body.get('reasoning_effort') == 'low' and type(cap) is int:
         return f'reasoning_effort=low+max_completion_tokens={cap}'
+    return None
+
+
+def _reasoning_effort_compatibility_parameter(value):
+    if isinstance(value, str) and value.lower() in {'low', 'medium', 'high'}:
+        return f'reasoning_effort={value.lower()}'
     return None
 
 
@@ -403,15 +419,20 @@ def _rejected_optional_parameter(response, request_body):
             if requested_cap == request_body['max_completion_tokens'] and requested_cap <= thinking_budget:
                 return compatibility_parameter
 
+        requested_effort = request_body.get('reasoning_effort')
+        effort_parameter = parameter == 'reasoning_effort' or 'reasoning_effort' in message
+        effort_value_rejection = any(term in message for term in (
+            'unsupported value', 'invalid value', 'not a valid value', 'unsupported level', 'not supported',
+        ))
+        effort_key = _reasoning_effort_compatibility_parameter(requested_effort)
         if (
-            request_body.get('reasoning_effort') == 'low'
-            and 'reasoning_effort' in message
-            and 'low' in message
-            and any(term in message for term in ('unsupported value', 'invalid value', 'not a valid value', 'unsupported level', 'not supported'))
+            effort_key
+            and effort_parameter
+            and effort_value_rejection
+            and re.search(rf'\b{re.escape(str(requested_effort).lower())}\b', message)
         ):
-            # This only rejects the default effort value. The parameter may still
-            # support another user-selected level, so cache the value separately.
-            return 'reasoning_effort=low'
+            # Cache only the rejected effort value. Other levels may still work.
+            return effort_key
         if any(term in message for term in ('unsupported value', 'invalid value', 'not a valid value', 'allowed values')):
             continue
         explicit_parameter_rejection = (
@@ -801,7 +822,7 @@ def _stream_response(response, on_stream, attempt, phase, secrets=(), native_too
     return ''.join(parts), usage, finish_reason, None
 
 
-def _disable_rejected_optional_parameter(response, request_body, config, explicit_effort):
+def _disable_rejected_optional_parameter(response, request_body, config):
     rejected = _rejected_optional_parameter(response, request_body)
     if not rejected:
         return False
@@ -811,9 +832,9 @@ def _disable_rejected_optional_parameter(response, request_body, config, explici
         logger.info('model_option_fallback option=max_completion_tokens reason=reasoning_budget_conflict status=%d',
                     response.status_code)
         return True
-    if rejected in ('reasoning_effort', 'reasoning_effort=low') and explicit_effort:
-        response.raise_for_status()
-    if rejected == 'reasoning_effort=low':
+    if rejected.startswith('reasoning_effort='):
+        request_body.pop('reasoning_effort', None)
+    elif rejected == 'reasoning_effort':
         request_body.pop('reasoning_effort', None)
     else:
         request_body.pop(rejected, None)
@@ -821,13 +842,13 @@ def _disable_rejected_optional_parameter(response, request_body, config, explici
     return True
 
 
-def _post_structured(config, headers, request_body, *, on_stream, attempt, phase, secrets, explicit_effort, native_tools=None):
+def _post_structured(config, headers, request_body, *, on_stream, attempt, phase, secrets, native_tools=None):
     """Send one completion, retrying only explicit pre-response option rejections."""
     url = base_url(config['base_url']) + '/chat/completions'
     for _ in range(len(COMPATIBLE_OPTIONAL_PARAMS) + 1):
         if request_body.get('stream') is True:
             with httpx.stream('POST', url, headers=headers, json=request_body, timeout=90) as response:
-                if _disable_rejected_optional_parameter(response, request_body, config, explicit_effort):
+                if _disable_rejected_optional_parameter(response, request_body, config):
                     continue
                 response.raise_for_status()
                 content, usage, finish_reason, native_decision = _stream_response(
@@ -836,7 +857,7 @@ def _post_structured(config, headers, request_body, *, on_stream, attempt, phase
             return response, content, usage, finish_reason, True, native_decision
 
         response = httpx.post(url, headers=headers, json=request_body, timeout=90)
-        if _disable_rejected_optional_parameter(response, request_body, config, explicit_effort):
+        if _disable_rejected_optional_parameter(response, request_body, config):
             continue
         response.raise_for_status()
         body = response.json()
@@ -871,13 +892,15 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
     if phase not in {'query', 'select', 'act', 'draft'}:
         phase = 'na'
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
-    options, explicit_effort = _decision_request_options(prompt_id, payload, model_options or {})
+    options = _decision_request_options(prompt_id, payload, model_options or {})
     for parameter in tuple(options):
-        if parameter == 'reasoning_effort' and explicit_effort:
-            continue
-        if parameter == 'reasoning_effort' and _parameter_is_known_unsupported(config, 'reasoning_effort=low'):
-            options.pop(parameter, None)
-            continue
+        if parameter == 'reasoning_effort':
+            effort_key = _reasoning_effort_compatibility_parameter(options[parameter])
+            if _parameter_is_known_unsupported(config, 'reasoning_effort') or (
+                effort_key and _parameter_is_known_unsupported(config, effort_key)
+            ):
+                options.pop(parameter, None)
+                continue
         if parameter == 'max_completion_tokens':
             compatibility_parameter = _reasoning_cap_compatibility_parameter(options)
             if compatibility_parameter and _parameter_is_known_unsupported(config, compatibility_parameter):
@@ -924,10 +947,9 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 attempt=attempt,
                 phase=phase,
                 secrets=secrets,
-                explicit_effort=explicit_effort,
                 native_tools=native_tools,
             )
-            # _post_structured may have removed an explicitly rejected option.
+            # _post_structured may have removed an unsupported option.
             # Keep that decision for this call's schema-correction attempt too.
             for parameter in tuple(options):
                 if parameter not in request_body:

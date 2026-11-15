@@ -57,7 +57,7 @@ export default function ModelControls({ value, onChange, disabled }: { value: Mo
         </select>}
     </div>
     <div className="select-group"><label htmlFor="reasoning-effort">思考强度</label><select id="reasoning-effort" value={value.reasoning_effort} disabled={disabled || loading || !levels.length} onChange={e => onChange({ ...value, reasoning_effort: e.target.value })}>
-      <option value="">供应商默认{selected?.default_effort ? `（${labels[selected.default_effort] || selected.default_effort}）` : ""}</option>
+      <option value="">自动</option>
       {levels.map(level => <option value={level} key={level}>{labels[level] || level}</option>)}
     </select></div>
     <div className="model-actions"><button type="button" className="model-action" disabled={disabled || loading} onClick={() => { onChange({ ...value, reasoning_effort: "" }); setRefresh(v => v + 1); }}>刷新模型</button><button type="button" className="model-action" disabled={disabled || locked} onClick={() => setManual(v => !v)}>{manual ? "从列表选择" : "手动填写"}</button></div>

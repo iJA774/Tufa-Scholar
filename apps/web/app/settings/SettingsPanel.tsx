@@ -38,9 +38,9 @@ const depthOptions = [
 ] as const;
 
 const depthDescriptions: Record<WorkspacePreferences["researchDepth"], string> = {
-  light: "预算上限：1 轮、4 次工具动作、1 次背景搜索；证据充分时可提前结束。",
-  standard: "预算上限：2 轮、10 次工具动作、2 次背景搜索；证据充分时可提前结束。",
-  deep: "预算上限：3 轮、15 次工具动作、3 次背景搜索；证据充分时可提前结束。可能消耗大量 Token。",
+  light: "预算上限：1 轮；每轮/全程 4 次工具动作；背景搜索 1 次。完成主要目标后可提前结束。",
+  standard: "预算上限：2 轮；每轮 6 次、全程 10 次工具动作；背景搜索 2 次。主要问题解决后可提前结束，未解决则继续至上限。",
+  deep: "预算上限：4 轮；每轮 8 次、全程 24 次工具动作；背景搜索 4 次。覆盖充分、证据可靠且无重要矛盾时可提前结束；达上限后报告未完成方向。可能消耗大量 Token。",
 };
 
 const reportFormatOptions: { value: ReportFormat; label: string }[] = [
@@ -68,6 +68,25 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      const menu = root.current?.querySelector<HTMLElement>("[role='listbox']");
+      const scroller = root.current?.closest<HTMLElement>("[role='tabpanel']");
+      if (!menu || !scroller) return;
+      const menuBottom = menu.getBoundingClientRect().bottom;
+      const scrollerBottom = scroller.getBoundingClientRect().bottom;
+      const overflow = menuBottom - scrollerBottom;
+      if (overflow > 0) {
+        scroller.scrollBy({
+          top: overflow + 12,
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, menuId]);
 
   const chooseFormat = (index: number) => {
     const option = reportFormatOptions[index];
@@ -386,9 +405,10 @@ export default function SettingsPanel({
               <div className={styles.settingHeading}>
                 <strong>研究深度</strong>
               </div>
-              <fieldset className={styles.segmentedOptions} aria-label="研究深度">
-                {depthOptions.map(option => <label key={option.value} className={`${styles.segmentedOption} ${preferences.researchDepth === option.value ? styles.segmentedOptionSelected : ""}`}>
+              <fieldset className={`${styles.segmentedOptions} ${preferences.researchDepth === "deep" ? styles.segmentedOptionsStrict : ""}`} aria-label="研究深度">
+                {depthOptions.map(option => <label key={option.value} className={`${styles.segmentedOption} ${preferences.researchDepth === option.value ? styles.segmentedOptionSelected : ""} ${option.value === "deep" ? styles.segmentedOptionStrict : ""}`}>
                   <input type="radio" name="research-depth" value={option.value} checked={preferences.researchDepth === option.value} onChange={() => updatePreference("researchDepth", option.value)} />
+                  {option.value === "deep" && preferences.researchDepth === "deep" && <svg className={styles.warningIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 22 20.5H2L12 3.5Z" /><path d="M12 9v5.3M12 17.6v.1" /></svg>}
                   <span>{option.label}</span>
                 </label>)}
               </fieldset>

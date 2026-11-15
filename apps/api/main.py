@@ -349,7 +349,7 @@ def ask_question(project_id: int, body: QuestionInput):
         selected = next((m for m in models if m['id'] == model_name), None)
         levels = selected['reasoning_efforts'] if selected and selected['reasoning_efforts'] else ['low', 'medium', 'high']
         if effort not in levels:
-            raise HTTPException(422, '所选模型未声明支持该思考强度，请刷新模型列表或使用供应商默认')
+            raise HTTPException(422, '所选模型未声明支持该思考强度，请刷新模型列表或将思考强度设为自动')
     result = repo.create_question(
         project_id, body.conversation_id, body.question.strip(), body.source,
         body.collection_id, model_name, effort, research_mode=body.research_mode,

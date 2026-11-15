@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +7,13 @@ from src.agents import literature as workflow
 
 
 class ResearchPreferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        env = patch.dict(os.environ, {"TUFA_DATA_DIR": self.tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(self.tmp.cleanup)
+
     def state(self, **research):
         return {
             "research": {"query": "climate model uncertainty", "source": "all", **research},
@@ -60,24 +69,29 @@ class ResearchPreferenceTests(unittest.TestCase):
         state["research"]["prefer_primary_evidence"] = False
         self.assertEqual([item["candidate_id"] for item in workflow._prioritized_candidates(state, [summary, full_text])], ["summary", "full"])
 
-    def run_mock_workflow(self, *, depth, sufficient):
+    def run_mock_workflow(self, *, depth, actions_per_round=None):
         planner_rounds = []
         searches = []
         research_actions = []
+        actions_by_round = {}
         stages = []
 
         def model(state, prompt_id, payload, schema, **kwargs):
             if prompt_id == "literature/background_investigator":
                 if payload["phase"] == "query":
-                    return workflow.BackgroundOutput(source="paper", queries=["background-q1", "background-q2", "background-q3"])
+                    return workflow.BackgroundOutput(source="paper", queries=["background-q1", "background-q2", "background-q3", "background-q4"])
                 return workflow.BackgroundOutput(source="paper", summary="background")
             if prompt_id == "literature/planner":
                 round_count = payload["round_count"]
                 planner_rounds.append(round_count)
-                action = "research" if round_count == 0 or not sufficient else "report"
-                return workflow.PlannerOutput(requirements=["answer"], plan=["answer the question"], source="paper", action=action)
+                return workflow.PlannerOutput(requirements=["answer"], plan=["answer the question"], source="paper", action="research")
             if prompt_id == "literature/researcher":
                 if payload["phase"] == "act":
+                    round_number = payload["current_round"]
+                    action_count = actions_by_round.get(round_number, 0)
+                    if actions_per_round is not None and action_count >= actions_per_round:
+                        return workflow.ResearchActionOutput(action="finish")
+                    actions_by_round[round_number] = action_count + 1
                     research_actions.append(payload["current_round"])
                     return workflow.ResearchActionOutput(
                         action="tool", tool_name="search_papers",
@@ -85,7 +99,14 @@ class ResearchPreferenceTests(unittest.TestCase):
                     )
                 return workflow.ResearchDraftOutput(draft=workflow.Draft(limitations=[workflow.Claim(text="Evidence remains incomplete.")]))
             if prompt_id == "literature/analyst":
-                return workflow.AnalystOutput(sufficient=sufficient, gaps=[] if sufficient else ["Need more evidence."], next_steps=[] if sufficient else ["Search another direction"])
+                return workflow.AnalystOutput(
+                    sufficient=False,
+                    covered_requirements=[],
+                    gaps=["Need more evidence."],
+                    next_steps=[f"Search a distinct direction after round {payload['current_round']}"],
+                    evidence_reliability_confirmed=False,
+                    important_conclusions_cross_validated=False,
+                )
             if prompt_id == "literature/reporter":
                 return workflow.ReporterOutput(title="Research", limitations=[workflow.Claim(text="Evidence remains incomplete.")])
             raise AssertionError(prompt_id)
@@ -101,24 +122,136 @@ class ResearchPreferenceTests(unittest.TestCase):
             )
         return planner_rounds, searches, stages, research_actions
 
-    def test_depth_caps_bound_executed_rounds_and_background_queries(self):
-        expected_actions = {
-            "light": [4],
-            "standard": [6, 4],
-            "deep": [6, 6, 3],
+    def test_depth_caps_bound_executed_rounds_actions_and_background_queries(self):
+        expected_budgets = {
+            "light": {"rounds": 1, "actions_per_round": 4, "actions": 4, "background_searches": 1, "decision_input_units": 10_000, "cumulative_decision_input_units": 12_000},
+            "standard": {"rounds": 2, "actions_per_round": 6, "actions": 10, "background_searches": 2, "decision_input_units": 10_000, "cumulative_decision_input_units": 24_000},
+            "deep": {"rounds": 4, "actions_per_round": 8, "actions": 24, "background_searches": 4, "decision_input_units": 14_000, "cumulative_decision_input_units": 60_000},
         }
-        for depth, per_round in expected_actions.items():
+        expected_executed_actions = {"light": [4], "standard": [6, 4], "deep": [8, 8, 8]}
+        for depth, expected_budget in expected_budgets.items():
             with self.subTest(depth=depth):
-                planner_rounds, searches, stages, actions = self.run_mock_workflow(depth=depth, sufficient=False)
-                self.assertEqual(stages.count("analyst"), len(per_round))
-                self.assertEqual(sum(query.startswith("background-") for query in searches), {"light": 1, "standard": 2, "deep": 3}[depth])
-                self.assertEqual([actions.count(round_number) for round_number in range(1, len(per_round) + 1)], per_round)
-                self.assertEqual(len(actions), sum(per_round))
+                self.assertEqual(workflow.DEPTH_BUDGETS[depth], expected_budget)
+                _, searches, stages, actions = self.run_mock_workflow(depth=depth)
+                expected_round_actions = expected_executed_actions[depth]
+                self.assertEqual(stages.count("analyst"), len(expected_round_actions))
+                self.assertEqual(sum(query.startswith("background-") for query in searches), expected_budget["background_searches"])
+                self.assertEqual(
+                    [actions.count(round_number) for round_number in range(1, len(expected_round_actions) + 1)],
+                    expected_round_actions,
+                )
+                self.assertLessEqual(len(actions), expected_budget["actions"])
+                for actions_this_round in expected_round_actions:
+                    self.assertLessEqual(actions_this_round, expected_budget["actions_per_round"])
 
-    def test_deep_research_stops_after_one_sufficient_analyst_review(self):
-        _, searches, stages, _ = self.run_mock_workflow(depth="deep", sufficient=True)
-        self.assertEqual(stages.count("analyst"), 1)
-        self.assertEqual(sum(query.startswith("background-") for query in searches), 3)
+    def test_deep_research_can_use_all_four_rounds_before_stopping(self):
+        _, searches, stages, actions = self.run_mock_workflow(depth="deep", actions_per_round=1)
+        self.assertEqual(stages.count("analyst"), 4)
+        self.assertEqual(actions, [1, 2, 3, 4])
+        self.assertEqual(sum(query.startswith("background-") for query in searches), 4)
+        self.assertLessEqual(len(actions), workflow.DEPTH_BUDGETS["deep"]["actions"])
+
+    @staticmethod
+    def deep_review(**overrides):
+        review = {
+            "sufficient": True,
+            "covered_requirements": ["requirement A", "requirement B"],
+            "gaps": [],
+            "unresolved_contradictions": [],
+            "evidence_reliability_confirmed": True,
+            "important_conclusions_cross_validated": True,
+        }
+        review.update(overrides)
+        return review
+
+    def deep_planner_state(self, review):
+        return {
+            "research": {"query": "research question", "project_id": 1, "source": "paper", "research_depth": "deep"},
+            "plan": {"requirements": ["requirement A", "requirement B"], "plan": ["initial search direction"], "source": "paper", "action": "research"},
+            "core_requirements": ["requirement A", "requirement B"],
+            "current_plan": ["initial search direction"],
+            "current_review": review,
+            "current_draft": {},
+            "current_round": 1,
+            "current_source": "paper",
+            "rounds": [{"plan": ["initial search direction"], "queries": ["initial query"], "tool_actions": 1, "evidence_ids": []}],
+            "evidence_pool": [{"id": "e1", "title": "Research source", "text": "Evidence directly relevant to the research question.", "source_level": "abstract"}],
+            "research_actions_used": 1,
+            "research_decision_input_units": 1,
+            "research_context_limit_reached": False,
+            "candidate_pools": {"paper": [], "web": []},
+        }
+
+    def test_deep_review_can_end_early_only_after_all_core_checks_pass(self):
+        state = self.deep_planner_state(self.deep_review())
+        with patch.object(workflow, "_model", return_value=workflow.PlannerOutput(
+            requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=True,
+        )):
+            result = workflow._planner(state, None)
+
+        self.assertTrue(workflow._review_is_sufficient(state, state["current_review"]))
+        self.assertEqual(result["plan"]["action"], "report")
+        self.assertEqual(result["research_stop_reason"], "sufficient")
+        with patch.object(workflow, "_model", return_value=workflow.PlannerOutput(
+            requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=False,
+        )):
+            unconfirmed = workflow._planner(state, None)
+        self.assertNotEqual(unconfirmed["research_stop_reason"], "sufficient")
+        self.assertFalse(workflow._review_is_sufficient(
+            state,
+            self.deep_review(covered_requirements=["requirement A"]),
+        ))
+
+    def test_deep_planner_report_is_overridden_when_a_feasible_follow_up_remains(self):
+        review = self.deep_review(
+            sufficient=False,
+            covered_requirements=["requirement A"],
+            gaps=["requirement B still lacks direct evidence"],
+            next_steps=["Check an independent source for requirement B"],
+            evidence_reliability_confirmed=False,
+            important_conclusions_cross_validated=False,
+        )
+        state = self.deep_planner_state(review)
+        with patch.object(workflow, "_model", return_value=workflow.PlannerOutput(
+            requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=True,
+        )):
+            result = workflow._planner(state, None)
+
+        self.assertEqual(result["plan"]["action"], "research")
+        self.assertEqual(result["current_plan"], review["next_steps"])
+        self.assertEqual(result["research_stop_reason"], "")
+
+    def test_budget_stop_reason_is_distinct_from_sufficient_completion_in_report(self):
+        round_limited = self.deep_planner_state(self.deep_review(sufficient=False))
+        round_limited["rounds"] *= workflow.DEPTH_BUDGETS["deep"]["rounds"]
+        stop = workflow._planner(round_limited, None)
+        self.assertEqual(stop["research_stop_reason"], "round_budget_exhausted")
+
+        def report_with_reason(reason, actions_used):
+            state = self.deep_planner_state(self.deep_review())
+            state.update({
+                "rounds": [],
+                "research_stop_reason": reason,
+                "research_actions_used": actions_used,
+            })
+            payloads = []
+
+            def model(current, prompt_id, payload, schema, **kwargs):
+                self.assertEqual(prompt_id, "literature/reporter")
+                payloads.append(payload)
+                return workflow.ReporterOutput(limitations=[workflow.Claim(text="Current evidence still needs review.")])
+
+            with patch.object(workflow, "_model", side_effect=model):
+                result = workflow._reporter(state, None)
+            return payloads[0], result["content"]
+
+        budget = workflow.DEPTH_BUDGETS["deep"]
+        completed_payload, completed_report = report_with_reason("sufficient", 1)
+        exhausted_payload, exhausted_report = report_with_reason("tool_budget_exhausted", budget["actions"])
+        self.assertEqual(completed_payload["research_stop_reason"], "sufficient")
+        self.assertNotIn("预算已用完", completed_report)
+        self.assertEqual(exhausted_payload["research_stop_reason"], "tool_budget_exhausted")
+        self.assertIn("研究工具总预算已用完", exhausted_report)
 
 
 if __name__ == "__main__":

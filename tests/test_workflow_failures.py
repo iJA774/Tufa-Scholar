@@ -125,7 +125,8 @@ class WorkflowFailureTests(unittest.TestCase):
 
         act_calls = [item for item in researcher_calls if item[0]["phase"] == "act"]
         draft_calls = [item for item in researcher_calls if item[0]["phase"] == "draft"]
-        self.assertEqual(len(act_calls), workflow.MAX_RESEARCH_ACTIONS)
+        action_cap = workflow.DEPTH_BUDGETS["standard"]["actions_per_round"]
+        self.assertEqual(len(act_calls), action_cap)
         self.assertEqual(len(draft_calls), 1)
         self.assertEqual(draft_calls[0][1]["available_tools"], [])
         self.assertIsNone(draft_calls[0][2])
@@ -146,9 +147,9 @@ class WorkflowFailureTests(unittest.TestCase):
             self.assertTrue(all(len(item.get("text", "")) <= 240 for item in payload["evidence"]))
         self.assertNotIn("background", draft_calls[0][0])
         self.assertNotIn("rounds", draft_calls[0][0])
-        self.assertEqual(invoke_calls.count("search_papers"), 1 + workflow.MAX_RESEARCH_ACTIONS)
+        self.assertEqual(invoke_calls.count("search_papers"), 1 + action_cap)
         self.assertEqual(invoke_calls.count("collect_evidence"), 0)
-        self.assertEqual(len(retrieved), 1 + workflow.MAX_RESEARCH_ACTIONS)
+        self.assertEqual(len(retrieved), 1 + action_cap)
         self.assertEqual(retrieved[0], "accuracy")
         self.assertFalse(evidence)
         self.assertIn("资料不足", content)
@@ -201,7 +202,7 @@ class WorkflowFailureTests(unittest.TestCase):
             invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
         self.assertIn(("question as submitted", "all"), searched)
-        self.assertLessEqual(len(searched), workflow.MAX_BACKGROUND_SEARCHES)
+        self.assertLessEqual(len(searched), workflow.DEPTH_BUDGETS["standard"]["background_searches"])
         self.assertTrue(all(query_text == "question as submitted" for query_text, _ in searched))
         self.assertEqual(len([call for call in calls if call[0] == "literature/reporter"]), 1)
         self.assertIn("reporter", stages)
@@ -595,13 +596,17 @@ class WorkflowFailureTests(unittest.TestCase):
             # Set the cumulative ceiling to the exact rendered-input total at
             # the third researcher decision. Its equality must stop the call.
             if len(measured_units) == 3:
-                workflow.MAX_CUMULATIVE_RESEARCH_DECISION_INPUT_UNITS = sum(measured_units)
+                decision_budget["cumulative_decision_input_units"] = sum(measured_units)
             return units
 
         stages = []
         invoke_calls = []
-        with patch.object(workflow, "MAX_RESEARCH_DECISION_INPUT_UNITS", 100_000), \
-             patch.object(workflow, "MAX_CUMULATIVE_RESEARCH_DECISION_INPUT_UNITS", 100_000), \
+        decision_budget = {
+            **workflow.DEPTH_BUDGETS["standard"],
+            "decision_input_units": 100_000,
+            "cumulative_decision_input_units": 100_000,
+        }
+        with patch.dict(workflow.DEPTH_BUDGETS, {"standard": decision_budget}), \
              patch.object(workflow, "structured_input_units", side_effect=measure_actual_input), \
              patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
             content, evidence = self._invoke_run(

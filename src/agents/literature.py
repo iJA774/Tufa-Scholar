@@ -26,11 +26,6 @@ from src.tools.registry import ToolCallValidationError
 logger = logging.getLogger("tufa.agent")
 registry = ToolRegistry()
 
-MAX_RESEARCH_ACTIONS = 6
-MAX_RESEARCH_DECISION_INPUT_UNITS = 10_000
-MAX_CUMULATIVE_RESEARCH_DECISION_INPUT_UNITS = 24_000
-# Kept as a standard-depth compatibility cap for existing diagnostics/tests.
-MAX_BACKGROUND_SEARCHES = 2
 MAX_BACKGROUND_WEB_RESULTS = 3
 MAX_RESEARCH_WEB_RESULTS = 3
 MAX_CANDIDATE_CONTEXT = 6
@@ -39,15 +34,109 @@ MAX_EVIDENCE_TEXT = 9_600
 MAX_CANDIDATE_TEXT = 1_600
 
 DEPTH_BUDGETS = {
-    "light": {"rounds": 1, "actions": 4, "background_searches": 1},
-    "standard": {"rounds": 2, "actions": 10, "background_searches": MAX_BACKGROUND_SEARCHES},
-    "deep": {"rounds": 3, "actions": 15, "background_searches": 3},
+    "light": {
+        "rounds": 1, "actions_per_round": 4, "actions": 4,
+        "background_searches": 1, "decision_input_units": 10_000,
+        "cumulative_decision_input_units": 12_000,
+    },
+    "standard": {
+        "rounds": 2, "actions_per_round": 6, "actions": 10,
+        "background_searches": 2, "decision_input_units": 10_000,
+        "cumulative_decision_input_units": 24_000,
+    },
+    "deep": {
+        "rounds": 4, "actions_per_round": 8, "actions": 24,
+        "background_searches": 4, "decision_input_units": 14_000,
+        "cumulative_decision_input_units": 60_000,
+    },
 }
 
 
 def _budget(state):
+    return DEPTH_BUDGETS[_depth(state)]
+
+
+def _depth(state):
     depth = (state.get("research") or {}).get("research_depth", "standard")
-    return DEPTH_BUDGETS.get(depth, DEPTH_BUDGETS["standard"])
+    return depth if depth in DEPTH_BUDGETS else "standard"
+
+
+def _evidence_context_limits(state, *, expanded=False):
+    if expanded and _depth(state) == "deep":
+        return 12, 14_400
+    return MAX_EVIDENCE_CONTEXT, MAX_EVIDENCE_TEXT
+
+
+def _clean_labels(values, *, limit=12):
+    result = []
+    seen = set()
+    for value in values or []:
+        if not isinstance(value, str):
+            continue
+        label = re.sub(r"\s+", " ", value).strip()[:500]
+        key = label.casefold()
+        if label and key not in seen:
+            result.append(label)
+            seen.add(key)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _label_key(value):
+    return re.sub(r"[\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def _core_requirement_gaps(state, review):
+    core = _clean_labels(state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []))
+    covered = {_label_key(value) for value in review.get("covered_requirements", []) if isinstance(value, str)}
+    return [item for item in core if _label_key(item) not in covered]
+
+
+def _review_is_sufficient(state, review):
+    if not review.get("sufficient"):
+        return False
+    if _depth(state) != "deep":
+        return True
+    return not (
+        _core_requirement_gaps(state, review)
+        or review.get("gaps")
+        or review.get("unresolved_contradictions")
+        or not review.get("evidence_reliability_confirmed")
+        or not review.get("important_conclusions_cross_validated")
+        or not _select_evidence(state, expanded=True)
+    )
+
+
+def _similar_step(left, right):
+    left_text = re.sub(r"\s+", " ", str(left or "").casefold()).strip()
+    right_text = re.sub(r"\s+", " ", str(right or "").casefold()).strip()
+    if not left_text or not right_text:
+        return False
+    if _label_key(left_text) == _label_key(right_text):
+        return True
+    def units(value):
+        words = re.findall(r"[a-z0-9]+", value)
+        cjk = re.findall(r"[\u3400-\u9fff]", value)
+        words.extend("".join(cjk[index:index + 2]) for index in range(max(0, len(cjk) - 1)))
+        return set(words)
+    left_units, right_units = units(left_text), units(right_text)
+    if not left_units or not right_units:
+        return False
+    return len(left_units & right_units) / len(left_units | right_units) >= 0.82
+
+
+def _distinct_next_steps(state, review):
+    return _distinct_plan_steps(state, review.get("next_steps", []))
+
+
+def _distinct_plan_steps(state, steps):
+    proposed = _clean_labels(steps, limit=8)
+    executed = []
+    for item in state.get("rounds", []):
+        executed.extend(item.get("plan", []))
+        executed.extend(item.get("queries", []))
+    return [step for step in proposed if not any(_similar_step(step, old) for old in executed)]
 
 
 class Claim(BaseModel):
@@ -98,7 +187,7 @@ class DispatcherOutput(BaseModel):
 class BackgroundOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: Literal["web", "paper"]
-    queries: list[str] = Field(default_factory=list, max_length=3)
+    queries: list[str] = Field(default_factory=list, max_length=4)
     selected_candidate_ids: list[str] = Field(default_factory=list, max_length=20)
     summary: str = Field(default="", max_length=5_000)
     gaps: list[str] = Field(default_factory=list, max_length=8)
@@ -110,6 +199,7 @@ class PlannerOutput(BaseModel):
     plan: list[str] = Field(default_factory=list, max_length=8)
     source: Literal["web", "paper"]
     action: Literal["research", "report"]
+    completion_confirmed: bool = False
     rationale: str = Field(default="", max_length=1_000)
 
 
@@ -139,6 +229,9 @@ class AnalystOutput(BaseModel):
     covered_requirements: list[str] = Field(default_factory=list, max_length=12)
     gaps: list[str] = Field(default_factory=list, max_length=12)
     next_steps: list[str] = Field(default_factory=list, max_length=8)
+    unresolved_contradictions: list[str] = Field(default_factory=list, max_length=8)
+    evidence_reliability_confirmed: bool = False
+    important_conclusions_cross_validated: bool = False
     review: str = Field(default="", max_length=3_000)
 
 
@@ -160,10 +253,12 @@ class State(TypedDict, total=False):
     evidence_pool: list
     evidence: list
     rounds: list
+    core_requirements: list
     tool_results: list
     research_actions_used: int
     research_decision_input_units: int
     research_context_limit_reached: bool
+    research_stop_reason: str
     errors: list
     warnings: list
     needs_research: bool
@@ -336,16 +431,17 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
     return structured(prompt_id, payload, schema, **call_options)
 
 
-def _payload(state, **extra):
+def _payload(state, *, expanded_evidence=False, **extra):
     research = state["research"]
+    evidence_limit, _ = _evidence_context_limits(state, expanded=expanded_evidence)
     return {
         "question": research["query"],
         "history": _history_for_model(state.get("history", [])),
         "source": research["source"],
         "background": _background_summary_for_model(state.get("background", {})),
         "plan": state.get("plan", {}),
-        "rounds": _rounds_for_model(state.get("rounds", [])),
-        "evidence": _evidence_views(_select_evidence(state)),
+        "rounds": _rounds_for_model(state.get("rounds", []), evidence_limit=evidence_limit),
+        "evidence": _evidence_views(_select_evidence(state, expanded=expanded_evidence), text_limit=1_200),
         "errors": state.get("errors", []),
         "warnings": state.get("warnings", []),
         **extra,
@@ -367,7 +463,7 @@ def _background_summary_for_model(background):
     return summary
 
 
-def _rounds_for_model(rounds, *, include_drafts=False, visible_evidence_ids=None):
+def _rounds_for_model(rounds, *, include_drafts=False, visible_evidence_ids=None, evidence_limit=MAX_EVIDENCE_CONTEXT):
     bounded = []
     for round_item in rounds:
         review = round_item.get("review", {})
@@ -417,7 +513,7 @@ def _rounds_for_model(rounds, *, include_drafts=False, visible_evidence_ids=None
                 ],
             }
             cited = sorted(_claim_ids(round_item.get("draft", {}))) + sorted(_findings_ids(round_item.get("findings", [])))
-            item["evidence_ids"] = list(dict.fromkeys(cited))[:MAX_EVIDENCE_CONTEXT]
+            item["evidence_ids"] = list(dict.fromkeys(cited))[:evidence_limit]
         bounded.append(item)
     return bounded
 
@@ -757,18 +853,19 @@ def _findings_ids(findings):
     return {item for finding in findings for item in finding.get("citations", [])}
 
 
-def _select_evidence(state, include_ids=None):
+def _select_evidence(state, include_ids=None, *, expanded=False):
     pool = _unique_evidence(state.get("evidence_pool", []))
     include_ids = set(include_ids or ())
     selected = []
     size = 0
+    evidence_limit, text_limit = _evidence_context_limits(state, expanded=expanded)
 
     def add(item):
         nonlocal size
-        if item in selected or len(selected) >= MAX_EVIDENCE_CONTEXT:
+        if item in selected or len(selected) >= evidence_limit:
             return
         text = str(item.get("text", ""))
-        if size + len(text) > MAX_EVIDENCE_TEXT:
+        if size + len(text) > text_limit:
             return
         selected.append(item)
         size += len(text)
@@ -1313,31 +1410,60 @@ def _fallback_plan(state):
     }
 
 
+def _planner_stop(state, reason, rationale):
+    data = dict(state.get("plan") or _fallback_plan(state))
+    deep = _depth(state) == "deep"
+    core = _clean_labels(state.get("core_requirements") or data.get("requirements") or [state["research"]["query"]]) if deep else []
+    if deep:
+        data["requirements"] = _clean_labels([*core, *data.get("requirements", [])])
+    data["action"] = "report"
+    data["completion_confirmed"] = False
+    data["rationale"] = rationale
+    return {
+        "plan": data,
+        "current_plan": data.get("plan", []),
+        "current_source": data.get("source", _preferred_mode(state["research"]["source"])),
+        "core_requirements": core,
+        "research_stop_reason": reason,
+        "last_completed": "planner",
+    }
+
+
 def _planner(state, on_stage):
     _emit(on_stage, "planner")
     rounds = state.get("rounds", [])
     allowed = _source_modes(state["research"]["source"])
     budget = _budget(state)
-    if len(rounds) >= budget["rounds"]:
-        data = dict(state.get("plan") or _fallback_plan(state))
-        data["action"] = "report"
-        return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
     if rounds and (
         state.get("research_context_limit_reached")
         or state.get("research_actions_used", 0) >= budget["actions"]
     ):
-        data = dict(state.get("plan") or _fallback_plan(state))
-        data["action"] = "report"
-        data["rationale"] = (
-            "研究上下文预算已达到上限，基于现有材料进入报告收束。"
-            if state.get("research_context_limit_reached")
-            else "研究工具总预算已用完，基于现有材料进入报告收束。"
+        context_limited = bool(state.get("research_context_limit_reached"))
+        return _planner_stop(
+            state,
+            "decision_context_budget_exhausted" if context_limited else "tool_budget_exhausted",
+            "研究输入预算已达到上限，整理现有材料并说明尚未完成的要求。"
+            if context_limited else "研究工具动作预算已达到上限，整理现有材料并说明尚未完成的要求。",
         )
-        return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
+    if len(rounds) >= budget["rounds"]:
+        return _planner_stop(
+            state,
+            "round_budget_exhausted",
+            "已达到研究轮次上限；报告将说明资源限制和仍未确认完成的研究要求。",
+        )
+    core_requirements = (
+        _clean_labels(
+            state.get("core_requirements")
+            or (state.get("plan") or {}).get("requirements", [])
+            or ([state["research"]["query"][:500]] if rounds else [])
+        )
+        if _depth(state) == "deep" else []
+    )
     prompt_id = "literature/planner"
     payload = _payload(
         state,
         round_count=len(rounds),
+        core_requirements=core_requirements,
         current_plan=state.get("current_plan", []),
         current_draft=state.get("current_draft", {}),
         current_review=state.get("current_review", {}),
@@ -1346,8 +1472,10 @@ def _planner(state, on_stage):
         source_preference=state.get("background", {}).get("source", _preferred_mode(state["research"]["source"])),
         research_depth=state.get("research", {}).get("research_depth", "standard"),
         research_budget=budget,
-        analyst_sufficient=bool(state.get("current_review", {}).get("sufficient")),
+        analyst_sufficient=_review_is_sufficient(state, state.get("current_review", {})),
+        actionable_next_steps=_distinct_next_steps(state, state.get("current_review", {})),
     )
+    errors = list(state.get("errors", []))
     try:
         result = _model(
             state,
@@ -1362,25 +1490,58 @@ def _planner(state, on_stage):
         if data["source"] not in allowed:
             data["source"] = state.get("current_source") or state.get("background", {}).get("source") or allowed[0]
         if not data["requirements"]:
-            data["requirements"] = [state["research"]["query"][:500]]
-        if not data["plan"]:
+            data["requirements"] = core_requirements or [state["research"]["query"][:500]]
+        if not data["plan"] and (not rounds or _depth(state) != "deep"):
             data["plan"] = ["围绕原问题补充可核验证据"]
         if not rounds:
             if state["research"]["source"] != "auto":
                 data["source"] = _preferred_mode(state["research"]["source"])
             data["action"] = "research"
-        return {"plan": data, "current_plan": data["plan"], "current_source": data["source"], "last_completed": "planner"}
     except (ModelServiceError, StructuredOutputError):
         data = _fallback_plan(state)
-        if rounds and len(rounds) >= budget["rounds"]:
+        errors.append(_safe_error("planner", "model_failed", "规划模型不可用，按当前来源继续有限研究。"))
+
+    if _depth(state) == "deep":
+        core_requirements = core_requirements or _clean_labels(data.get("requirements", []))
+        data["requirements"] = _clean_labels([*core_requirements, *data.get("requirements", [])])
+    stop_reason = ""
+    if rounds and _depth(state) == "deep":
+        review = state.get("current_review", {})
+        complete = _review_is_sufficient(state, review)
+        next_steps = _distinct_next_steps(state, review)
+        planner_steps = _distinct_plan_steps(state, data.get("plan", [])) if data.get("action") == "research" else []
+        if complete and data.get("action") == "report" and data.get("completion_confirmed"):
             data["action"] = "report"
-        return {
-            "plan": data,
-            "current_plan": data["plan"],
-            "current_source": data["source"],
-            "last_completed": "planner",
-            "errors": list(state.get("errors", [])) + [_safe_error("planner", "model_failed", "规划模型不可用，按当前来源继续有限研究。")],
-        }
+            data["rationale"] = "核心研究要求已覆盖，关键证据审查通过且没有尚待解决的重要矛盾，整理现有结果。"
+            stop_reason = "sufficient"
+        elif complete and planner_steps:
+            data["plan"] = planner_steps
+            data["action"] = "research"
+            data["rationale"] = "分析审查认为主要要求已覆盖；规划器仍识别到新的可执行研究方向，继续补充资料。"
+        elif complete:
+            data["action"] = "report"
+            data["rationale"] = "分析审查认为研究已充分，但规划器没有提出新的可执行方向；报告将保留审慎的完成状态说明。"
+            stop_reason = "no_distinct_research_path"
+        elif planner_steps or next_steps:
+            data["plan"] = planner_steps or next_steps
+            data["action"] = "research"
+            data["rationale"] = "仍有研究缺口，且存在未尝试的补查方向，继续研究。"
+        else:
+            data["action"] = "report"
+            data["rationale"] = "仍有研究缺口，但没有新的可执行补查方向；报告将明确列出未解决要求和证据限制。"
+            stop_reason = "no_distinct_research_path"
+    elif rounds and data.get("action") == "report":
+        stop_reason = "sufficient" if _review_is_sufficient(state, state.get("current_review", {})) else "planner_reported_incomplete"
+
+    return {
+        "plan": data,
+        "current_plan": data.get("plan", []),
+        "current_source": data.get("source", state.get("current_source") or allowed[0]),
+        "core_requirements": core_requirements,
+        "research_stop_reason": stop_reason,
+        "errors": errors,
+        "last_completed": "planner",
+    }
 
 
 def _supervisor(state, on_stage):
@@ -1493,9 +1654,19 @@ def _researcher(state, on_stage):
     failed_web_reads = set()
     consecutive_duplicate_reads = 0
     search_attempts = 0
+    round_search_queries = []
+    deep = _depth(state) == "deep"
+    previous_queries = []
+    if deep:
+        previous_queries = [
+            query for item in state.get("rounds", []) if item.get("source") == mode
+            for query in item.get("queries", [])
+        ]
     action_count = 0
     actions_used = state.get("research_actions_used", 0)
     decision_input_units = state.get("research_decision_input_units", 0)
+    budget = _budget(state)
+    round_action_limit = budget["actions_per_round"]
     draft = Draft()
     findings = []
     failure_message = (
@@ -1510,14 +1681,15 @@ def _researcher(state, on_stage):
         for item in tools
     ]
     while (
-        action_count < MAX_RESEARCH_ACTIONS
-        and actions_used < _budget(state)["actions"]
+        action_count < round_action_limit
+        and actions_used < budget["actions"]
         and not state.get("research_context_limit_reached")
     ):
         payload = {
             "question": state["research"]["query"],
             "source": state["research"]["source"],
             "phase": "act",
+            "research_depth": _depth(state),
             "current_round": state.get("current_round", 1),
             "current_source": mode,
             "current_plan": state.get("current_plan", []),
@@ -1530,14 +1702,16 @@ def _researcher(state, on_stage):
             "tool_results": _compact_tool_results(state.get("tool_results", [])),
             "tool_feedback": state.get("errors", [])[-4:],
             "calls_remaining": min(
-                MAX_RESEARCH_ACTIONS - action_count,
-                _budget(state)["actions"] - actions_used,
+                round_action_limit - action_count,
+                budget["actions"] - actions_used,
             ),
             "search_attempts": search_attempts,
             "search_failures": search_failures,
             "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
             "relevance_filter": state.get("research", {}).get("relevance_filter", "standard"),
         }
+        if deep:
+            payload["attempted_queries"] = [query[:200] for query in (previous_queries + round_search_queries)[-8:]]
         template_context = _model_template_context(state, mode, "researcher", prompt_tools)
         input_units = structured_input_units(
             "literature/researcher",
@@ -1548,8 +1722,8 @@ def _researcher(state, on_stage):
         )
         projected_input_units = decision_input_units + input_units
         if (
-            input_units >= MAX_RESEARCH_DECISION_INPUT_UNITS
-            or projected_input_units >= MAX_CUMULATIVE_RESEARCH_DECISION_INPUT_UNITS
+            input_units >= budget["decision_input_units"]
+            or projected_input_units >= budget["cumulative_decision_input_units"]
         ):
             state["research_context_limit_reached"] = True
             state["errors"].append(_safe_error(
@@ -1592,8 +1766,8 @@ def _researcher(state, on_stage):
             if (
                 search_failures
                 and search_attempts < 3
-                and action_count < MAX_RESEARCH_ACTIONS
-                and actions_used < _budget(state)["actions"]
+                and action_count < round_action_limit
+                and actions_used < budget["actions"]
                 and not state.get("research_context_limit_reached")
             ):
                 name, args = _force_search_retry(state, mode, tried_queries)
@@ -1602,6 +1776,7 @@ def _researcher(state, on_stage):
                 state["research_actions_used"] = actions_used
                 search_attempts += 1
                 tried_queries.add(" ".join(args["query"].casefold().split()))
+                round_search_queries.append(args["query"])
                 try:
                     patch, _ = _invoke_tool_with_events(
                         state,
@@ -1671,6 +1846,7 @@ def _researcher(state, on_stage):
                 query = result.arguments.get("query")
                 if isinstance(query, str):
                     tried_queries.add(" ".join(query.casefold().split()))
+                    round_search_queries.append(query)
             patch, _ = _invoke_tool_with_events(
                 state,
                 mode,
@@ -1716,6 +1892,7 @@ def _researcher(state, on_stage):
             "question": state["research"]["query"],
             "source": state["research"]["source"],
             "phase": "draft",
+            "research_depth": _depth(state),
             "current_round": state.get("current_round", 1),
             "current_source": mode,
             "current_plan": state.get("current_plan", []),
@@ -1797,6 +1974,8 @@ def _researcher(state, on_stage):
         "tool_results": state.get("tool_results", []),
         "research_actions_used": state.get("research_actions_used", 0),
         "research_decision_input_units": state.get("research_decision_input_units", 0),
+        "round_tool_actions": action_count,
+        "round_search_queries": round_search_queries,
         "research_context_limit_reached": state.get("research_context_limit_reached", False),
         "errors": state.get("errors", []),
         "warnings": state.get("warnings", []),
@@ -1810,7 +1989,8 @@ def _analyst(state, on_stage, on_subtask):
     _emit(on_stage, "analyst")
     mode = state.get("current_source", "paper")
     draft = state.get("current_draft", {})
-    evidence = _select_evidence(state, _claim_ids(draft) | _findings_ids(state.get("current_findings", [])))
+    expanded = _depth(state) == "deep"
+    evidence = _select_evidence(state, _claim_ids(draft) | _findings_ids(state.get("current_findings", [])), expanded=expanded)
     allowed_papers = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
     payload = _payload(
         state,
@@ -1819,10 +1999,16 @@ def _analyst(state, on_stage, on_subtask):
         current_plan=state.get("current_plan", []),
         current_draft=draft,
         tool_results=state.get("tool_results", [])[-8:],
+        expanded_evidence=expanded,
+        research_depth=_depth(state),
         evidence=_evidence_views(evidence),
-        requirements=(state.get("plan") or {}).get("requirements", []),
+        requirements=(state.get("core_requirements") or (state.get("plan") or {}).get("requirements", [])),
+        core_requirements=state.get("core_requirements", []),
         current_findings=state.get("current_findings", []),
     )
+    if expanded:
+        for partial, previous in zip(payload["rounds"], state.get("rounds", [])):
+            partial["review"]["unresolved_contradictions"] = previous.get("review", {}).get("unresolved_contradictions", [])
     try:
         result = _model(state, "literature/analyst", payload, AnalystOutput, node_role="analyst", search_mode=mode, available_tools=[])
         review = result.model_dump()
@@ -1842,6 +2028,8 @@ def _analyst(state, on_stage, on_subtask):
         if not reason:
             findings.append(claim)
     current_findings = findings
+    if expanded and not _review_is_sufficient(state, review):
+        review["sufficient"] = False
     evidence_ids = set(_claim_ids(draft)) | _findings_ids(current_findings)
     used = [item for item in state.get("evidence_pool", []) if item.get("id") in evidence_ids]
     candidate_count = len(state.get("candidate_pools", {}).get(mode, []))
@@ -1873,6 +2061,8 @@ def _analyst(state, on_stage, on_subtask):
         "candidate_ids": [item["candidate_id"] for item in state.get("candidate_pools", {}).get(mode, [])],
         "evidence_ids": [item["id"] for item in state.get("evidence_pool", [])],
         "status": status,
+        "tool_actions": state.get("round_tool_actions", 0),
+        "queries": list(state.get("round_search_queries", [])),
     }
     rounds = list(state.get("rounds", [])) + [round_item]
     return {"current_review": review, "current_findings": current_findings, "rounds": rounds, "errors": state.get("errors", []), "last_completed": "analyst"}
@@ -2071,6 +2261,31 @@ def _render_draft(draft, evidence, source, *, title, caveats=None, allowed_paper
     return {"content": "\n\n".join(lines), "evidence": kept, "rejected": rejected}
 
 
+def _outstanding_gaps(state, *, fallback=False):
+    rounds = state.get("rounds", [])
+    if _depth(state) != "deep":
+        gaps = []
+        for item in rounds:
+            review = item.get("review", {})
+            gaps.extend(review.get("gaps", []))
+            if fallback and not review.get("sufficient"):
+                gaps.extend(review.get("next_steps", []))
+        if fallback:
+            gaps.extend(state.get("background", {}).get("gaps", []))
+        return _clean_labels(gaps, limit=5 if fallback else 24)
+    review = state.get("current_review") or (rounds[-1].get("review", {}) if rounds else {})
+    gaps = [
+        *(f"核心要求尚未覆盖：{item}" for item in _core_requirement_gaps(state, review)),
+        *(f"尚未解决的重要矛盾：{item}" for item in review.get("unresolved_contradictions", [])),
+        *review.get("gaps", []),
+    ]
+    if review and not review.get("evidence_reliability_confirmed"):
+        gaps.append("现有证据的可靠性或充分性尚未确认。")
+    if review and not review.get("important_conclusions_cross_validated"):
+        gaps.append("重要结论尚未完成交叉验证。")
+    return _clean_labels(gaps, limit=40)
+
+
 def _reporter_fallback(state, reason):
     all_evidence = state.get("evidence_pool", [])
     allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
@@ -2110,26 +2325,15 @@ def _reporter_fallback(state, reason):
     round_sections = [Section(heading=heading, paragraphs=claims) for heading, claims in grouped_sections.items()]
     if fallback_findings and len(round_sections) < 8 and claim_count < 16:
         round_sections.append(Section(heading="初步发现", paragraphs=fallback_findings[:min(8, 16 - claim_count)]))
-    gaps = []
-    for round_item in state.get("rounds", []):
-        review = round_item.get("review", {})
-        gaps.extend(review.get("gaps", []))
-        if not review.get("sufficient"):
-            gaps.extend(review.get("next_steps", []))
-    gaps.extend(state.get("background", {}).get("gaps", []))
     limitations = [Claim(text=reason[:1_500], citations=[])]
     limitations.extend(fallback_limitations[:3])
-    for gap in list(dict.fromkeys(value.strip() for value in gaps if isinstance(value, str) and value.strip()))[:5]:
-        if len(limitations) >= 8:
-            break
-        limitations.append(Claim(text=gap[:1_500], citations=[]))
     draft = Draft(sections=round_sections, limitations=limitations)
     return _render_draft(
         draft,
         all_evidence,
         state["research"]["source"],
         title="# 研究报告",
-        caveats=["以上仅保留通过代码引用与数值检查的初稿和发现。", "研究结论仍需结合原始资料核对。", *_warning_caveats(state)],
+        caveats=["以上仅保留通过代码引用与数值检查的初稿和发现。", "研究结论仍需结合原始资料核对。", *_warning_caveats(state, fallback=True)],
         allowed_paper_ids=allowed,
     )
 
@@ -2160,24 +2364,12 @@ def _reporter_insufficient_fallback(state, reason):
         )
     else:
         draft = Draft(limitations=[Claim(text=f"证据不足：{reason}。当前没有通过引用检查的报告结论或阶段性发现，现有资料不足以形成完整终稿。")])
-    gaps = []
-    for round_item in state.get("rounds", []):
-        review = round_item.get("review", {})
-        gaps.extend(review.get("gaps", []))
-        if not review.get("sufficient"):
-            gaps.extend(review.get("next_steps", []))
-    gaps.extend(state.get("background", {}).get("gaps", []))
-    for gap in list(dict.fromkeys(value.strip() for value in gaps if isinstance(value, str) and value.strip()))[:5]:
-        claim = Claim(text=gap[:1_000])
-        _, invalid = validate_claim(claim.text, claim.citations, evidence_by_id, allowed, allow_uncited=True, is_limitation=True)
-        if not invalid and len(draft.limitations) < 8:
-            draft.limitations.append(claim)
     return _render_draft(
         draft,
         evidence,
         state["research"]["source"],
         title="# 研究报告（证据不足）",
-        caveats=["本结果不构成完整终稿。", *_warning_caveats(state)],
+        caveats=["本结果不构成完整终稿。", *_warning_caveats(state, fallback=True)],
         allowed_paper_ids=allowed,
     )
 
@@ -2211,14 +2403,26 @@ def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, reje
     return result
 
 
-def _warning_caveats(state):
+def _warning_caveats(state, *, fallback=False):
     caveats = []
     if "paper_search_incomplete" in state.get("warnings", []):
         caveats.append("论文检索的部分外部来源失败，已保留可用结果，资料可能不完整。")
     if state.get("research_context_limit_reached"):
-        caveats.append("研究决策输入达到本机估算上下文预算后停止新增工具调用；未覆盖的来源和未提取证据仍需补查。")
+        caveats.append("研究决策输入达到本机估算上下文预算，已停止新增工具调用。本报告基于现有材料，收束原因是预算耗尽。")
     elif state.get("research_actions_used", 0) >= _budget(state)["actions"]:
-        caveats.append("研究工具总预算已用完，未覆盖的来源和缺口仍需补查。")
+        caveats.append("研究工具总预算已用完。本报告基于现有材料，收束原因是预算耗尽。")
+    stop_reason = state.get("research_stop_reason")
+    if stop_reason == "round_budget_exhausted":
+        caveats.append("研究轮次达到上限。本报告基于现有材料，收束原因是预算耗尽。")
+    elif stop_reason == "no_distinct_research_path":
+        caveats.append("当前没有新的可执行补查方向，研究充分性仍未确认。")
+    elif stop_reason == "planner_reported_incomplete":
+        caveats.append("本次研究已收束，现有证据尚未确认覆盖所有要求。")
+    if fallback or stop_reason != "sufficient":
+        caveats.extend(
+            gap for gap in _outstanding_gaps(state, fallback=fallback)
+            if not validate_claim(gap, [], {}, allow_uncited=True, is_limitation=True)[1]
+        )
     return caveats
 
 
@@ -2232,18 +2436,21 @@ def _reporter(state, on_stage):
         required_ids |= _claim_ids(round_item.get("draft", {}))
         required_ids |= _findings_ids(round_item.get("findings", []))
     report_state = {**state, "evidence_pool": all_evidence}
-    working = _select_evidence(report_state, required_ids)
+    working = _select_evidence(report_state, required_ids, expanded=True)
     payload = _payload(
         state,
+        expanded_evidence=True,
         source_scope=state["research"]["source"],
         rounds=_rounds_for_model(
             state.get("rounds", []),
             include_drafts=True,
             visible_evidence_ids={item["id"] for item in working},
+            evidence_limit=_evidence_context_limits(state, expanded=True)[0],
         ),
         evidence=_evidence_views(working),
         final_requirements=(state.get("plan") or {}).get("requirements", []),
-        outstanding_gaps=[gap for item in state.get("rounds", []) for gap in item.get("review", {}).get("gaps", [])],
+        outstanding_gaps=_outstanding_gaps(state),
+        research_stop_reason=state.get("research_stop_reason", ""),
         prefer_primary_evidence=state.get("research", {}).get("prefer_primary_evidence", True),
         errors=state.get("errors", []),
     )
@@ -2280,8 +2487,6 @@ def _reporter(state, on_stage):
     caveats = []
     if not all_evidence:
         caveats.append("本次没有获得可用证据，以下内容不能视为已核验结论。")
-    if any(not item.get("sufficient") or item.get("gaps") for item in (round_item.get("review", {}) for round_item in state.get("rounds", []))):
-        caveats.append("研究审查仍记录有未解决缺口；请以原始证据为准。")
     caveats.extend(_warning_caveats(state))
     rendered = _render_draft(
         result,

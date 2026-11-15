@@ -21,16 +21,16 @@
 |---|---|
 | 分流 `DispatcherOutput` | `needs_research`、`reason`、`answer`。`auto` 下直接回答时 answer 非空并由 dispatcher 结束；`quick` 也要求 answer 非空，由代码忽略 `needs_research` 并强制直接结束；`deep` 不调用 dispatcher 模型。 |
 | 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、`queries`、`selected_candidate_ids`、`summary`、`gaps`。查询预算和每次搜索结果上限见[工作流预算表](ARCHITECTURE.md#工作流预算)；筛选阶段只能选择实际返回的候选。 |
-| 计划 `PlannerOutput` | `requirements`、`plan`、`source`、`action`（`research` 或 `report`）、`rationale`。首轮必须研究且计划非空；至少完成一轮后才能报告，研究轮次上限后代码强制报告。 |
+| 计划 `PlannerOutput` | `requirements`、`plan`、`source`、`action`（`research` 或 `report`）、`rationale`；深入档另用 `completion_confirmed` 区分确认充分和因无有效路径而收束。首轮必须研究且计划非空；至少完成一轮后才能报告，触及任务级预算后代码强制收束。 |
 | 工具决策 | 模型接口返回原生函数调用或表示本轮结束。函数名和参数须通过目录及范围校验。`reason` 是用户可见的简短操作目的，执行前从业务参数中取出。 |
 | 初稿 `ResearchDraftOutput` | `draft`（章节、段落和局限）与 `findings`（发现及其引用）。 |
-| 审查 `AnalystOutput` | `sufficient`、`covered_requirements`、`gaps`、`next_steps`、`review`。审查用 requirements、初稿和证据识别缺口，不产生可被当作结论的额外发现段落。 |
+| 审查 `AnalystOutput` | `sufficient`、`covered_requirements`、`gaps`、`next_steps`、`review`；深入档另外使用 `unresolved_contradictions`、`evidence_reliability_confirmed`、`important_conclusions_cross_validated`。审查用要求、初稿和证据识别缺口，不产生新的结论段落。 |
 | 终稿 `ReporterOutput` | `title`、`key_points`、`overview`、`sections` 和 `limitations`。各项主张携带文本和证据引用。 |
 
 段落引用由代码映射到累计证据。报告中的引用不得越出项目或收藏夹快照；引用缺失、无效数字/单位、缺少成本依据或不安全引用会被剔除或明确列为局限。引用为空可由 reporter 返回，但不能作为有证据支持的结论展示。Reporter 汇总所有轮次，因此模型即使收到旧轮次的结论，也必须让最终事实引用指向本任务累计证据。
 
 研究模式字段保存在 task：`auto` 是旧 API 客户端的缺省兼容模式，collection 来源在 auto 下强制研究；`quick` 优先于 collection 约束，不读取收藏夹且直接回答；`deep` 绕过 dispatcher 判断并启动研究。用户可通过 API 请求选择模式，API 校验后由 worker 传入可信模板上下文；问题、历史或检索材料中的指令不能改变该模式。任务重试复制原模式，既有 task 通过 additive migration 补为 `auto`。
 
-研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证；Researcher 根据偏好使用候选和已提取证据，Reporter 优先采用符合本次偏好的可核查材料。最终引用与数值仍按同一规则校验。
+研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据，Reporter 说明实际收束原因与未解决事项。最终引用与数值仍按同一规则校验。
 
 更改节点输入输出时，同步更新对应 Markdown、类型和 [工作流回归](../tests/AGENTS.md)。不要在提示词里重复工具参数 schema、来源范围约束或代码检查规则；工具契约位于 [工具说明](../src/tools/README.md)。

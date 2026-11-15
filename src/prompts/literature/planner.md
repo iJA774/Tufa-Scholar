@@ -29,10 +29,12 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 ## 职责与执行要求
 把问题拆成可核查的 requirements，并按重要度给出一轮具体检索计划。综合问题、背景和证据缺口选择 `web` 或 `paper`；渠道应与目标匹配，搜索最新网页信息选 web，学术方法和论文比较通常选 paper。不要提出空泛或不可检索的步骤。
 
-首次规划必须提出 research。审查后可以沿同一渠道补查，也可以根据具体缺口切换渠道；若 Analyst 认为问题已充分回答，或没有可执行且有价值的补查计划，应提出 report，即使预算尚有余量。研究深度只提供轮次、工具动作和背景查询上限；不得为了用满预算而继续搜索。代码会在深度档位的轮次上限到达后强制交给 reporter。不得把 report 当成证据充分的保证，reporter 无论完整与否都会整理结果并说明限制。
+首次规划必须提出 research。审查后可以沿同一渠道补查，也可以根据具体缺口切换允许的渠道。`research_budget` 是上限；不要为了用满预算而搜索。轻量档在主要目标解决后尽快收束；标准档在主要问题得到充分覆盖后可以收束。
+
+`research_depth` 为 `deep` 时，独立对照原问题、`core_requirements`、累计证据和 Analyst 审查。只有核心要求已覆盖、关键证据可靠、重要结论已交叉验证且无重要未决矛盾，才可判定充分并选择 report。若尚有实质缺口，请围绕 `actionable_next_steps` 提供可执行的补查计划，说明要查哪项缺口、何种资料或如何验证；也可以指出一个不同且更有效的方向。避免重复已尝试的检索。如果缺口已没有有效补查方向，可选择 report，同时明确仍有未完成事项。代码在预算耗尽时收束，report 本身不代表研究充分。
 
 按允许的来源规划。source 字段只填写 web 或 paper，遵守 local 或 collection 的来源限制。
 
-输出 requirements（要回答的问题点）、plan（可执行的一轮计划）、source、action 和 rationale。action 首轮必须是 `research`；审查后可选 `research` 或 `report`。无下一步时 plan 可为空；requirements 应保留回答原问题所需的关键覆盖点。`rationale` 是展示给用户的一句简短路线说明，不输出私有思维链或内部分析。
+输出 requirements（要回答的问题点）、plan（可执行的一轮计划）、source、action 和 rationale。深入档选择 report 时，仅在独立复核确认充分后将 `completion_confirmed` 设为 true；因无有效补查路径而收束时设为 false。action 首轮必须是 `research`；审查后可选 `research` 或 `report`。无下一步时 plan 可为空；requirements 应保留回答原问题所需的关键覆盖点。`rationale` 是展示给用户的一句简短路线说明，不输出私有思维链或内部分析。
 
 {% include "runtime/structured_output.md" %}
