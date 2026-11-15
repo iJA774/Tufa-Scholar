@@ -8,6 +8,7 @@ import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
 import type { ModelChoice } from "./preferences";
 import { webSourceLabel } from "./sourceLabels";
+import HeroEmblem from "./HeroEmblem";
 import ResearchPanel from "./ResearchPanel";
 import styles from "./ResearchChat.module.css";
 
@@ -57,20 +58,6 @@ function modeText(mode?: ResearchMode) {
   if (mode === "deep") return "深度研究";
   if (mode === "auto") return "自动";
   return "研究任务";
-}
-
-function usePrefersReducedMotion() {
-  const [reducedMotion, setReducedMotion] = useState(false);
-
-  useEffect(() => {
-    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setReducedMotion(preference.matches);
-    update();
-    preference.addEventListener("change", update);
-    return () => preference.removeEventListener("change", update);
-  }, []);
-
-  return reducedMotion;
 }
 
 const modeOptions: { value: ResearchMode; label: string }[] = [
@@ -305,7 +292,6 @@ export default function ResearchChat({
   onHistoryUpdated,
   onError,
 }: Props) {
-  const prefersReducedMotion = usePrefersReducedMotion();
   const [messages, setMessages] = useState<Message[]>([]);
   const [query, setQuery] = useState("");
   const [run, setRun] = useState<Run>();
@@ -615,20 +601,7 @@ export default function ResearchChat({
     <div className={styles.chatColumn}>
     {!hasConversation ? <section className={styles.welcome} aria-label="开始一项新研究">
       <div className={`${styles.heroLight} ${!ambient ? styles.heroLightMuted : ""}`} aria-hidden="true" />
-      <div className={`${styles.heroEmblem} ${!ambient ? styles.heroEmblemMuted : ""}`} aria-hidden="true">
-        <svg className={styles.emblemSvg} viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path className={styles.emblemStar} d="M19 2 23 14.6 36 19l-13 4.3L19 36l-4.2-12.7L2 19l12.8-4.4L19 2Z" stroke={ambient ? "url(#emblemGradFlow)" : "url(#emblemGradStatic)"} strokeWidth="1.5" />
-          <circle className={styles.emblemCore} cx="19" cy="19" r="3.1" fill="#B7A6FF" /><circle className={styles.emblemDotOne} cx="5" cy="5" r="1" fill="#68DCED" /><circle className={styles.emblemDotTwo} cx="34" cy="7" r="1.2" fill="#D47AFF" /><circle className={styles.emblemDotThree} cx="31" cy="33" r="1" fill="#F5A1C7" />
-          <defs>
-            <linearGradient id="emblemGradFlow" gradientUnits="userSpaceOnUse" x1="0" y1="19" x2="38" y2="19">
-              <stop stopColor="#68DDEB" /><stop offset=".33" stopColor="#A89DFF" /><stop offset=".66" stopColor="#F89AC3" /><stop offset="1" stopColor="#68DDEB" />
-              {ambient && !prefersReducedMotion && <animateTransform attributeName="gradientTransform" type="rotate" from="0 19 19" to="360 19 19" dur="18s" repeatCount="indefinite" />}
-            </linearGradient>
-            <linearGradient id="emblemGradStatic" gradientUnits="userSpaceOnUse" x1="2" y1="13" x2="36" y2="26"><stop stopColor="#68DDEB" /><stop offset=".48" stopColor="#A89DFF" /><stop offset="1" stopColor="#F89AC3" /></linearGradient>
-          </defs>
-        </svg>
-        <span className={`${styles.firefly} ${styles.fireflyOne}`} /><span className={`${styles.firefly} ${styles.fireflyTwo}`} /><span className={`${styles.firefly} ${styles.fireflyThree}`} /><span className={`${styles.firefly} ${styles.fireflyFour}`} />
-      </div>
+      <HeroEmblem ambient={ambient} />
       <h1>今天，想<span>研究</span>什么？</h1>
     </section> : <section className={styles.conversation} aria-label="当前研究对话">
       <div className={styles.conversationTop}>

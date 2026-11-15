@@ -63,21 +63,13 @@
 }
 
 .emblemSvg { position: relative; z-index: 1; width: 32px; height: 32px; overflow: visible; filter: drop-shadow(0 0 6px rgba(155, 136, 255, .4)); }
-.emblemStar { transform-box: fill-box; transform-origin: center; animation: starPulse 5.8s ease-in-out infinite; }
+.emblemStar { transform-box: fill-box; transform-origin: center; animation: starPulse 5.5s ease-in-out infinite; }
+.emblemFlow { filter: drop-shadow(0 0 2px rgba(155, 136, 255, .48)); }
 .emblemCore { transform-box: fill-box; transform-origin: center; animation: corePulse 4.6s ease-in-out infinite; }
-.emblemDotOne, .emblemDotTwo, .emblemDotThree { transform-box: fill-box; transform-origin: center; opacity: .02; animation: fireflyPulse 14s ease-in-out infinite; }
-.emblemDotTwo { animation-delay: -4.7s; }
-.emblemDotThree { animation-delay: -9.4s; }
-.heroEmblemMuted .emblemStar, .heroEmblemMuted .emblemCore, .heroEmblemMuted .emblemDotOne, .heroEmblemMuted .emblemDotTwo, .heroEmblemMuted .emblemDotThree, .heroEmblemMuted .firefly { animation: none; }
+.emblemParticles { position: absolute; z-index: 0; top: 50%; left: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+.heroEmblemMuted .emblemStar, .heroEmblemMuted .emblemCore { animation: none; }
 .heroEmblemMuted .emblemCore { opacity: .62; }
-.heroEmblemMuted .emblemDotOne, .heroEmblemMuted .emblemDotTwo, .heroEmblemMuted .emblemDotThree { opacity: .22; }
-.heroEmblemMuted .firefly { opacity: 0; box-shadow: none; }
 
-.firefly { position: absolute; z-index: 1; width: 3px; height: 3px; border-radius: 50%; background: var(--firefly-color); box-shadow: 0 0 9px 2px var(--firefly-glow); opacity: 0; animation: fireflyDrift 18s linear infinite; }
-.fireflyOne { --firefly-color: #68ddeb; --firefly-glow: rgba(104, 221, 235, .4); top: -12px; left: 5px; --drift-x: -2px; --drift-y: -3px; animation-duration: 17s; animation-delay: -2.1s; }
-.fireflyTwo { --firefly-color: #c298ff; --firefly-glow: rgba(194, 152, 255, .42); top: 5px; right: -13px; --drift-x: 3px; --drift-y: -2px; animation-duration: 20s; animation-delay: -7.3s; }
-.fireflyThree { --firefly-color: #f89ac3; --firefly-glow: rgba(248, 154, 195, .38); right: 3px; bottom: -13px; --drift-x: 2px; --drift-y: 3px; animation-duration: 22s; animation-delay: -12.4s; }
-.fireflyFour { --firefly-color: #a8a4ff; --firefly-glow: rgba(168, 164, 255, .38); bottom: -7px; left: -12px; --drift-x: -3px; --drift-y: 2px; animation-duration: 19s; animation-delay: -4.8s; }
 .welcome h1 {
   margin: 0;
   color: #f3f2fb;
@@ -367,8 +359,6 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes starPulse { 0%, 100% { opacity: .95; transform: scale(.985); } 50% { opacity: 1; transform: scale(1.02); } }
 @keyframes corePulse { 0%, 100% { opacity: .68; transform: scale(.86); } 50% { opacity: 1; transform: scale(1.12); } }
-@keyframes fireflyPulse { 0%, 100% { opacity: .02; transform: scale(.72); } 14% { opacity: .12; transform: scale(.82); } 24% { opacity: .36; transform: scale(1.05); } 50% { opacity: .42; transform: scale(1); } 64% { opacity: .28; transform: scale(.92); } 78% { opacity: .03; transform: scale(.75); } }
-@keyframes fireflyDrift { 0%, 100% { opacity: 0; transform: translate(0, 0) scale(.65); } 12% { opacity: 0; transform: translate(0, 0) scale(.65); } 24% { opacity: .28; transform: translate(calc(var(--drift-x) * .35), calc(var(--drift-y) * .35)) scale(.8); } 31% { opacity: .38; transform: translate(calc(var(--drift-x) * .5), calc(var(--drift-y) * .5)) scale(.95); } 64% { opacity: .38; transform: translate(var(--drift-x), var(--drift-y)) scale(1); } 78% { opacity: .2; transform: translate(calc(var(--drift-x) * 1.1), calc(var(--drift-y) * 1.1)) scale(.8); } 91% { opacity: 0; transform: translate(calc(var(--drift-x) * 1.2), calc(var(--drift-y) * 1.2)) scale(.65); } }
 @keyframes panelEnter { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes markerBreath { 0%, 100% { box-shadow: 0 0 8px rgba(168, 154, 241, .25); } 50% { box-shadow: 0 0 15px rgba(168, 154, 241, .7); } }
 
@@ -427,9 +417,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .emblemStar { stroke: url(#emblemGradStatic); }
-  .emblemStar, .emblemCore, .emblemDotOne, .emblemDotTwo, .emblemDotThree, .firefly, .progressMarkerActive, .progressPanel { animation: none !important; }
-  .emblemDotOne, .emblemDotTwo, .emblemDotThree { opacity: .22; }
-  .firefly { opacity: 0; box-shadow: none; }
+  .emblemStar, .emblemCore, .progressMarkerActive, .progressPanel { animation: none !important; }
+  .emblemFlow, .emblemParticles { display: none; }
   .modeMenu, .modeMenu .modeOption, .modeChevron, .modeTrigger, .modeCheck { transition: none !important; }
 }
