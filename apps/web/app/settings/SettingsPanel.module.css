@@ -1,4 +1,11 @@
 .dialog {
+  --dialog-fade-in-duration: 200ms;
+  --dialog-enter-duration: 250ms;
+  --dialog-exit-duration: 180ms;
+  --dialog-ease-out: cubic-bezier(.33, 1, .68, 1);
+  --dialog-ease-inout: cubic-bezier(.4, 0, 0, 1);
+  --dialog-ease-in: cubic-bezier(.4, 0, 1, 1);
+  --dialog-ease-practical: cubic-bezier(.6, 0, .8, .6);
   width: min(960px, calc(100vw - 36px));
   max-width: 960px;
   max-height: min(680px, 82dvh);
@@ -12,7 +19,7 @@
   box-shadow: 0 30px 110px rgba(0, 0, 0, .72), 0 0 70px rgba(129, 87, 255, .11);
   opacity: 0;
   transform: translateY(8px) scale(.985);
-  transition: opacity .22s ease, transform .22s ease;
+  transition: opacity var(--dialog-fade-in-duration) var(--dialog-ease-out), transform var(--dialog-enter-duration) var(--dialog-ease-inout);
 }
 
 .dialogVisible {
@@ -23,13 +30,14 @@
 .dialogClosing {
   opacity: 0;
   transform: translateY(4px) scale(.99);
+  transition: opacity var(--dialog-exit-duration) var(--dialog-ease-in), transform var(--dialog-exit-duration) var(--dialog-ease-practical);
 }
 
 .dialog::backdrop {
   background: rgba(3, 3, 8, .62);
   backdrop-filter: blur(3px);
   opacity: 0;
-  transition: opacity .22s ease;
+  transition: opacity var(--dialog-fade-in-duration) var(--dialog-ease-out);
 }
 
 .dialogVisible::backdrop {
@@ -38,6 +46,7 @@
 
 .dialogClosing::backdrop {
   opacity: 0;
+  transition: opacity var(--dialog-exit-duration) var(--dialog-ease-in);
 }
 
 .frame {
@@ -134,7 +143,7 @@
   background: linear-gradient(105deg, rgba(136, 98, 232, .2), rgba(87, 91, 175, .09));
   box-shadow: inset 2px 0 #a88aff;
   pointer-events: none;
-  transition: transform .22s ease;
+  transition: transform .21s cubic-bezier(.2, 0, .38, .9);
 }
 
 .tabs .tabIndicator { transform: translateY(calc(var(--indicator-step) * var(--active-tab-index, 0))); }

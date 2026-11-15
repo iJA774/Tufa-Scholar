@@ -30,6 +30,8 @@
 
 设置弹窗在退场结束前保留原生模态行为，关闭后再归还焦点或从 `/settings` 返回工作台。两处页签各移动同一个选框，内容和键盘选中状态随选择立即更新。系统启用减少动态效果时跳过这些过渡。
 
+弹窗进场先显现内容，再让位移和缩放缓缓停稳。退场缩短并向终点加速，减少关闭设置后等待工作台重新可用的时间。页签选框在屏幕内连续移动，使用同一条曲线保持两处操作手感一致。[Atlassian Motion](https://atlassian.design/foundations/motion/applying-motion) · [GitHub Primer Dialog](https://primer.style/view-components/lookbook/inspect/primer/alpha/dialog/playground/) · [IBM Carbon Motion](https://www.carbondesignsystem.com/building-blocks/foundations/motion/overview)
+
 ## 终稿结构与证据不足
 
 曾经只靠提示词要求五段报告结构，但自由章节输出可以漏掉栏目并通过校验。现在模型提供分开的内容字段，渲染器负责固定栏目和引用列表，代码继续检查引用、数值和来源范围。没有可引用材料时，终稿以证据缺口与可核查范围为主体。已有的阶段性发现只有重新通过校验后才可带引用写入结果。

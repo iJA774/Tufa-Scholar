@@ -79,7 +79,7 @@ export default function SettingsPanel({
       return;
     }
     setClosing(true);
-    closeTimer.current = window.setTimeout(finishClose, 260);
+    closeTimer.current = window.setTimeout(finishClose, 220);
   }, [finishClose, onClose]);
 
   const notify = (message: string) => {
