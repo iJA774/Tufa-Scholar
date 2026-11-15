@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type CSSProperties, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
 import { api } from "../workspace/api";
 import type { WorkspacePreferences } from "../workspace/preferences";
@@ -35,6 +35,11 @@ export default function SettingsPanel({
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const previousFocus = useRef<HTMLElement | null>(null);
   const directoryInput = useRef<HTMLInputElement>(null);
+  const closeTimer = useRef<number | null>(null);
+  const closeRequested = useRef(false);
+  const closeFinished = useRef(false);
+  const [dialogVisible, setDialogVisible] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [activeTab, setActiveTab] = useState<PanelTab>("general");
   const [notice, setNotice] = useState("");
   const [fileNames, setFileNames] = useState<string[]>([]);
@@ -44,12 +49,38 @@ export default function SettingsPanel({
     if (!element) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (!element.open) element.showModal();
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => setDialogVisible(true));
+    });
     return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
       if (element.open) element.close();
       const target = previousFocus.current;
       if (target?.isConnected) requestAnimationFrame(() => target.focus());
     };
   }, []);
+
+  const finishClose = useCallback(() => {
+    if (!closeRequested.current || closeFinished.current) return;
+    closeFinished.current = true;
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+    onClose();
+  }, [onClose]);
+
+  const requestClose = useCallback(() => {
+    if (closeRequested.current) return;
+    closeRequested.current = true;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      onClose();
+      return;
+    }
+    setClosing(true);
+    closeTimer.current = window.setTimeout(finishClose, 260);
+  }, [finishClose, onClose]);
 
   const notify = (message: string) => {
     setNotice(message);
@@ -87,25 +118,28 @@ export default function SettingsPanel({
   };
 
   const currentTab = tabs.find(tab => tab.id === activeTab)!;
+  const activeTabIndex = tabs.findIndex(tab => tab.id === activeTab);
   return (
     <dialog
       ref={dialog}
-      className={styles.dialog}
+      className={`${styles.dialog} ${dialogVisible ? styles.dialogVisible : ""} ${closing ? styles.dialogClosing : ""}`}
       aria-labelledby="settings-title"
-      onCancel={event => { event.preventDefault(); onClose(); }}
-      onClick={event => { if (event.target === dialog.current) onClose(); }}
+      onCancel={event => { event.preventDefault(); requestClose(); }}
+      onClick={event => { if (event.target === dialog.current) requestClose(); }}
+      onTransitionEnd={event => { if (event.target === dialog.current && event.propertyName === "opacity") finishClose(); }}
     >
       <div className={styles.frame}>
         <header className={styles.header}>
           <div>
             <h1 id="settings-title">设置</h1>
           </div>
-          <button className={styles.closeButton} type="button" aria-label="关闭设置" onClick={onClose}>×</button>
+          <button className={styles.closeButton} type="button" aria-label="关闭设置" onClick={requestClose}>×</button>
         </header>
 
         <div className={styles.layout}>
           <div className={styles.sidebar}>
-            <nav className={styles.tabs} role="tablist" aria-label="设置类别" aria-orientation="vertical">
+            <nav className={styles.tabs} style={{ "--active-tab-index": activeTabIndex } as CSSProperties} role="tablist" aria-label="设置类别" aria-orientation="vertical">
+              <span className={styles.tabIndicator} aria-hidden="true" />
               {tabs.map((tab, index) => (
                 <button
                   key={tab.id}
@@ -244,7 +278,7 @@ export default function SettingsPanel({
         </div>
         <footer className={styles.footer}>
           <span>{currentTab.label}</span>
-          <button className={styles.doneButton} type="button" onClick={onClose}>完成</button>
+          <button className={styles.doneButton} type="button" onClick={requestClose}>完成</button>
         </footer>
       </div>
     </dialog>

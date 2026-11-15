@@ -300,7 +300,8 @@ export default function ResearchPanel({ run, report, events, open, status, stage
   return <aside className={className} aria-label="研究报告与活动" aria-hidden={!open} inert={!open}>
     <div className={styles.researchCard}>
       <div className={styles.cardToolbar}>
-        <div className={styles.tabs} role="tablist" aria-label="研究内容">
+        <div className={styles.tabs} style={{ "--active-tab-index": tab === "activities" ? 1 : 0 } as CSSProperties} role="tablist" aria-label="研究内容">
+          <span className={styles.tabIndicator} aria-hidden="true" />
           <button ref={node => { tabRefs.current[0] = node; }} id={reportTabId} className={`${styles.tab} ${tab === "report" ? styles.tabActive : ""}`} type="button" role="tab" aria-selected={tab === "report"} aria-controls={reportPanelId} tabIndex={tab === "report" ? 0 : -1} disabled={!reportTabAvailable} onClick={() => changeTab("report")} onKeyDown={handleTabKey}>报告</button>
           <button ref={node => { tabRefs.current[1] = node; }} id={activityTabId} className={`${styles.tab} ${tab === "activities" ? styles.tabActive : ""}`} type="button" role="tab" aria-selected={tab === "activities"} aria-controls={activityPanelId} tabIndex={tab === "activities" ? 0 : -1} onClick={() => changeTab("activities")} onKeyDown={handleTabKey}>活动</button>
         </div>

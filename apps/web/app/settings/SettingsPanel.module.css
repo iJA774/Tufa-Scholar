@@ -10,11 +10,34 @@
   color: #eeedf7;
   color-scheme: dark;
   box-shadow: 0 30px 110px rgba(0, 0, 0, .72), 0 0 70px rgba(129, 87, 255, .11);
+  opacity: 0;
+  transform: translateY(8px) scale(.985);
+  transition: opacity .22s ease, transform .22s ease;
+}
+
+.dialogVisible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.dialogClosing {
+  opacity: 0;
+  transform: translateY(4px) scale(.99);
 }
 
 .dialog::backdrop {
   background: rgba(3, 3, 8, .62);
   backdrop-filter: blur(3px);
+  opacity: 0;
+  transition: opacity .22s ease;
+}
+
+.dialogVisible::backdrop {
+  opacity: 1;
+}
+
+.dialogClosing::backdrop {
+  opacity: 0;
 }
 
 .frame {
@@ -87,12 +110,34 @@
 }
 
 .tabs {
+  --indicator-top: 20px;
+  --indicator-step: 49px;
+  --indicator-inset: 13px;
+  --indicator-height: 44px;
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: 5px;
   padding: 20px 13px;
 }
+
+.tabIndicator {
+  position: absolute;
+  z-index: 0;
+  top: var(--indicator-top);
+  right: var(--indicator-inset);
+  left: var(--indicator-inset);
+  height: var(--indicator-height);
+  border: 1px solid rgba(178, 146, 255, .2);
+  border-radius: 10px;
+  background: linear-gradient(105deg, rgba(136, 98, 232, .2), rgba(87, 91, 175, .09));
+  box-shadow: inset 2px 0 #a88aff;
+  pointer-events: none;
+  transition: transform .22s ease;
+}
+
+.tabs .tabIndicator { transform: translateY(calc(var(--indicator-step) * var(--active-tab-index, 0))); }
 
 .aboutLink {
   display: flex;
@@ -116,7 +161,11 @@
 }
 
 .tab {
+  position: relative;
+  z-index: 1;
   display: flex;
+  flex: 0 0 44px;
+  height: 44px;
   min-height: 44px;
   align-items: center;
   border: 1px solid transparent;
@@ -137,9 +186,9 @@
 }
 
 .activeTab {
-  border-color: rgba(178, 146, 255, .2);
-  background: linear-gradient(105deg, rgba(136, 98, 232, .2), rgba(87, 91, 175, .09));
-  box-shadow: inset 2px 0 #a88aff;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
   color: #f0eaff;
 }
 
@@ -539,6 +588,10 @@
   }
 
   .tabs {
+    --indicator-top: 13px;
+    --indicator-step: 47px;
+    --indicator-inset: 8px;
+    --indicator-height: 42px;
     padding: 13px 8px;
   }
 
@@ -549,6 +602,8 @@
   }
 
   .tab {
+    flex-basis: 42px;
+    height: 42px;
     min-height: 42px;
     padding: 0 9px;
     font-size: 11px;
@@ -574,6 +629,10 @@
   .footer {
     padding: 12px 15px;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog, .dialog::backdrop, .tabIndicator { transition: none; }
 }
 
 @media (max-width: 440px) {

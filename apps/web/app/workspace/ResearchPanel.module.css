@@ -52,10 +52,11 @@
 }
 
 .cardToolbar { position: relative; display: flex; flex: none; align-items: center; justify-content: center; height: 36px; margin: 0 16px 12px; }
-.tabs { display: inline-flex; align-items: center; justify-content: center; width: fit-content; height: 36px; padding: 3px; border: 1px solid var(--panel-border-soft); border-radius: 10px; background: rgba(9, 9, 15, .52); }
-.tab { min-width: 100px; height: 29px; padding: 0 24px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--panel-muted); font-size: 13px; font-weight: 500; white-space: nowrap; transition: color .18s, background .18s, box-shadow .18s; }
+.tabs { --tab-width: 100px; position: relative; display: inline-flex; align-items: center; justify-content: center; width: fit-content; height: 36px; padding: 3px; border: 1px solid var(--panel-border-soft); border-radius: 10px; background: rgba(9, 9, 15, .52); }
+.tabIndicator { position: absolute; z-index: 0; top: 3px; left: 3px; width: var(--tab-width); height: 29px; border: 1px solid rgba(174, 158, 245, .16); border-radius: 7px; background: linear-gradient(135deg, rgba(121, 103, 196, .2), rgba(83, 111, 177, .12)); box-shadow: 0 1px 3px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .035); pointer-events: none; transform: translateX(calc(var(--tab-width) * var(--active-tab-index, 0))); transition: transform .22s ease; }
+.tab { position: relative; z-index: 1; width: var(--tab-width); min-width: var(--tab-width); height: 29px; padding: 0 24px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--panel-muted); font-size: 13px; font-weight: 500; white-space: nowrap; transition: color .18s; }
 .tab:hover:not(:disabled) { color: #e2e0ed; }
-.tabActive { border-color: rgba(174, 158, 245, .16); background: linear-gradient(135deg, rgba(121, 103, 196, .2), rgba(83, 111, 177, .12)); color: var(--panel-heading); box-shadow: 0 1px 3px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .035); }
+.tabActive { color: var(--panel-heading); }
 .tab:disabled { cursor: not-allowed; opacity: .36; }
 .tab:focus-visible, .closeButton:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
 .closeButton { position: absolute; top: 1px; right: 0; display: grid; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: var(--panel-muted); transition: color .18s, background .18s; }
@@ -212,5 +213,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .activityItem, .sourceChip, .loadingAnimation i, .rainbowAnimated, .activityPenWriting, .activityPenLineWriting { animation: none !important; }
+  .tabIndicator { transition: none; }
   .liveActivityShimmer { color: #e8e6f2; background: none; -webkit-background-clip: border-box; background-clip: border-box; filter: none; animation: none !important; }
 }
