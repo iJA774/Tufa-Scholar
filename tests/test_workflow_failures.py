@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+from markdown_fixture import plan, review, draft as draft_text, section, claim
 from src.infrastructure.diagnostics import diagnostic_scope
 from src.integrations.model import ModelServiceError
 
@@ -16,7 +17,7 @@ def researcher_output(*, action="finish", tool_name="", arguments=None, reason="
         tool_name=tool_name,
         arguments=arguments or {},
         reason=reason,
-        draft=draft or workflow.Draft(),
+        draft=draft or draft_text(),
         findings=findings or [],
     )
 
@@ -52,12 +53,12 @@ class WorkflowFailureTests(unittest.TestCase):
 
     @staticmethod
     def answer_with_evidence(evidence, text="材料与问题相关。"):
-        return workflow.ReporterOutput(
-            sections=[workflow.Section(
+        return draft_text(
+            sections=[section(
                 heading="已收集证据",
-                paragraphs=[workflow.Claim(text=text, citations=[item["id"] for item in evidence])],
+                paragraphs=[claim(text=text, citations=[item["id"] for item in evidence])],
             )] if evidence else [],
-            limitations=[workflow.Claim(text="资料覆盖仍有限。", citations=[])],
+            limitations=[claim(text="资料覆盖仍有限。", citations=[])],
         )
 
     def _invoke_run(self, model, *, source="local", query="accuracy", retrieve=None, web_results=None, fetch_page=None, on_stage=None):
@@ -65,7 +66,13 @@ class WorkflowFailureTests(unittest.TestCase):
             return {"query": query_text, "source": source_name, "method": "fixture", "results": [sample_paper()], "warnings": []}
 
         retrieve = retrieve or default_retrieve
-        with patch.object(workflow, "structured", side_effect=model), \
+        def adapted_model(prompt_id, payload, schema, **kwargs):
+            result = model(prompt_id, payload, schema, **kwargs)
+            if prompt_id == "literature/researcher" and payload.get("phase") == "draft" and isinstance(result, SimpleNamespace):
+                return result.draft
+            return result
+
+        with patch.object(workflow, "structured", side_effect=adapted_model), \
              patch("src.tools.search.retrieve", side_effect=retrieve), \
              patch("src.tools.search.retrieve_collection", side_effect=retrieve), \
              patch("src.tools.search.search_web", return_value=web_results or []), \
@@ -92,7 +99,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     chosen = payload["candidates"][0]
                     return workflow.BackgroundOutput(source="paper", selected_candidate_ids=[chosen["candidate_id"]])
                 if prompt_id == "literature/planner":
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=["查找支持资料"], plan=["检索论文"], source="paper",
                         action="research" if payload["round_count"] == 0 else "report",
                     )
@@ -106,12 +113,12 @@ class WorkflowFailureTests(unittest.TestCase):
                         )
                     return researcher_output(
                         action="finish",
-                        draft=workflow.Draft(limitations=[workflow.Claim(text="工具预算耗尽，尚未收集到可核查证据。")]),
+                        draft=draft_text(limitations=[claim(text="工具预算耗尽，尚未收集到可核查证据。")]),
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=False, gaps=["暂无可核查证据"], review="资料不足。")
+                    return review(sufficient=False, gaps=["暂无可核查证据"], review="资料不足。")
                 if prompt_id == "literature/reporter":
-                    return workflow.ReporterOutput(limitations=[workflow.Claim(text="本轮资料不足，未能形成有证据支持的结论。")])
+                    return draft_text(limitations=[claim(text="本轮资料不足，未能形成有证据支持的结论。")])
                 raise AssertionError(prompt_id)
 
         def retrieve(project_id, query_text, source_name):
@@ -152,7 +159,7 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(len(retrieved), 1 + action_cap)
         self.assertEqual(retrieved[0], "accuracy")
         self.assertFalse(evidence)
-        self.assertIn("资料不足", content)
+        self.assertIn("未收集到可核查证据", content)
         self.assertEqual(stages[-1], "reporter")
 
     def test_background_and_planner_model_failures_fall_back_to_original_query_and_report(self):
@@ -177,12 +184,12 @@ class WorkflowFailureTests(unittest.TestCase):
                         )
                     return researcher_output(
                         action="finish",
-                        draft=workflow.Draft(sections=[workflow.Section(
-                            heading="资料", paragraphs=[workflow.Claim(text="资料记录了相关评估结果。", citations=[evidence[0]["id"]])],
+                        draft=draft_text(sections=[section(
+                            heading="资料", paragraphs=[claim(text="资料记录了相关评估结果。", citations=[evidence[0]["id"]])],
                         )]),
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=False, gaps=["模型审查失败后仍须报告"], review="未充分。")
+                    return review(sufficient=False, gaps=["模型审查失败后仍须报告"], review="未充分。")
                 if prompt_id == "literature/reporter":
                     return self_test.answer_with_evidence(payload["evidence"])
                 raise AssertionError(prompt_id)
@@ -227,7 +234,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     candidate = payload["candidates"][0]
                     return workflow.BackgroundOutput(source="paper", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=["检查准确率"], plan=["阅读论文"], source="paper",
                         action="research" if payload["round_count"] == 0 else "report",
                     )
@@ -244,13 +251,13 @@ class WorkflowFailureTests(unittest.TestCase):
                         )
                     return researcher_output(
                         action="finish",
-                        draft=workflow.Draft(limitations=[workflow.Claim(text="当前没有可核查证据，无法支持结论。")]),
+                        draft=draft_text(limitations=[claim(text="当前没有可核查证据，无法支持结论。")]),
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=False, gaps=["没有有效证据"], review="证据不足。")
+                    return review(sufficient=False, gaps=["没有有效证据"], review="证据不足。")
                 if prompt_id == "literature/reporter":
                     reporter_payloads.append(payload)
-                    return workflow.ReporterOutput(limitations=[workflow.Claim(text="没有可核查证据，报告无法给出事实结论。")])
+                    return draft_text(limitations=[claim(text="没有可核查证据，报告无法给出事实结论。")])
                 raise AssertionError(prompt_id)
 
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke, \
@@ -307,7 +314,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     candidate = payload["candidates"][0]
                     return workflow.BackgroundOutput(source="paper", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=["检查相关研究"], plan=["检索并取证"], source="paper",
                         action="research" if payload["round_count"] == 0 else "report",
                     )
@@ -326,13 +333,13 @@ class WorkflowFailureTests(unittest.TestCase):
                     evidence = payload["evidence"]
                     return researcher_output(
                         action="finish",
-                        draft=workflow.Draft(sections=[workflow.Section(
+                        draft=draft_text(sections=[section(
                             heading="研究资料",
-                            paragraphs=[workflow.Claim(text="已取得与问题相关的研究资料。", citations=[item["id"] for item in evidence])],
+                            paragraphs=[claim(text="已取得与问题相关的研究资料。", citations=[item["id"] for item in evidence])],
                         )]),
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=False, gaps=["部分检索来源不可用"], review="现有资料仍有缺口。")
+                    return review(sufficient=False, gaps=["部分检索来源不可用"], review="现有资料仍有缺口。")
                 if prompt_id == "literature/reporter":
                     return self_test.answer_with_evidence(payload["evidence"], text="已保留可用的研究资料。")
                 raise AssertionError(prompt_id)
@@ -388,7 +395,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     candidate = payload["candidates"][0]
                     return workflow.BackgroundOutput(source="web", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=["读取网页正文"], plan=["读取网页并提取证据"], source="web",
                         action="research" if payload["round_count"] == 0 else "report",
                     )
@@ -427,13 +434,13 @@ class WorkflowFailureTests(unittest.TestCase):
                     evidence = payload["evidence"]
                     return researcher_output(
                         action="finish",
-                        draft=workflow.Draft(sections=[workflow.Section(
+                        draft=draft_text(sections=[section(
                             heading="网页证据",
-                            paragraphs=[workflow.Claim(text=f"读取到第 {index + 1} 段网页资料。", citations=[item["id"]]) for index, item in enumerate(evidence)],
+                            paragraphs=[claim(text=f"读取到第 {index + 1} 段网页资料。", citations=[item["id"]]) for index, item in enumerate(evidence)],
                         )]),
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=True, covered_requirements=["网页正文"], review="已读取两个片段。")
+                    return review(sufficient=True, covered_requirements=["网页正文"], review="已读取两个片段。")
                 if prompt_id == "literature/reporter":
                     reporter_payloads.append(payload)
                     evidence = payload["evidence"]
@@ -493,7 +500,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     candidate = payload["candidates"][0]
                     return workflow.BackgroundOutput(source="web", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=["读取网页正文"], plan=["读取网页"], source="web",
                         action="research" if payload["round_count"] == 0 else "report",
                     )
@@ -509,12 +516,12 @@ class WorkflowFailureTests(unittest.TestCase):
                         return researcher_output(action="finish")
                     draft_feedback.extend(payload.get("tool_feedback", []))
                     return researcher_output(
-                        draft=workflow.Draft(limitations=[workflow.Claim(text="重复网页读取已跳过。")]),
+                        draft=draft_text(limitations=[claim(text="重复网页读取已跳过。")]),
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=False, gaps=["页面正文尚未提取"], review="资料不足。")
+                    return review(sufficient=False, gaps=["页面正文尚未提取"], review="资料不足。")
                 if prompt_id == "literature/reporter":
-                    return workflow.ReporterOutput(limitations=[workflow.Claim(text="当前没有可引用证据。")])
+                    return draft_text(limitations=[claim(text="当前没有可引用证据。")])
                 raise AssertionError(prompt_id)
 
         def fetch(url):
@@ -549,14 +556,14 @@ class WorkflowFailureTests(unittest.TestCase):
                     candidate = payload["candidates"][0]
                     return workflow.BackgroundOutput(source="web", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=["读取网页正文"], plan=["逐段读取网页"], source="web", action="research",
                     )
                 if prompt_id == "literature/researcher":
                     schemas.append((payload["phase"], schema, kwargs.get("native_tools")))
                     if payload["phase"] == "draft":
                         return researcher_output(
-                            draft=workflow.Draft(limitations=[workflow.Claim(text="读取的页面片段尚未提取为可引用证据。")]),
+                            draft=draft_text(limitations=[claim(text="读取的页面片段尚未提取为可引用证据。")]),
                         )
                     act_model_calls.append(payload)
                     act_native_tools.append(kwargs.get("native_tools"))
@@ -572,9 +579,9 @@ class WorkflowFailureTests(unittest.TestCase):
                         arguments={"candidate_id": candidate_id, "offset": offset, "limit": 10},
                     )
                 if prompt_id == "literature/analyst":
-                    return workflow.AnalystOutput(sufficient=False, gaps=["頁面片段尚未轉成證據"], review="資料不足。")
+                    return review(sufficient=False, gaps=["頁面片段尚未轉成證據"], review="資料不足。")
                 if prompt_id == "literature/reporter":
-                    return workflow.ReporterOutput(limitations=[workflow.Claim(text="当前证据不足。")])
+                    return draft_text(limitations=[claim(text="当前证据不足。")])
                 raise AssertionError(prompt_id)
 
         def fetch(url):
@@ -621,7 +628,7 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(len(act_model_calls), 2)
         self.assertEqual([phase for phase, _, _ in schemas], ["act", "act", "draft"])
         self.assertEqual([schema for phase, schema, _ in schemas if phase == "act"], [workflow.ResearchActionOutput] * 2)
-        self.assertTrue(all(schema is workflow.ResearchDraftOutput for phase, schema, _ in schemas if phase == "draft"))
+        self.assertTrue(all(schema is None for phase, schema, _ in schemas if phase == "draft"))
         self.assertEqual(act_native_tools, estimated_native_tools[:2])
         self.assertEqual(act_native_tools[0], estimated_native_tools[2])
         self.assertTrue(all(native_tools for native_tools in act_native_tools))

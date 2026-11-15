@@ -15,6 +15,16 @@ test('ignores non research and malformed SSE events', () => {
   assert.equal(decodeResearchEvent('event: research\ndata: {not json}'), undefined);
 });
 
+test('preserves Markdown previews and removes control data', () => {
+  const text = '# 标题\n\n- 研究结论 [[e1]]\n\n```tufa-control\n{"secret":true}\n```';
+  assert.equal(extractVisibleModelText(text, 'reporter', 'deep'), '# 标题\n\n- 研究结论 [e1]');
+  const events = [{ id: 1, kind: 'node.completed', data: { node: 'planner', body: '## 检索计划\n\n先查原文。' } }];
+  assert.equal(buildModelPreviews(events, 'deep')[0].text, '## 检索计划\n\n先查原文。');
+  assert.equal(extractVisibleModelText('```markdown\n# 标题\n\n正文 [[e1]]', 'reporter', 'deep'), '# 标题\n\n正文 [e1]');
+  assert.equal(extractVisibleModelText('```md\n# 标题\n\n正文 [[e1]]\n```', 'researcher', 'deep'), '# 标题\n\n正文 [e1]');
+  assert.equal(extractVisibleModelText('```python\nprint(1)\n```', 'reporter', 'deep'), '```python\nprint(1)\n```');
+});
+
 test('extracts only quick answer text, including a partial structured JSON string', () => {
   const partial = '{"needs_research":false,"reason":"private route detail","answer":"A useful answer with \\u4e2d';
   assert.equal(extractVisibleModelText(partial, 'dispatcher', 'quick'), 'A useful answer with 中');

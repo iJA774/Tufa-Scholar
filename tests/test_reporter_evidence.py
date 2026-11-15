@@ -24,8 +24,7 @@ class ReporterEvidenceTests(unittest.TestCase):
         captured = {}
         def model(state, prompt, payload, schema, **kwargs):
             captured.update(payload)
-            return workflow.ReporterOutput(sections=[workflow.Section(heading='结果', paragraphs=[
-                workflow.Claim(text='The outcome was 92%.', citations=['later'])])])
+            return '# 结果\n\nThe outcome was 92%. [[later]]'
         with patch.object(workflow, '_model', side_effect=model):
             result = workflow._reporter(state, None)
         self.assertIn('later', [item['id'] for item in captured['evidence']])
@@ -54,9 +53,7 @@ class ReporterEvidenceTests(unittest.TestCase):
             captured.update(payload)
             visible = {x['id'] for x in payload['evidence']}
             hidden = next(x['id'] for x in pool if x['id'] not in visible)
-            return workflow.ReporterOutput(sections=[workflow.Section(heading='结果', paragraphs=[
-                workflow.Claim(text='The outcome was 92%.', citations=[payload['evidence'][0]['id']]),
-                workflow.Claim(text='The outcome was 92%.', citations=[hidden])])])
+            return f"# 结果\n\nThe outcome was 92%. [[{payload['evidence'][0]['id']}]]\n\nThe outcome was 92%. [[{hidden}]]"
         with patch.object(workflow, '_model', side_effect=model):
             result = workflow._reporter(state, None)
         self.assertEqual(captured['evidence_omitted_count'], 12)
@@ -82,8 +79,7 @@ class ReporterEvidenceTests(unittest.TestCase):
         captured = {}
         def model(state, prompt, payload, schema, **kwargs):
             captured.update(payload)
-            return workflow.ReporterOutput(sections=[workflow.Section(heading='结果', paragraphs=[
-                workflow.Claim(text='Outcome 92%.', citations=['allowed'])])])
+            return '# 结果\n\nOutcome 92%. [[allowed]]'
         with patch.object(workflow, '_model', side_effect=model):
             result = workflow._reporter(state, None)
         self.assertEqual([x['id'] for x in captured['evidence']], ['allowed'])

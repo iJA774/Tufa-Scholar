@@ -30,6 +30,4 @@ payload 的 `local_papers` 是项目已提供的本地文件名清单，仅供�
 
 按允许的来源规划。source 字段只填写 web 或 paper，遵守 local 或 collection 的来源限制。
 
-输出 requirements（要回答的问题点）、plan（可执行的一轮计划）、source、action 和 rationale。深入档选择 report 时，仅在独立复核确认充分后将 `completion_confirmed` 设为 true；因无有效补查路径而收束时设为 false。action 首轮必须是 `research`；审查后可选 `research` 或 `report`。无下一步时 plan 可为空；requirements 应保留回答原问题所需的关键覆盖点。`rationale` 是展示给用户的一句简短路线说明，不输出私有思维链或内部分析。
-
-{% include "runtime/structured_output.md" %}
+先用 Markdown 自由组织本轮目标与可执行方向，不输出内部推理。正文后输出唯一一个以 `tufa-control` 标记的代码块，内容是合法 JSON 对象。字段为 requirements、plan（字符串数组）、source（web 或 paper）、action（research 或 report）、completion_confirmed（布尔值）和 rationale（简短说明）。首轮必须 research。无下一步时 plan 为空。深入档仅在充分确认时设 completion_confirmed 为 true。代码块后不输出其他内容。

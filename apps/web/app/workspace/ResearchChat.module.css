@@ -312,6 +312,9 @@
 .streamPreviewLabel { margin-left: 8px; color: #878595; font-size: 10px; font-weight: 400; letter-spacing: 0; }
 .messageUser .messageLabel { color: #89879a; text-align: right; }
 .messageContent { white-space: pre-wrap; word-break: break-word; }
+.messageMarkdown { white-space: normal; }
+.messageMarkdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.messageMarkdown th, .messageMarkdown td { border: 1px solid currentColor; padding: 0.35em 0.55em; }
 .citation { margin-top: 9px; color: #9995aa; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
 .citation a, .reportLinks a { color: #a7a0e7; text-decoration: none; }
 .citation a:hover, .reportLinks a:hover { color: #d4d0ff; text-decoration: underline; }

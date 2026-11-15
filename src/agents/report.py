@@ -99,6 +99,115 @@ def validate_claim(text, citations, evidence_by_id, allowed_paper_ids=None, *, a
     return cited, ""
 
 
+_MARKDOWN_CITATION = re.compile(r"\[\[([a-zA-Z0-9_-]+)\]\]")
+_MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MARKDOWN_LIST = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
+_MARKDOWN_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_PROCESS_GAP = re.compile(r"(?:不足|缺少|缺乏|尚未|未能|无法|不可用|未提供|未覆盖|未确认|未验证|缺口|失败|限制)")
+
+
+def validate_markdown(markdown, evidence, *, allowed_paper_ids=None):
+    """Validate cited Markdown blocks while preserving their presentation order.
+
+    A citation belongs to its paragraph, list item or table row. Uncited prose
+    is rejected except explicit process limitations in a ``> 局限：`` block.
+    The markers remain intact for later revalidation and publication.
+    """
+    by_id = {item['id']: item for item in evidence}
+    raw = str(markdown or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    wrapped = re.fullmatch(r'(?is)```(?:markdown|md)\s*\n(.*?)\n```\s*', raw)
+    if wrapped:
+        raw = wrapped.group(1)
+    lines = raw.split('\n')
+    output, rejected, findings, used = [], [], [], set()
+
+    def check(block, *, heading=False, limitation=False):
+        ids = _MARKDOWN_CITATION.findall(block)
+        plain = _MARKDOWN_CITATION.sub('', block).strip()
+        substantive = re.sub(r'[\s\-+*#>|.:：()\[\]`\d]+', '', plain)
+        if ids and not substantive:
+            rejected.append('引用缺少正文')
+            return False
+        if ('[[' in plain or ']]' in plain or '![' in plain
+                or re.search(r'(?i)\b(?:www\.|javascript:|data:)', plain)
+                or re.search(r'(?m)^\s{0,3}\[[^\]]+\]:\s*\S', plain)):
+            rejected.append('格式或引用不安全')
+            return False
+        if heading and not ids:
+            _, reason = validate_claim(plain, [], by_id, allowed_paper_ids, allow_uncited=True)
+        else:
+            process = limitation and bool(_PROCESS_GAP.search(plain))
+            _, reason = validate_claim(plain, ids, by_id, allowed_paper_ids, allow_uncited=process, is_limitation=process)
+        if reason:
+            rejected.append(reason)
+            return False
+        used.update(ids)
+        if ids and not heading and len(findings) < 12:
+            text = re.sub(r'^\s*(?:[-+*]|\d+[.)]|>)\s*', '', plain).strip()
+            findings.append({'text': text[:1500], 'citations': ids})
+        return True
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            if output and output[-1] != '':
+                output.append('')
+            index += 1
+            continue
+        fence = re.match(r'^\s{0,3}(`{3,}|~{3,})', line)
+        if fence:
+            delimiter = fence.group(1)
+            index += 1
+            while index < len(lines):
+                closing = re.match(r'^\s{0,3}(' + re.escape(delimiter[0]) + r'{%d,})\s*$' % len(delimiter), lines[index])
+                index += 1
+                if closing:
+                    break
+            rejected.append('格式或引用不安全')
+            continue
+        if index + 1 < len(lines) and '|' in line and _MARKDOWN_SEPARATOR.match(lines[index + 1]):
+            header, separator = line, lines[index + 1]
+            index += 2
+            rows = []
+            header_safe = not unsafe_text(header) and not measurements(header) and not _MARKDOWN_CITATION.search(header) and '![' not in header
+            while index < len(lines) and '|' in lines[index] and lines[index].strip():
+                row = lines[index]
+                if header_safe and check(row):
+                    rows.append(row)
+                index += 1
+            if rows:
+                output.extend([header, separator, *rows])
+            elif not header_safe:
+                rejected.append('表格标题不安全')
+            continue
+        if _MARKDOWN_HEADING.match(line):
+            if check(line, heading=True):
+                output.append(line)
+            index += 1
+            continue
+        block = [line]
+        index += 1
+        if _MARKDOWN_LIST.match(line):
+            while index < len(lines) and lines[index].strip() and re.match(r'^\s{2,}\S', lines[index]) and not _MARKDOWN_LIST.match(lines[index]):
+                block.append(lines[index])
+                index += 1
+        elif not line.lstrip().startswith('>'):
+            while index < len(lines) and lines[index].strip() and not _MARKDOWN_HEADING.match(lines[index]) and not _MARKDOWN_LIST.match(lines[index]) and not lines[index].lstrip().startswith('>') and not (index + 1 < len(lines) and _MARKDOWN_SEPARATOR.match(lines[index + 1])):
+                block.append(lines[index])
+                index += 1
+        text = '\n'.join(block)
+        limitation = bool(re.match(r'^\s*>\s*局限[：:]', text))
+        if check(text, limitation=limitation):
+            output.extend(block)
+    return {
+        'content': '\n'.join(output).strip(),
+        'evidence': [item for item in evidence if item['id'] in used],
+        'rejected': rejected,
+        'findings': findings,
+    }
+
+
 def _safe_title(value):
     title = value if isinstance(value, str) else ""
     if re.match(r"^(?:[a-z]:[\\/]|[/\\]{2}|/)", title, re.I):

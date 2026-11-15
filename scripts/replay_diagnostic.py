@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pydantic import ValidationError
+from src.integrations.model import StructuredOutputError
 
 
 def replay(artifact):
@@ -22,16 +23,14 @@ def replay(artifact):
             BackgroundOutput,
             DispatcherOutput,
             PlannerOutput,
-            ReporterOutput,
             ResearchActionOutput,
-            ResearchDraftOutput,
+            _parse_control,
         )
         schemas = {
             'runtime/dispatcher': DispatcherOutput,
             'literature/background_investigator': BackgroundOutput,
             'literature/planner': PlannerOutput,
             'literature/analyst': AnalystOutput,
-            'literature/reporter': ReporterOutput,
         }
     except ImportError:
         return '无法离线复现：当前提示词 schema 不可用'
@@ -39,21 +38,29 @@ def replay(artifact):
     if prompt_id == 'literature/researcher':
         payload = artifact.get('payload')
         phase = payload.get('phase') if isinstance(payload, dict) else None
-        schema = ResearchActionOutput if phase == 'act' else ResearchDraftOutput if phase == 'draft' else None
+        schema = ResearchActionOutput if phase == 'act' else None
+        if phase == 'draft':
+            response = artifact.get('response')
+            return '未复现' if isinstance(response, str) and response.strip() else '复现：文本为空或格式无效'
         if schema is None:
             return '无法离线复现：未知研究阶段'
+    if prompt_id == 'literature/reporter':
+        response = artifact.get('response')
+        return '未复现' if isinstance(response, str) and response.strip() else '复现：文本为空或格式无效'
     if schema is None:
         return '无法离线复现：未知提示词'
     try:
         response = artifact.get('response')
-        if isinstance(response, str):
+        if prompt_id in ('literature/planner', 'literature/analyst') and isinstance(response, str):
+            _parse_control(response, schema)
+        elif isinstance(response, str):
             schema.model_validate_json(response)
         else:
             schema.model_validate(response)
-    except ValidationError as exc:
+    except (ValueError, ValidationError, StructuredOutputError) as exc:
         from src.integrations.model import _safe_validation_errors
 
-        errors = _safe_validation_errors(exc, schema.model_json_schema())
+        errors = _safe_validation_errors(exc, schema.model_json_schema()) if isinstance(exc, ValidationError) else [{'type': 'invalid_control'}]
         return '复现：' + json.dumps(errors, ensure_ascii=False)
     return '未复现'
 

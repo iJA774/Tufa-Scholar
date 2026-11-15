@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.agents.report import reference, validate_claim
+from src.agents.report import reference, validate_claim, validate_markdown
 from src.integrations.web_page import WebPageError
 from src.integrations.web_search import WebSearchError
 from src.integrations.model import ModelServiceError, StructuredOutputError, structured, structured_input_units
@@ -140,38 +140,6 @@ def _distinct_plan_steps(state, steps):
     return [step for step in proposed if not any(_similar_step(step, old) for old in executed)]
 
 
-class Claim(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    text: str = Field(min_length=1, max_length=1_500)
-    citations: list[str] = Field(default_factory=list, max_length=12)
-
-
-class Section(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    heading: str = Field(min_length=1, max_length=150)
-    paragraphs: list[Claim] = Field(default_factory=list, max_length=8)
-
-
-class Draft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    sections: list[Section] = Field(default_factory=list, max_length=8)
-    limitations: list[Claim] = Field(default_factory=list, max_length=8)
-
-    @model_validator(mode="after")
-    def bounded_claims(self):
-        if sum(len(section.paragraphs) for section in self.sections) + len(self.limitations) > 24:
-            raise ValueError("草稿段落数量超限")
-        return self
-
-
-class ReporterOutput(Draft):
-    """Structured final report layout; every prose field uses the claim contract."""
-
-    title: str = Field(default="", max_length=180)
-    key_points: list[Claim] = Field(default_factory=list, max_length=6)
-    overview: list[Claim] = Field(default_factory=list, max_length=2)
-
-
 class DispatcherOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     needs_research: bool
@@ -218,12 +186,6 @@ class ResearchActionOutput(BaseModel):
         return self
 
 
-class ResearchDraftOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    draft: Draft = Field(default_factory=Draft)
-    findings: list[Claim] = Field(default_factory=list, max_length=12)
-
-
 class AnalystOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sufficient: bool
@@ -233,7 +195,36 @@ class AnalystOutput(BaseModel):
     unresolved_contradictions: list[str] = Field(default_factory=list, max_length=8)
     evidence_reliability_confirmed: bool = False
     important_conclusions_cross_validated: bool = False
-    review: str = Field(default="", max_length=3_000)
+
+
+_CONTROL_OPEN = re.compile(r"^```tufa-control[ \t]*$", re.MULTILINE)
+_CONTROL = re.compile(r"\n(?P<data>.*?)\n```[ \t]*\Z", re.DOTALL)
+_CITATION = re.compile(r"\[\[([a-zA-Z0-9_-]+)\]\]")
+
+
+def _parse_control(result, schema):
+    """Separate public prose from validated workflow decisions."""
+    result = result.strip().replace("\r\n", "\n") if isinstance(result, str) else ""
+    openings = list(_CONTROL_OPEN.finditer(result))
+    if len(openings) != 1:
+        raise StructuredOutputError("工作流控制块缺失或无效")
+    opening = openings[0]
+    body = result[:opening.start()].strip()
+    match = _CONTROL.match(result, opening.end())
+    if not body or not match:
+        raise StructuredOutputError("工作流控制块缺失或无效")
+
+    def unique_keys(pairs):
+        data = dict(pairs)
+        if len(data) != len(pairs):
+            raise ValueError("duplicate control key")
+        return data
+
+    try:
+        data = schema.model_validate(json.loads(match["data"], object_pairs_hook=unique_keys), strict=True)
+    except (ValueError, RecursionError):
+        raise StructuredOutputError("工作流控制块缺失或无效") from None
+    return body, data.model_dump()
 
 
 class State(TypedDict, total=False):
@@ -244,7 +235,7 @@ class State(TypedDict, total=False):
     current_plan: list
     current_source: str
     current_round: int
-    current_draft: dict
+    current_draft: str
     current_review: dict
     current_findings: list
     candidate_pools: dict
@@ -271,6 +262,7 @@ class State(TypedDict, total=False):
     prepared_round: int
     final_evidence: list
     final_rejections: list
+    report_fallback: bool
     _event_context: object
 
 
@@ -474,39 +466,19 @@ def _background_summary_for_model(background):
     return summary
 
 
-def _rounds_for_model(rounds, *, include_drafts=False, visible_evidence_ids=None, evidence_limit=MAX_EVIDENCE_CONTEXT):
+def _rounds_for_model(rounds, *, include_drafts=False, visible_evidence=None, evidence_limit=MAX_EVIDENCE_CONTEXT):
     bounded = []
     for round_item in rounds:
         review = round_item.get("review", {})
         if include_drafts:
             item = dict(round_item)
             item["candidate_ids"] = list(round_item.get("candidate_ids", []))[-MAX_CANDIDATE_CONTEXT:]
-            if visible_evidence_ids is not None:
-                visible = set(visible_evidence_ids)
-                draft = dict(item.get("draft", {}))
-                sections = []
-                for section in draft.get("sections", []):
-                    section_copy = dict(section)
-                    paragraphs = []
-                    for claim in section.get("paragraphs", []):
-                        claim_copy = dict(claim)
-                        original = claim_copy.get("citations", [])
-                        if not original or all(value in visible for value in original):
-                            paragraphs.append(claim_copy)
-                    if paragraphs:
-                        section_copy["paragraphs"] = paragraphs
-                        sections.append(section_copy)
-                draft["sections"] = sections
-                draft["limitations"] = [
-                    claim for claim in draft.get("limitations", [])
-                    if not claim.get("citations") or all(value in visible for value in claim.get("citations", []))
-                ]
-                item["draft"] = draft
-                item["findings"] = [
-                    claim for claim in item.get("findings", [])
-                    if not claim.get("citations") or all(value in visible for value in claim.get("citations", []))
-                ]
-                item["evidence_ids"] = [value for value in round_item.get("evidence_ids", []) if value in visible]
+            if visible_evidence is not None:
+                checked = validate_markdown(item.get("draft", ""), visible_evidence)
+                item["draft"] = checked["content"]
+                item["findings"] = checked["findings"]
+                visible = {entry["id"] for entry in visible_evidence}
+                item["evidence_ids"] = [value for value in item.get("evidence_ids", []) if value in visible]
         else:
             item = {
                 "index": round_item.get("index"),
@@ -851,13 +823,7 @@ def _enrich_evidence(items, candidates, mode):
 
 
 def _claim_ids(draft):
-    ids = set()
-    for section in draft.get("sections", []):
-        for claim in section.get("paragraphs", []):
-            ids.update(claim.get("citations", []))
-    for claim in draft.get("limitations", []):
-        ids.update(claim.get("citations", []))
-    return ids
+    return set(_CITATION.findall(draft)) if isinstance(draft, str) else set()
 
 
 def _findings_ids(findings):
@@ -1480,7 +1446,7 @@ def _planner(state, on_stage):
         local_papers=state["research"].get("local_papers", []),
         core_requirements=core_requirements,
         current_plan=state.get("current_plan", []),
-        current_draft=state.get("current_draft", {}),
+        current_draft=state.get("current_draft", ""),
         current_review=state.get("current_review", {}),
         evidence=_evidence_views(_select_evidence(state), text_limit=240),
         allowed_sources=allowed,
@@ -1496,12 +1462,13 @@ def _planner(state, on_stage):
             state,
             prompt_id,
             payload,
-            PlannerOutput,
+            None,
             node_role="planner",
             search_mode=reference_mode,
             available_tools=[],
         )
-        data = result.model_dump()
+        body, data = _parse_control(result, PlannerOutput)
+        data["body"] = body
         if data["source"] not in allowed:
             data["source"] = state.get("current_source") or state.get("background", {}).get("source") or allowed[0]
         if not data["requirements"]:
@@ -1586,7 +1553,7 @@ def _supervisor(state, on_stage):
                 "current_source": mode,
                 "current_plan": plan.get("plan", []),
                 "current_round": next_round,
-                "current_draft": {},
+                "current_draft": "",
                 "current_review": {},
                 "current_findings": [],
                 "tool_results": [],
@@ -1682,8 +1649,6 @@ def _researcher(state, on_stage):
     decision_input_units = state.get("research_decision_input_units", 0)
     budget = _budget(state)
     round_action_limit = budget["actions_per_round"]
-    draft = Draft()
-    findings = []
     failure_message = (
         "研究决策输入达到估算上下文预算，已停止新增工具调用；以下仅整理已提取的证据。"
         if state.get("research_context_limit_reached")
@@ -1902,90 +1867,55 @@ def _researcher(state, on_stage):
                         consecutive_failures=consecutive_search_failures,
                     )
                     break
-    if not draft.sections and not draft.limitations:
-        finalization_payload = {
-            "question": state["research"]["query"],
-            "source": state["research"]["source"],
-            "phase": "draft",
-            "research_depth": _depth(state),
-            "current_round": state.get("current_round", 1),
-            "current_source": mode,
-            "current_plan": state.get("current_plan", []),
-            "current_candidates": _candidate_summaries(
-                state, mode, limit=4, text_limit=400,
-            ),
-            "evidence": _evidence_views(_select_evidence(state)),
-            "tool_results": _compact_tool_results(state.get("tool_results", [])),
-            "tool_feedback": state.get("errors", [])[-6:],
-            "calls_remaining": 0,
-            "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
-            "relevance_filter": state.get("research", {}).get("relevance_filter", "standard"),
-        }
-        try:
-            final_draft = _model(
-                state,
-                "literature/researcher",
-                finalization_payload,
-                ResearchDraftOutput,
-                node_role="researcher",
-                search_mode=mode,
-                available_tools=[],
-            )
-            draft = final_draft.draft
-            findings = final_draft.findings
-        except (ModelServiceError, StructuredOutputError):
-            state["errors"].append(_safe_error("researcher", "draft_failed", "初稿整理模型不可用，保留证据并说明缺口。"))
-            failure_message = "未能生成本轮初稿；当前证据和来源仍需人工核对。"
-    if not draft.sections and not draft.limitations and not failure_message:
-        failure_message = "本轮研究未生成可引用段落；现有来源或证据不足以形成结论。"
-    if not draft.sections and not draft.limitations and failure_message:
-        draft = Draft(sections=[], limitations=[Claim(text=failure_message, citations=[])])
+    allowed_papers = _allowed_report_papers(state)
+    working = _visible_report_evidence(_select_evidence(state), allowed_papers)
+    finalization_payload = {
+        "question": state["research"]["query"],
+        "source": state["research"]["source"],
+        "phase": "draft",
+        "research_depth": _depth(state),
+        "current_round": state.get("current_round", 1),
+        "current_source": mode,
+        "current_plan": state.get("current_plan", []),
+        "current_candidates": _candidate_summaries(
+            state, mode, limit=4, text_limit=400,
+        ),
+        "evidence": _evidence_views(working),
+        "plan_body": (state.get("plan") or {}).get("body", ""),
+        "tool_results": _compact_tool_results(state.get("tool_results", [])),
+        "tool_feedback": state.get("errors", [])[-6:],
+        "calls_remaining": 0,
+        "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
+        "relevance_filter": state.get("research", {}).get("relevance_filter", "standard"),
+    }
+    try:
+        draft = _model(
+            state,
+            "literature/researcher",
+            finalization_payload,
+            None,
+            node_role="researcher",
+            search_mode=mode,
+            available_tools=[],
+        )
+    except (ModelServiceError, StructuredOutputError):
+        state["errors"].append(_safe_error("researcher", "draft_failed", "初稿整理模型不可用，保留证据并说明缺口。"))
+        failure_message = "未能生成本轮初稿；当前证据和来源仍需人工核对。"
+        draft = ""
+    verified = validate_markdown(draft, working, allowed_paper_ids=allowed_papers)
+    if verified["rejected"]:
+        state["errors"].append(_safe_error("researcher", "claim_rejected", "引用、数值或范围检查移除了部分草稿内容。"))
+    safe_draft = verified["content"]
+    if not safe_draft and failure_message:
+        safe_draft = f"> 局限：{failure_message}"
     evidence_pool = _unique_evidence(state.get("evidence_pool", []))
-    evidence_by_id = {item["id"]: item for item in evidence_pool}
-    allowed_papers = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
-    safe_sections = []
-    rejected = []
-    for section in draft.sections:
-        paragraphs = []
-        for claim in section.paragraphs:
-            _, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_papers)
-            if reason:
-                rejected.append(reason)
-            else:
-                paragraphs.append(claim)
-        if paragraphs:
-            citations = list(dict.fromkeys(item for claim in paragraphs for item in claim.citations))
-            _, heading_error = validate_claim(section.heading, citations, evidence_by_id, allowed_papers)
-            heading = section.heading if not heading_error else "本轮研究发现"
-            if heading_error:
-                rejected.append("章节标题未通过格式或数值依据检查")
-            safe_sections.append(Section(heading=heading, paragraphs=paragraphs))
-    safe_limitations = []
-    for claim in draft.limitations:
-        _, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_papers, allow_uncited=True, is_limitation=True)
-        if reason:
-            rejected.append(reason)
-        else:
-            safe_limitations.append(claim)
-    safe_draft = Draft(sections=safe_sections, limitations=safe_limitations)
-    if not safe_draft.sections and not safe_draft.limitations:
-        safe_draft = Draft(limitations=[Claim(text="本轮初稿内容未通过引用、数值或来源范围检查，尚无可验证结论。", citations=[])])
-    safe_findings = []
-    for claim in findings:
-        _, reason = validate_claim(claim.text, claim.citations, evidence_by_id, allowed_papers)
-        if not reason:
-            safe_findings.append(claim.model_dump())
-        else:
-            rejected.append(reason)
-    if rejected:
-        state["errors"].append(_safe_error("researcher", "claim_rejected", "代码检查移除了引用、数值或范围不符合要求的草稿段落。"))
     return {
         "candidate_pools": state.get("candidate_pools", {}),
         "query_results": state.get("query_results", {}),
         "evidence_pool": evidence_pool,
         "evidence": evidence_pool,
-        "current_draft": safe_draft.model_dump(),
-        "current_findings": safe_findings,
+        "current_draft": safe_draft,
+        "current_findings": verified["findings"],
         "tool_results": state.get("tool_results", []),
         "research_actions_used": state.get("research_actions_used", 0),
         "research_decision_input_units": state.get("research_decision_input_units", 0),
@@ -2003,7 +1933,7 @@ def _researcher(state, on_stage):
 def _analyst(state, on_stage, on_subtask):
     _emit(on_stage, "analyst")
     mode = state.get("current_source", "paper")
-    draft = state.get("current_draft", {})
+    draft = state.get("current_draft", "")
     expanded = _depth(state) == "deep"
     evidence = _select_evidence(state, _claim_ids(draft) | _findings_ids(state.get("current_findings", [])), expanded=expanded)
     allowed_papers = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
@@ -2025,8 +1955,9 @@ def _analyst(state, on_stage, on_subtask):
         for partial, previous in zip(payload["rounds"], state.get("rounds", [])):
             partial["review"]["unresolved_contradictions"] = previous.get("review", {}).get("unresolved_contradictions", [])
     try:
-        result = _model(state, "literature/analyst", payload, AnalystOutput, node_role="analyst", search_mode=mode, available_tools=[])
-        review = result.model_dump()
+        result = _model(state, "literature/analyst", payload, None, node_role="analyst", search_mode=mode, available_tools=[])
+        body, review = _parse_control(result, AnalystOutput)
+        review["review"] = body
     except (ModelServiceError, StructuredOutputError):
         review = {
             "sufficient": False,
@@ -2071,6 +2002,7 @@ def _analyst(state, on_stage, on_subtask):
         "source": mode,
         "plan": list(state.get("current_plan", [])),
         "draft": draft,
+        "plan_body": (state.get("plan") or {}).get("body", ""),
         "review": review,
         "findings": current_findings,
         "candidate_ids": [item["candidate_id"] for item in state.get("candidate_pools", {}).get(mode, [])],
@@ -2090,190 +2022,40 @@ def _coder(state, on_stage):
     return {"coder_status": "placeholder", "last_completed": "coder"}
 
 
-def _claim_parts(claim):
-    if isinstance(claim, dict):
-        return claim.get("text", ""), claim.get("citations", [])
-    return getattr(claim, "text", ""), getattr(claim, "citations", [])
+def _allowed_report_papers(state):
+    if state["research"]["source"] == "collection":
+        return set(state["research"].get("paper_ids") or [])
+    return None
 
 
-def _safe_report_title(value):
-    if not isinstance(value, str):
-        return ""
-    text = re.sub(r"\s+", " ", value).strip().strip("# ").strip()
-    if (
-        not text
-        or len(text) > 120
-        or re.match(r"^(?:[a-z]:[\\/]|[/\\]{2}|/)", text, re.I)
-        or validate_claim(text, [], {}, allow_uncited=True)[1] == "格式或引用不安全"
-        or re.search(r"[\[\]{}|`<>*_~\\]", text)
-    ):
-        return ""
-    return text
+def _visible_report_evidence(items, allowed_papers):
+    visible = []
+    for item in items:
+        if allowed_papers is not None and item.get("paper_id") not in allowed_papers:
+            continue
+        text = str(item.get("text", ""))
+        entry = {**item, "text": text[:1_200]}
+        start, end = item.get("char_start"), item.get("char_end")
+        if len(text) > 1_200 and isinstance(start, int) and isinstance(end, int):
+            entry["char_end"] = min(end, start + len(entry["text"]))
+        visible.append(entry)
+    return visible
 
 
-def _report_title(draft, fallback):
-    candidate = _safe_report_title(getattr(draft, "title", ""))
-    if candidate:
-        return candidate
-    candidate = _safe_report_title(fallback)
-    return candidate or "研究报告"
+def _publish_report(verified, caveats=()):
+    evidence = {item["id"]: item for item in verified["evidence"]}
 
+    def cite(match):
+        item = evidence.get(match[1])
+        if not item:
+            return ""
+        # An escaped vertical bar does not create a new GFM table cell.
+        source = re.sub(r"\s+", " ", reference(item, markdown=True))
+        return "〔" + source.replace("|", r"\|") + "〕"
 
-def _report_reference(item):
-    """Build a linked reference from validated evidence and its stored trace fields."""
-    return "- " + reference(item, markdown=True)
-
-
-def _render_draft(draft, evidence, source, *, title, caveats=None, allowed_paper_ids=None, visible_ids=None):
-    evidence_by_id = {item["id"]: item for item in evidence}
-    permitted_ids = set(visible_ids) if visible_ids is not None else set(evidence_by_id)
-    used_ids = set()
-    rejected = []
-
-    def validate(item, *, allow_uncited=False, is_limitation=False):
-        text, citations = _claim_parts(item)
-        if not isinstance(text, str) or not text.strip() or not isinstance(citations, list):
-            rejected.append("报告字段格式无效")
-            return None
-        if any(identifier not in permitted_ids for identifier in citations):
-            rejected.append("引用不在报告工作证据范围内")
-            return None
-        cited, reason = validate_claim(
-            text, citations, evidence_by_id, allowed_paper_ids,
-            allow_uncited=allow_uncited, is_limitation=is_limitation,
-        )
-        if reason:
-            rejected.append(reason)
-            return None
-        used_ids.update(item["id"] for item in cited)
-        return Claim(text=text, citations=citations)
-
-    def unique_claims(items, limit):
-        result = []
-        seen = set()
-        for item in items:
-            key = re.sub(r"\s+", " ", item.text).strip().casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(item)
-            if len(result) >= limit:
-                break
-        return result
-
-    accepted_sections = []
-    section_claims = []
-    for section in getattr(draft, "sections", []) or []:
-        heading = section.get("heading", "") if isinstance(section, dict) else getattr(section, "heading", "")
-        paragraphs = section.get("paragraphs", []) if isinstance(section, dict) else getattr(section, "paragraphs", [])
-        accepted = []
-        section_ids = []
-        for item in paragraphs or []:
-            claim = validate(item)
-            if claim:
-                accepted.append(claim)
-                section_claims.append(claim)
-                section_ids.extend(claim.citations)
-        if accepted:
-            _, heading_error = validate_claim(
-                heading, list(dict.fromkeys(section_ids)), evidence_by_id, allowed_paper_ids,
-            )
-            if heading_error or not isinstance(heading, str):
-                heading = "证据支持的发现"
-                rejected.append("章节标题未通过格式或数值依据检查")
-            accepted_sections.append((heading, accepted))
-
-    accepted_points = []
-    for item in getattr(draft, "key_points", []) or []:
-        claim = validate(item)
-        if claim:
-            accepted_points.append(claim)
-    accepted_overview = []
-    for item in getattr(draft, "overview", []) or []:
-        claim = validate(item)
-        if claim:
-            accepted_overview.append(claim)
-
-    points = unique_claims(accepted_points, 6)
-    if len(points) < 4:
-        points = unique_claims([*points, *section_claims], 4)
-    if len(points) < 4:
-        points = unique_claims([*points, *accepted_overview], 4)
-    point_texts = {item.text.casefold() for item in points}
-    overview = unique_claims(
-        [item for item in accepted_overview if item.text.casefold() not in point_texts], 2,
-    )
-    if not overview:
-        overview = unique_claims(
-            [item for item in section_claims if item.text.casefold() not in point_texts], 2,
-        )
-    if not overview:
-        overview = unique_claims(accepted_overview or section_claims or points, 2)
-
-    accepted_limitations = []
-    for item in getattr(draft, "limitations", []) or []:
-        claim = validate(item, allow_uncited=True, is_limitation=True)
-        if claim:
-            accepted_limitations.append(claim)
-
-    lines = ["# " + _report_title(draft, title), "## 关键点"]
-
-    def claim_line(claim):
-        citations = " ".join(f"[{item}]" for item in claim.citations)
-        return claim.text + (" " + citations if citations else "")
-
-    if points:
-        lines.extend("- " + claim_line(item) for item in points)
-    else:
-        missing = "当前没有通过引用校验的结论。"
-        if not validate_claim(missing, [], evidence_by_id, allowed_paper_ids, allow_uncited=True)[1]:
-            lines.append("- " + missing)
-
-    lines.append("## 概述")
-    if overview:
-        lines.extend(claim_line(item) for item in overview)
-    else:
-        missing = "本次没有可引用资料，尚不能形成有证据支持的概述。"
-        if not validate_claim(missing, [], evidence_by_id, allowed_paper_ids, allow_uncited=True)[1]:
-            lines.append(missing)
-
-    lines.append("## 详细分析")
-    if accepted_sections:
-        for heading, claims in accepted_sections:
-            lines.append("### " + heading)
-            lines.extend(claim_line(item) for item in claims)
-    elif points:
-        lines.append("### 证据支持的发现")
-        lines.extend(claim_line(item) for item in points[:6])
-    else:
-        missing = "当前没有通过引用校验的详细分析内容。"
-        if not validate_claim(missing, [], evidence_by_id, allowed_paper_ids, allow_uncited=True)[1]:
-            lines.append(missing)
-
-    if accepted_limitations or caveats:
-        lines.append("## 局限与缺口")
-        lines.extend(claim_line(item) for item in accepted_limitations)
-        for caveat in caveats or []:
-            if isinstance(caveat, str) and not validate_claim(
-                caveat, [], evidence_by_id, allowed_paper_ids, allow_uncited=True, is_limitation=True,
-            )[1]:
-                lines.append(caveat)
-            else:
-                rejected.append("系统局限说明未通过格式或数值依据检查")
-
-    used_ids = {
-        identifier
-        for claim in (
-            [claim for _, claims in accepted_sections for claim in claims]
-            + points + overview + accepted_limitations
-        )
-        for identifier in claim.citations
-    }
-    kept = [item for item in evidence if item.get("id") in used_ids]
-    if kept:
-        lines.append("## 关键引文")
-        lines.extend(_report_reference(item) for item in kept)
-    return {"content": "\n\n".join(lines), "evidence": kept, "rejected": rejected}
+    body = _CITATION.sub(cite, verified["content"])
+    notes = ["> " + note for note in dict.fromkeys(caveats) if note]
+    return {**verified, "content": "\n\n".join(part for part in [body, *notes] if part)}
 
 
 def _outstanding_gaps(state, *, fallback=False):
@@ -2298,99 +2080,35 @@ def _outstanding_gaps(state, *, fallback=False):
     return _clean_labels(gaps, limit=40)
 
 
-def _reporter_fallback(state, reason):
-    all_evidence = state.get("evidence_pool", [])
-    allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
-    if allowed is not None:
-        all_evidence = [item for item in all_evidence if item.get("paper_id") in allowed]
-    evidence_by_id = {item["id"]: item for item in all_evidence}
-    grouped_sections = {}
-    claim_count = 0
-    fallback_findings = []
-    fallback_limitations = []
-    for round_item in state.get("rounds", []):
-        for section in round_item.get("draft", {}).get("sections", []):
-            for claim in section.get("paragraphs", []):
-                _, invalid = validate_claim(claim.get("text", ""), claim.get("citations", []), evidence_by_id, allowed)
-                if invalid or claim_count >= 16:
-                    continue
-                heading = section["heading"]
-                if heading not in grouped_sections and len(grouped_sections) >= 8:
-                    continue
-                _, heading_error = validate_claim(heading, claim.get("citations", []), evidence_by_id, allowed)
-                if heading_error:
-                    heading = "研究发现"
-                claims = grouped_sections.setdefault(heading, [])
-                if len(claims) < 8:
-                    claims.append(Claim.model_validate(claim))
-                    claim_count += 1
-        for finding in round_item.get("findings", []):
-            _, invalid = validate_claim(finding.get("text", ""), finding.get("citations", []), evidence_by_id, allowed)
-            if not invalid and len(fallback_findings) < 8:
-                fallback_findings.append(Claim.model_validate(finding))
-    # Earlier draft limitations may describe gaps filled by subsequent rounds.
-    # Once reviewed, uncited process gaps come from the cumulative review;
-    # the latest draft alone may not reflect evidence from earlier rounds.
-    if state.get("rounds"):
-        latest_review = state.get("current_review") or state["rounds"][-1].get("review", {})
-        for claim in state["rounds"][-1].get("draft", {}).get("limitations", []):
-            if len(fallback_limitations) >= 4:
-                break
-            if latest_review and not claim.get("citations"):
-                continue
-            _, invalid = validate_claim(claim.get("text", ""), claim.get("citations", []), evidence_by_id, allowed, allow_uncited=True, is_limitation=True)
-            if not invalid:
-                fallback_limitations.append(Claim.model_validate(claim))
-    round_sections = [Section(heading=heading, paragraphs=claims) for heading, claims in grouped_sections.items()]
-    if fallback_findings and len(round_sections) < 8 and claim_count < 16:
-        round_sections.append(Section(heading="初步发现", paragraphs=fallback_findings[:min(8, 16 - claim_count)]))
-    limitations = [Claim(text=reason[:1_500], citations=[])]
-    limitations.extend(fallback_limitations[:3])
-    draft = Draft(sections=round_sections, limitations=limitations)
-    return _render_draft(
-        draft,
-        all_evidence,
-        state["research"]["source"],
-        title="# 研究报告",
-        caveats=["以上仅保留通过代码引用与数值检查的初稿和发现。", "研究结论仍需结合原始资料核对。", *_warning_caveats(state, fallback=True)],
-        allowed_paper_ids=allowed,
-    )
-
-
-def _reporter_insufficient_fallback(state, reason):
-    """Show only stage findings that still pass the final citation and scope checks."""
-    reason = reason.rstrip("。.!！ ")
-    evidence = state.get("evidence_pool", [])
-    allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
-    evidence = [item for item in evidence if allowed is None or item.get("paper_id") in allowed]
-    evidence_by_id = {item["id"]: item for item in evidence}
-    findings = []
-    seen = set()
-    for round_item in state.get("rounds", []):
-        for finding in round_item.get("findings", []):
-            text = finding.get("text", "")
-            citations = finding.get("citations", [])
-            _, invalid = validate_claim(text, citations, evidence_by_id, allowed)
-            key = (text, tuple(citations))
-            if invalid or key in seen or len(findings) >= 8:
-                continue
-            seen.add(key)
-            findings.append(Claim.model_validate(finding))
-    if findings:
-        draft = Draft(
-            sections=[Section(heading="阶段性发现（尚未完成核验）", paragraphs=findings)],
-            limitations=[Claim(text=f"证据不足：{reason}。已展示的阶段性发现通过了当前引用和来源范围检查，但不能视为完整结论。")],
-        )
-    else:
-        draft = Draft(limitations=[Claim(text=f"证据不足：{reason}。当前没有通过引用检查的报告结论或阶段性发现，现有资料不足以形成完整终稿。")])
-    return _render_draft(
-        draft,
-        evidence,
-        state["research"]["source"],
-        title="# 研究报告（证据不足）",
-        caveats=["本结果不构成完整终稿。", *_warning_caveats(state, fallback=True)],
-        allowed_paper_ids=allowed,
-    )
+def _reporter_fallback(state, reason, *, incomplete_report=None):
+    allowed = _allowed_report_papers(state)
+    evidence = _visible_report_evidence(state.get("evidence_pool", []), allowed)
+    rounds = state.get("rounds", [])
+    review = state.get("current_review") or (rounds[-1].get("review", {}) if rounds else {})
+    drafts = [item.get("draft", "") for item in rounds]
+    current_draft = state.get("current_draft", "")
+    if current_draft and (not drafts or current_draft != drafts[-1]):
+        drafts.append(current_draft)
+    limitations = None
+    for index, draft in enumerate(reversed(drafts)):
+        checked = validate_markdown(draft, evidence, allowed_paper_ids=allowed)
+        if checked["evidence"]:
+            report = _publish_report(checked, _warning_caveats(state, fallback=True))
+            notice = f"> 终稿未能完成，以下为最近一份通过校验的研究草稿。\n> {reason}"
+            report["content"] = f'{notice}\n\n{report["content"]}'
+            return report
+        if index == 0 and not review.get("sufficient") and any(
+            line.lstrip().startswith("> 局限") for line in checked["content"].splitlines()
+        ):
+            limitations = checked
+    checked = limitations
+    if not checked and incomplete_report and any(
+        line.lstrip().startswith("> 局限") for line in incomplete_report["content"].splitlines()
+    ):
+        checked = incomplete_report
+    if not checked:
+        checked = {"content": "现有资料不足以形成有证据支持的结论。", "evidence": [], "rejected": []}
+    return _publish_report(checked, [f"证据不足：{reason}", *_warning_caveats(state, fallback=True)])
 
 
 def _log_report_validation(*, input_evidence_count, final_evidence_count, rejected_claim_count, fallback_rejected_count, fallback_reason):
@@ -2408,10 +2126,8 @@ def _log_report_validation(*, input_evidence_count, final_evidence_count, reject
     )
 
 
-def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, rejected_claim_count=0):
-    result = _reporter_fallback(state, reason)
-    if not result["evidence"]:
-        result = _reporter_insufficient_fallback(state, reason)
+def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, rejected_claim_count=0, incomplete_report=None):
+    result = _reporter_fallback(state, reason, incomplete_report=incomplete_report)
     _log_report_validation(
         input_evidence_count=input_evidence_count,
         final_evidence_count=len(result["evidence"]),
@@ -2498,17 +2214,11 @@ def _reporter_evidence(state, pool):
 def _reporter(state, on_stage):
     _emit(on_stage, "reporter")
     all_evidence = state.get("evidence_pool", [])
-    allowed = set(state["research"].get("paper_ids") or []) if state["research"]["source"] == "collection" else None
+    allowed = _allowed_report_papers(state)
     all_evidence = [item for item in all_evidence if allowed is None or item.get("paper_id") in allowed]
     all_evidence = _unique_evidence(all_evidence)
     selected = _reporter_evidence(state, all_evidence)
-    # The report validator sees exactly the same text as the model.
-    working = []
-    for item in selected:
-        entry = {**item, "text": str(item.get("text", ""))[:1_200]}
-        if len(str(item.get("text", ""))) > 1_200 and isinstance(item.get("char_start"), int) and isinstance(item.get("char_end"), int):
-            entry["char_end"] = min(item["char_end"], item["char_start"] + len(entry["text"]))
-        working.append(entry)
+    working = _visible_report_evidence(selected, allowed)
     payload = _payload(
         state,
         expanded_evidence=True,
@@ -2516,7 +2226,7 @@ def _reporter(state, on_stage):
         rounds=_rounds_for_model(
             state.get("rounds", []),
             include_drafts=True,
-            visible_evidence_ids={item["id"] for item in working},
+            visible_evidence=working,
             evidence_limit=_evidence_context_limits(state, expanded=True)[0],
         ),
         evidence=_evidence_views(working),
@@ -2527,77 +2237,57 @@ def _reporter(state, on_stage):
         prefer_primary_evidence=state.get("research", {}).get("prefer_primary_evidence", True),
         errors=state.get("errors", []),
     )
+    errors = list(state.get("errors", []))
+    checked = None
     try:
-        result = _model(state, "literature/reporter", payload, ReporterOutput, node_role="reporter", search_mode=_report_mode(state), available_tools=[])
+        result = _model(state, "literature/reporter", payload, None, node_role="reporter",
+                        search_mode=_report_mode(state), available_tools=[])
+        checked = validate_markdown(result, working, allowed_paper_ids=allowed)
     except ModelServiceError:
         reason = "报告模型服务不可用，未能形成完整终稿。"
-        result = _reporter_recovery(
-            state,
-            reason=reason,
-            reason_code="model_service_failed",
-            input_evidence_count=len(working),
-        )
-        return {"content": result["content"], "final_evidence": result["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "model_service_failed", "报告模型服务不可用，已返回明确缺口和可核查资料。")], "final_rejections": result.get("rejected", []), "last_completed": "reporter"}
+        reason_code = "model_service_failed"
+        errors.append(_safe_error("reporter", reason_code, reason))
     except StructuredOutputError:
-        reason = "报告结构校验失败，未能形成完整终稿。"
-        result = _reporter_recovery(
-            state,
-            reason=reason,
-            reason_code="invalid_report_output",
-            input_evidence_count=len(working),
-        )
-        return {"content": result["content"], "final_evidence": result["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "invalid_output", "报告输出未通过结构校验，已返回明确缺口和可核查资料。")], "final_rejections": result.get("rejected", []), "last_completed": "reporter"}
-    if not result.sections and not result.limitations:
-        reason = "报告内容为空，未能形成完整终稿。"
-        fallback = _reporter_recovery(
-            state,
-            reason=reason,
-            reason_code="empty_report",
-            input_evidence_count=len(working),
-        )
-        return {"content": fallback["content"], "final_evidence": fallback["evidence"], "errors": list(state.get("errors", [])) + [_safe_error("reporter", "empty_report", "报告输出为空，已返回明确缺口和可核查资料。")], "final_rejections": fallback.get("rejected", []), "last_completed": "reporter"}
-    visible_ids = {item["id"] for item in working}
-    caveats = []
-    if not all_evidence:
-        caveats.append("本次没有获得可用证据，以下内容不能视为已核验结论。")
-    if len(all_evidence) > len(working):
-        caveats.append("累计证据超出终稿上下文预算，本报告基于其中部分证据。")
-    caveats.extend(_warning_caveats(state))
-    rendered = _render_draft(
-        result,
-        working,
-        state["research"]["source"],
-        title=state["research"].get("query") or "研究报告",
-        caveats=caveats,
-        allowed_paper_ids=allowed,
-        visible_ids=visible_ids,
-    )
-    if rendered["rejected"]:
-        rendered["content"] += "\n\n部分段落因引用、数值或来源范围校验未通过而省略。"
-    if not rendered["evidence"]:
-        reason = "报告输出没有可保留的有效引用"
-        fallback = _reporter_insufficient_fallback(state, reason)
+        reason = "报告生成中断或返回空内容，未能形成完整终稿。"
+        reason_code = "invalid_report_output"
+        errors.append(_safe_error("reporter", "invalid_output", reason))
+    else:
+        reason = "终稿没有可保留的有效引用。"
+        reason_code = "no_valid_report_citations"
+
+    if checked and checked["evidence"]:
+        caveats = _warning_caveats(state)
+        if len(all_evidence) > len(working):
+            caveats.append("累计证据超出终稿上下文预算，本报告基于其中部分证据。")
+        if checked["rejected"]:
+            caveats.append("部分内容因引用、数值或来源范围校验未通过而省略。")
+        report = _publish_report(checked, caveats)
+        rejected = report["rejected"]
         _log_report_validation(
             input_evidence_count=len(working),
-            final_evidence_count=len(fallback["evidence"]),
-            rejected_claim_count=len(rendered["rejected"]),
-            fallback_rejected_count=len(fallback.get("rejected", [])),
-            fallback_reason="no_valid_report_citations",
+            final_evidence_count=len(report["evidence"]),
+            rejected_claim_count=len(rejected),
+            fallback_rejected_count=0,
+            fallback_reason="none",
         )
-        return {
-            "content": fallback["content"],
-            "final_evidence": fallback["evidence"],
-            "final_rejections": rendered["rejected"] + fallback.get("rejected", []),
-            "last_completed": "reporter",
-        }
-    _log_report_validation(
-        input_evidence_count=len(working),
-        final_evidence_count=len(rendered["evidence"]),
-        rejected_claim_count=len(rendered["rejected"]),
-        fallback_rejected_count=0,
-        fallback_reason="none",
-    )
-    return {"content": rendered["content"], "final_evidence": rendered["evidence"], "final_rejections": rendered["rejected"], "last_completed": "reporter"}
+        fallback = False
+    else:
+        rejected = checked["rejected"] if checked else []
+        report = _reporter_recovery(
+            state, reason=reason, reason_code=reason_code,
+            input_evidence_count=len(working), rejected_claim_count=len(rejected),
+            incomplete_report=checked,
+        )
+        rejected = rejected + report["rejected"]
+        fallback = True
+    return {
+        "content": report["content"],
+        "final_evidence": report["evidence"],
+        "final_rejections": rejected,
+        "report_fallback": fallback,
+        "errors": errors,
+        "last_completed": "reporter",
+    }
 
 
 def _dispatch(state, on_stage):
@@ -2653,6 +2343,8 @@ def _node_completion_data(node, state, patch):
         rationale = _safe_event_text(plan.get("rationale"), 240)
         if rationale:
             data["message"] = rationale
+        if plan.get("body") and not patch.get("research_stop_reason", "").endswith("_exhausted"):
+            data["body"] = plan["body"][:8_000]
     elif node == "supervisor":
         target = patch.get("next_node", "researcher")
         data["message"] = f"已安排 {target} 节点继续。"
@@ -2666,11 +2358,16 @@ def _node_completion_data(node, state, patch):
         data["sufficient"] = bool(review.get("sufficient"))
         gaps = [item for item in review.get("gaps", []) if isinstance(item, str) and item.strip()]
         data["message"] = _safe_event_text(gaps[0], 240) if gaps else ("已覆盖主要要求。" if review.get("sufficient") else "仍需补充证据。")
+        if review.get("review"):
+            data["body"] = review["review"][:8_000]
     elif node == "coder":
         data["message"] = "本轮无需代码执行。"
     elif node == "reporter":
         evidence = patch.get("final_evidence", state.get("final_evidence", []))
-        data["message"] = f"已完成终稿整理与引用校验，保留 {len(evidence)} 条引用证据。"
+        if patch.get("report_fallback"):
+            data["message"] = "终稿未能完成，已返回最近一份可用研究草稿。" if evidence else "证据不足，已返回已知缺口。"
+        else:
+            data["message"] = f"已完成终稿整理与引用校验，保留 {len(evidence)} 条引用证据。"
     return data
 
 
@@ -2745,7 +2442,7 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
         "current_plan": [],
         "current_source": "",
         "current_round": 0,
-        "current_draft": {},
+        "current_draft": "",
         "current_review": {},
         "candidate_pools": {"paper": [], "web": []},
         "query_results": {},

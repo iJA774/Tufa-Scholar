@@ -1,6 +1,8 @@
 "use client";
 
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useId, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { useRunEvents } from "../hooks/useRunEvents";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
@@ -629,7 +631,15 @@ export default function ResearchChat({
             <div className={styles.messageBubble}>
               <div className={styles.messageLabel}>{message.role === "user" ? "你" : `TUFA · ${modeText(messageRun?.research_mode)}`}</div>
               {message.role === "assistant" && message.run_id && <ResearchActivity items={messageRun?.subtasks} />}
-              <div className={styles.messageContent}>{message.content}</div>
+              <div className={`${styles.messageContent} ${message.metadata?.report_id ? styles.messageMarkdown : ""}`}>
+                {message.role === "assistant" && message.metadata?.report_id ? <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
+                  a: ({ href, children }) => {
+                    const safeHref = safeSourceUrl(href);
+                    return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
+                  },
+                  img: () => null,
+                }}>{message.content}</ReactMarkdown> : message.content}
+              </div>
               {message.metadata?.evidence?.map((citation, index) => {
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
                 return <div className={styles.citation} key={`${citation.id || index}-${index}`}>

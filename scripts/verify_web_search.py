@@ -158,12 +158,11 @@ def main():
             dense_task = wait(dense['run_id'])
             assert dense_task['status'] == 'succeeded', dense_task
             assert dense_task['result']['evidence'] and '92%' in dense_task['result']['content']
-            assert '尚需核对更多独立来源' in dense_task['result']['content']
             dense_report = dense_task['result']['content']
             assert dense_report.startswith('# 准确率核查\n'), dense_report
-            sections = ['## 关键点', '## 概述', '## 详细分析', '## 关键引文']
-            assert [dense_report.index(section) for section in sections] == sorted(dense_report.index(section) for section in sections)
-            assert '\n- ' in dense_report and '](' in dense_report
+            assert '## 核查结果' in dense_report
+            assert '## 关键点' not in dense_report
+            assert '](' in dense_report
             dense_calls = [
                 (request, json.loads(request['messages'][1]['content']))
                 for request in fixture.model_requests
@@ -251,7 +250,7 @@ def main():
             recovered = wait(rejected_report['run_id'])
             assert recovered['status'] == 'succeeded', recovered
             recovered_report = recovered['result']
-            assert '证据不足' in recovered_report['content']
+            assert '草稿' in recovered_report['content']
             assert '92%' in recovered_report['content']
             assert 'fixture-unavailable' not in recovered_report['content']
             stage_citations = {identifier for step in recovered['subtasks']
@@ -310,7 +309,7 @@ def main():
             print('Simulated HTTP: quick mode stayed direct despite a contradictory dispatcher, with zero searches.')
             print('Simulated HTTP: deep mode researched a greeting through background search and reporting.')
             print('Simulated HTTP: API web search, background filtering, web evidence and cited report passed.')
-            print('Research budgets: dense results are capped, decisions have generation limits, and reporter format repair preserves cited evidence without a second call.')
+            print('Research budgets: dense results are capped, decisions have generation limits, and reporter preserves cited evidence.')
             print('Context cutoff: an over-budget decision is skipped and the worker goes from draft to report without any further retrieval.')
             print('Thinking-budget conflict: a streaming HTTP 400 is recovered once and the worker saves a cited report.')
             print('Live SSE: reporter delta arrived while the worker was running; tool reason and reconnect cursor passed.')

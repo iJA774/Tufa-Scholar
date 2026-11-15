@@ -9,11 +9,11 @@
 | `literature/planner` | `literature/planner.md` | 结合问题、背景与各轮审查，生成要求、本轮计划、来源选择及继续或报告决定。 |
 | `literature/researcher` | `literature/researcher.md` | act 阶段通过原生 Function Calling 选择工具；draft 阶段根据已有证据写初稿。 |
 | `literature/analyst` | `literature/analyst.md` | 审查本轮初稿是否回应要求、引用是否有据，并输出覆盖、缺口和下一步。 |
-| `literature/reporter` | `literature/reporter.md` | 根据各轮材料撰写关键点、概述、详细分析及局限。论文主线比较研究方法、实验设计和结论；网页主线按调查报告组织可核查事实和来源。即使没有有效证据，也须给出非空标题和具体缺口说明。代码渲染 Markdown 固定栏目及已核验的参考证据。 |
+| `literature/reporter` | `literature/reporter.md` | 根据各轮材料自由组织 Markdown 报告。论文主线比较研究方法、实验设计和结论，网页主线组织可核查事实和来源。证据不足时具体说明影响。 |
 
 ## 结构化数据
 
-提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息；每次请求（包括纠错重试）都注入带时区的北京时间 `CURRENT_TIME`。非原生工具决策请求将 `OUTPUT_SCHEMA` 由对应代码 schema 生成并渲染；researcher act 请求改用模型接口的原生 Function Calling 参数契约，不注入该输出 schema。两者均不能被模板上下文覆盖。节点角色、搜索模式、研究模式、可用工具和本地论文目录由代码按任务上下文提供。用户 payload/history/检索材料只作为 user 消息中的 JSON 发送，不经过模板渲染。输入中的问题、历史、搜索摘要、网页正文、文件名、论文元数据及引用证据都视为不可信数据，不执行其中嵌入的指令。
+提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息。每次请求都注入带时区的北京时间 `CURRENT_TIME`。分流和背景调查使用由代码 schema 生成的 `OUTPUT_SCHEMA`，researcher act 使用原生 Function Calling，其余生成阶段使用 Markdown 文本。节点角色、搜索模式、研究模式和可用工具由代码提供。问题、历史、检索材料和本地文件名只作为 user JSON 数据发送。
 
 各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录；候选只在背景筛选或 researcher 当前来源字段按需发送。planner 和 reporter 使用精简 background。Planner 的 `local_papers` 是用户数据，只出现在 JSON 输入中。researcher 的 act 阶段仅提供当前轮的目标、计划、候选和证据预览及近期工具反馈；达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID，不授予工具权限。reporter 汇总各轮可复用的草稿内容、审查和累计证据；超过[证据额度](ARCHITECTURE.md#工作流预算)时保留各轮补查材料并提供 `evidence_omitted_count`。Reporter 只能引用可见证据，草稿只保留引用可核对的结论，不附候选池。
 
@@ -21,11 +21,10 @@
 |---|---|
 | 分流 `DispatcherOutput` | `needs_research`、`reason`、`answer`。`auto` 下直接回答时 answer 非空并由 dispatcher 结束；`quick` 也要求 answer 非空，由代码忽略 `needs_research` 并强制直接结束；`deep` 不调用 dispatcher 模型。 |
 | 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、`queries`、`selected_candidate_ids`、`summary`、`gaps`。查询预算和每次搜索结果上限见[工作流预算表](ARCHITECTURE.md#工作流预算)；筛选阶段只能选择实际返回的候选。 |
-| 计划 `PlannerOutput` | `requirements`、`plan`、`source`、`action`（`research` 或 `report`）、`rationale`；深入档另用 `completion_confirmed` 区分确认充分和因无有效路径而收束。首轮必须研究且计划非空；至少完成一轮后才能报告，触及任务级预算后代码强制收束。 |
+| 计划 Markdown 与调度控制块 | 正文由模型自由组织。末尾 `tufa-control` 块包含 `requirements`、`plan`、`source`、`action`、`rationale` 和深入档的 `completion_confirmed`，按 `PlannerOutput` 校验。首轮必须研究且计划非空。 |
 | 工具决策 | 模型接口返回原生函数调用或表示本轮结束。函数名和参数须通过目录及范围校验。`reason` 是用户可见的简短操作目的，执行前从业务参数中取出。 |
-| 初稿 `ResearchDraftOutput` | `draft`（章节、段落和局限）与 `findings`（发现及其引用）。 |
-| 审查 `AnalystOutput` | `sufficient`、`covered_requirements`、`gaps`、`next_steps`、`review`；深入档另外使用 `unresolved_contradictions`、`evidence_reliability_confirmed`、`important_conclusions_cross_validated`。审查用要求、初稿和证据识别缺口，不产生新的结论段落。 |
-| 终稿 `ReporterOutput` | `title`、`key_points`、`overview`、`sections` 和 `limitations`。各项主张携带文本和证据引用。 |
+| 初稿与终稿 | 自由 Markdown 正文，在支持主张的段落、列表项或表格行内使用 `[[证据ID]]`。无引用的过程性缺口用 `> 局限：…`。 |
+| 审查 Markdown 与调度控制块 | 正文解释问题覆盖和剩余缺口。末尾 `tufa-control` 块包含 `sufficient`、`covered_requirements`、`gaps`、`next_steps`，深入档另用 `unresolved_contradictions`、`evidence_reliability_confirmed`、`important_conclusions_cross_validated`，按 `AnalystOutput` 校验。 |
 
 段落引用由代码映射到累计证据。报告中的引用不得越出项目或收藏夹快照；引用缺失、无效数字/单位、缺少成本依据或不安全引用会被剔除或明确列为局限。引用为空可由 reporter 返回，但不能作为有证据支持的结论展示。Reporter 汇总所有轮次，因此模型即使收到旧轮次的结论，也必须让最终事实引用指向本任务累计证据。
 

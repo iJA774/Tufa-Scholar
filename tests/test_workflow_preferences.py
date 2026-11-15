@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+from markdown_fixture import plan, review
 
 
 class ResearchPreferenceTests(unittest.TestCase):
@@ -84,7 +85,7 @@ class ResearchPreferenceTests(unittest.TestCase):
             if prompt_id == "literature/planner":
                 round_count = payload["round_count"]
                 planner_rounds.append(round_count)
-                return workflow.PlannerOutput(requirements=["answer"], plan=["answer the question"], source="paper", action="research")
+                return plan(requirements=["answer"], plan=["answer the question"], source="paper", action="research")
             if prompt_id == "literature/researcher":
                 if payload["phase"] == "act":
                     round_number = payload["current_round"]
@@ -97,9 +98,9 @@ class ResearchPreferenceTests(unittest.TestCase):
                         action="tool", tool_name="search_papers",
                         arguments={"query": f"research-{payload['current_round']}-{payload['calls_remaining']}"},
                     )
-                return workflow.ResearchDraftOutput(draft=workflow.Draft(limitations=[workflow.Claim(text="Evidence remains incomplete.")]))
+                return "> 局限：Evidence remains incomplete."
             if prompt_id == "literature/analyst":
-                return workflow.AnalystOutput(
+                return review(
                     sufficient=False,
                     covered_requirements=[],
                     gaps=["Need more evidence."],
@@ -108,7 +109,7 @@ class ResearchPreferenceTests(unittest.TestCase):
                     important_conclusions_cross_validated=False,
                 )
             if prompt_id == "literature/reporter":
-                return workflow.ReporterOutput(title="Research", limitations=[workflow.Claim(text="Evidence remains incomplete.")])
+                return "# Research\n\n> 局限：Evidence remains incomplete."
             raise AssertionError(prompt_id)
 
         def invoke(name, arguments, *, context):
@@ -184,7 +185,7 @@ class ResearchPreferenceTests(unittest.TestCase):
 
     def test_deep_review_can_end_early_only_after_all_core_checks_pass(self):
         state = self.deep_planner_state(self.deep_review())
-        with patch.object(workflow, "_model", return_value=workflow.PlannerOutput(
+        with patch.object(workflow, "_model", return_value=plan(
             requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=True,
         )):
             result = workflow._planner(state, None)
@@ -192,7 +193,7 @@ class ResearchPreferenceTests(unittest.TestCase):
         self.assertTrue(workflow._review_is_sufficient(state, state["current_review"]))
         self.assertEqual(result["plan"]["action"], "report")
         self.assertEqual(result["research_stop_reason"], "sufficient")
-        with patch.object(workflow, "_model", return_value=workflow.PlannerOutput(
+        with patch.object(workflow, "_model", return_value=plan(
             requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=False,
         )):
             unconfirmed = workflow._planner(state, None)
@@ -212,7 +213,7 @@ class ResearchPreferenceTests(unittest.TestCase):
             important_conclusions_cross_validated=False,
         )
         state = self.deep_planner_state(review)
-        with patch.object(workflow, "_model", return_value=workflow.PlannerOutput(
+        with patch.object(workflow, "_model", return_value=plan(
             requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=True,
         )):
             result = workflow._planner(state, None)
@@ -239,7 +240,7 @@ class ResearchPreferenceTests(unittest.TestCase):
             def model(current, prompt_id, payload, schema, **kwargs):
                 self.assertEqual(prompt_id, "literature/reporter")
                 payloads.append(payload)
-                return workflow.ReporterOutput(limitations=[workflow.Claim(text="Current evidence still needs review.")])
+                return "Evidence directly relevant to the research question. [[e1]]"
 
             with patch.object(workflow, "_model", side_effect=model):
                 result = workflow._reporter(state, None)

@@ -104,130 +104,20 @@ class ReportValidationTests(unittest.TestCase):
         self.assertNotIn('token=private', rendered)
 
 
-class ReporterLayoutTests(unittest.TestCase):
-    def setUp(self):
-        self.paper = {
-            'id': 'paper', 'paper_id': 7, 'title': 'Study',
-            'source_level': 'full_text', 'text': 'Accuracy was 92%; cost was $5.',
-            'version_id': 3, 'page': 4, 'file_path': 'C:/private/material.pdf',
-            'research_source': 'paper',
-        }
-        self.web = {
-            'id': 'web', 'title': 'Official page', 'source_level': 'web_content',
-            'text': 'The system was tested independently.',
-            'provider': 'fixture', 'original_url': 'https://example.org/report?title=Useful+Title&token=private#part',
-            'retrieved_at': '2026-11-12T10:00:00+08:00', 'char_start': 25, 'char_end': 61,
-            'research_source': 'web',
-        }
-
-    def test_reporter_renders_enforced_layout_and_validated_link_references(self):
-        result = literature.ReporterOutput(
-            title='评估结果',
-            key_points=[
-                literature.Claim(text='准确率为 92%。', citations=['paper']),
-                literature.Claim(text='网页记录了独立测试。', citations=['web']),
-            ],
-            overview=[literature.Claim(text='现有材料报告准确率为 92%。', citations=['paper'])],
-            sections=[literature.Section(
-                heading='准确率与独立测试',
-                paragraphs=[
-                    literature.Claim(text='论文记录准确率为 92%。', citations=['paper']),
-                    literature.Claim(text='网页记载系统经过独立测试。', citations=['web']),
-                    literature.Claim(text='该研究采用独立的评价流程。', citations=['paper']),
-                    literature.Claim(text='页面说明了测试过程。', citations=['web']),
-                ],
-            )],
-            limitations=[literature.Claim(text='现有材料不足以判断外部适用性。', citations=[])],
-        )
-
-        rendered = literature._render_draft(
-            result, [self.paper, self.web], 'all', title='评估系统的结果',
-        )
-
-        content = rendered['content']
-        self.assertEqual(content.count('\n# '), 0)
-        self.assertEqual(sum(line.startswith('# ') for line in content.splitlines()), 1)
-        self.assertIn('# 评估结果', content)
-        headings = [line for line in content.splitlines() if line.startswith('## ')]
-        self.assertEqual(headings[:4], ['## 关键点', '## 概述', '## 详细分析', '## 局限与缺口'])
-        self.assertIn('### 准确率与独立测试', content)
-        key_points_block = content.split('## 关键点\n\n', 1)[1].split('\n\n## 概述', 1)[0]
-        self.assertEqual(sum(line.startswith('- ') for line in key_points_block.splitlines()), 4)
-        self.assertIn('## 关键引文', content)
-        self.assertIn('- [Official page](https://example.org/report?title=Useful+Title)', content)
-        self.assertEqual(content.count('https://example.org/report?title=Useful+Title'), 1)
-        self.assertIn('Markdown 字符区间 25–61', content)
-        self.assertNotIn('token=private', content)
-        self.assertNotIn('file_path', content)
-        self.assertEqual([item['id'] for item in rendered['evidence']], ['paper', 'web'])
-
-    def test_missing_layout_fields_are_filled_from_surviving_legacy_sections(self):
-        legacy = literature.Draft(sections=[literature.Section(
-            heading='准确率', paragraphs=[
-                literature.Claim(text='准确率为 92%。', citations=['paper']),
-                literature.Claim(text='材料报告了成本信息。', citations=['paper']),
-            ],
-        )])
-
-        rendered = literature._render_draft(
-            legacy, [self.paper], 'local', title='研究报告',
-        )
-
-        content = rendered['content']
-        self.assertIn('## 关键点\n\n- 准确率为 92%。 [paper]', content)
-        self.assertIn('## 概述', content)
-        self.assertIn('## 详细分析\n\n### 准确率', content)
-        self.assertEqual([item['id'] for item in rendered['evidence']], ['paper'])
-
-    def test_invalid_new_fields_are_rejected_and_title_falls_back_to_topic(self):
-        result = literature.ReporterOutput(
-            title='[malicious](https://bad.example)',
-            key_points=[literature.Claim(text='准确率为 95%。', citations=['paper'])],
-            overview=[literature.Claim(text='访问 https://bad.example', citations=['paper'])],
-            sections=[literature.Section(
-                heading='结果',
-                paragraphs=[literature.Claim(text='准确率为 92%。', citations=['paper'])],
-            )],
-        )
-
-        rendered = literature._render_draft(
-            result, [self.paper], 'local', title='系统准确率评估',
-        )
-
-        self.assertTrue(rendered['content'].startswith('# 系统准确率评估'))
-        self.assertNotIn('95%', rendered['content'])
-        self.assertNotIn('bad.example', rendered['content'])
-        self.assertIn('准确率为 92%', rendered['content'])
-        self.assertGreaterEqual(len(rendered['rejected']), 2)
-
-    def test_evidence_free_legacy_report_keeps_explicit_gap_and_no_references(self):
-        legacy = literature.Draft(limitations=[
-            literature.Claim(text='当前没有可核查资料，无法形成已核验结论。', citations=[]),
-        ])
-
-        rendered = literature._render_draft(legacy, [], 'web', title='研究报告')
-
-        self.assertIn('# 研究报告', rendered['content'])
-        self.assertIn('## 关键点', rendered['content'])
-        self.assertIn('## 概述', rendered['content'])
-        self.assertIn('## 详细分析', rendered['content'])
-        self.assertIn('## 局限与缺口', rendered['content'])
-        self.assertNotIn('## 关键引文', rendered['content'])
-        self.assertEqual(rendered['evidence'], [])
-
-    def test_overview_only_supported_output_remains_visible_in_report(self):
-        result = literature.ReporterOutput(
-            title='独立测试结果',
-            overview=[literature.Claim(text='网页记录系统经过独立测试。', citations=['web'])],
-        )
-
-        rendered = literature._render_draft(
-            result, [self.web], 'web', title='网页测试',
-        )
-
-        self.assertIn('## 概述\n\n网页记录系统经过独立测试。 [web]', rendered['content'])
-        self.assertIn('## 详细分析\n\n### 证据支持的发现', rendered['content'])
-        self.assertEqual([item['id'] for item in rendered['evidence']], ['web'])
+class ReporterMarkdownTests(unittest.TestCase):
+    def test_publication_uses_validated_inline_sources_and_keeps_model_layout(self):
+        evidence = [{'id': 'web', 'title': 'Official page', 'source_level': 'web_content',
+                     'text': 'Accuracy 92%.', 'original_url': 'https://example.org/report?title=Useful&token=private',
+                     'char_start': 25, 'char_end': 61}]
+        checked = report.validate_markdown('# 自选标题\n\n## 比较\n\n准确率 92% [[web]]', evidence)
+        published = literature._publish_report(checked)
+        self.assertIn('# 自选标题', published['content'])
+        self.assertIn('## 比较', published['content'])
+        self.assertIn('https://example.org/report?title=Useful', published['content'])
+        self.assertIn('Markdown 字符区间 25–61', published['content'])
+        self.assertNotIn('token=private', published['content'])
+        self.assertNotIn('[[web]]', published['content'])
+        self.assertNotIn('## 关键点', published['content'])
 
 
 if __name__ == '__main__':

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from src.agents import literature as workflow
 from src.integrations.model import ModelServiceError, StructuredOutputError
+from markdown_fixture import plan, review
 
 
 def researcher_output(*, action="finish", tool_name="", arguments=None, reason="", draft=None, findings=None):
@@ -15,7 +16,7 @@ def researcher_output(*, action="finish", tool_name="", arguments=None, reason="
         tool_name=tool_name,
         arguments=arguments or {},
         reason=reason,
-        draft=draft or workflow.Draft(),
+        draft=draft,
         findings=findings or [],
     )
 
@@ -91,7 +92,7 @@ class ModelFixture:
             # The two round test deliberately asks to continue after round two.
             if round_count >= 2:
                 action = 'research'
-            return workflow.PlannerOutput(
+            return plan(
                 requirements=['准确率及证据来源'],
                 plan=['检索 accuracy 并收集支持材料'],
                 source=selected_source,
@@ -102,6 +103,9 @@ class ModelFixture:
         if prompt_id == 'literature/researcher':
             self.researcher_payloads.append(payload)
             mode = payload['current_source']
+            if payload.get('phase') == 'draft':
+                evidence = payload.get('evidence', [])
+                return f"# 研究发现\n\n材料报告准确率为 92%。 [[{evidence[0]['id']}]]" if evidence else '> 局限：本轮没有获得可核查证据。'
             tools = {item['name'] for item in kwargs['template_context']['available_tools']}
             candidates = payload.get('current_candidates', [])
             evidence = payload.get('evidence', [])
@@ -125,20 +129,13 @@ class ModelFixture:
                     arguments={'query': 'accuracy', 'candidate_ids': [candidate['candidate_id']]},
                     reason='核对搜索结果中的准确率。',
                 )
-            citations = [item['id'] for item in mode_evidence[:1]]
-            draft = workflow.Draft(
-                sections=[workflow.Section(heading='研究发现', paragraphs=[workflow.Claim(text='材料报告准确率为 92%。', citations=citations)])]
-                if citations else [],
-                limitations=[workflow.Claim(text='本轮没有获得可核查证据。', citations=[])] if not citations else [],
-            )
-            findings = [workflow.Claim(text='材料记录准确率为 92%。', citations=citations)] if citations else []
-            return researcher_output(action='finish', draft=draft, findings=findings)
+            return researcher_output(action='finish')
 
         if prompt_id == 'literature/analyst':
             self.analyst_contexts.append(kwargs['template_context'])
             round_index = payload['current_round'] - 1
             sufficient = self.sufficient[min(round_index, len(self.sufficient) - 1)]
-            return workflow.AnalystOutput(
+            return review(
                 sufficient=sufficient,
                 covered_requirements=['准确率'] if sufficient else [],
                 gaps=[] if sufficient else ['需要更多来源交叉核对'],
@@ -153,17 +150,8 @@ class ModelFixture:
             if identifiers is None:
                 identifiers = [item['id'] for item in available]
             if available and identifiers:
-                return workflow.Draft(
-                    sections=[workflow.Section(
-                        heading='综合结果',
-                        paragraphs=[workflow.Claim(text='材料记录准确率为 92%。', citations=identifiers)],
-                    )],
-                    limitations=[workflow.Claim(text='尚需核对证据覆盖范围。', citations=[])],
-                )
-            return workflow.Draft(
-                sections=[],
-                limitations=[workflow.Claim(text='当前没有可核查证据，无法形成已核验结论。', citations=[])],
-            )
+                return '# 综合结果\n\n材料记录准确率为 92%。 ' + ' '.join(f'[[{item}]]' for item in identifiers)
+            return '> 局限：当前没有可核查证据，无法形成已核验结论。'
 
         raise AssertionError(f'Unexpected prompt id: {prompt_id}')
 
@@ -255,7 +243,7 @@ class WorkflowTests(unittest.TestCase):
 
         with patch.object(workflow, 'structured', side_effect=model):
             workflow._model(state, 'literature/planner', {}, workflow.PlannerOutput, node_role='planner')
-            workflow._model(state, 'literature/reporter', {}, workflow.ReporterOutput, node_role='reporter')
+            workflow._model(state, 'literature/reporter', {}, None, node_role='reporter')
             workflow._model(state, 'runtime/dispatcher', {}, workflow.DispatcherOutput, node_role='dispatcher')
 
         deltas = [data for kind, data in events if kind == 'model.delta']
@@ -393,7 +381,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(len(fixture.reporter_payloads), 1)
                 self.assertNotIn('candidates', fixture.reporter_payloads[0])
                 self.assertNotIn('# 阶段性研究结果', content)
-                self.assertIn('局限', content)
+                self.assertIn('需要更多来源交叉核对', content)
                 if initial == second:
                     self.assertEqual(round_sources[0], round_sources[1])
                 if initial != second:
@@ -419,12 +407,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(payload['rounds'][1]['draft'])
         self.assertGreaterEqual(len(payload['evidence']), 1)
         self.assertEqual([item['id'] for item in evidence], ['a1'])
-        self.assertIn('# accuracy', content)
-        self.assertIn('## 关键点', content)
-        self.assertIn('## 概述', content)
-        self.assertIn('## 详细分析', content)
-        self.assertIn('## 关键引文', content)
-        self.assertIn('### 综合结果', content)
+        self.assertIn('# 综合结果', content)
+        self.assertNotIn('## 关键点', content)
 
     def test_collection_ignores_history_and_uses_only_snapshot(self):
         selected = paper(7, 'Selected accuracy study', 'Accuracy was 92%.')
@@ -497,9 +481,12 @@ class WorkflowTests(unittest.TestCase):
                         return workflow.BackgroundOutput(source='paper', queries=['accuracy'])
                     return workflow.BackgroundOutput(source='paper', selected_candidate_ids=[], summary='无候选')
                 if prompt_id == 'literature/planner':
-                    return workflow.PlannerOutput(requirements=['accuracy'], plan=['检索准确率'], source='paper', action='report' if payload['round_count'] else 'research')
+                    return plan(requirements=['accuracy'], plan=['检索准确率'], source='paper', action='report' if payload['round_count'] else 'research')
                 if prompt_id == 'literature/researcher':
                     researcher_calls.append(payload)
+                    if payload.get('phase') == 'draft':
+                        evidence = payload['evidence']
+                        return f"# 结果\n\n准确率为 92%。 [[{evidence[0]['id']}]]" if evidence else '> 局限：没有证据。'
                     candidates = payload['current_candidates']
                     searches = [item for item in payload['tool_results'] if item.get('tool') == 'search_papers']
                     if not candidates:
@@ -509,14 +496,12 @@ class WorkflowTests(unittest.TestCase):
                     promoted = next((item for item in candidates if item['title'] == 'New high rank accuracy paper'), None)
                     if promoted and not payload['evidence']:
                         return researcher_output(action='tool', tool_name='collect_evidence', arguments={'query': 'accuracy', 'candidate_ids': [promoted['candidate_id']]})
-                    evidence = payload['evidence']
-                    draft = workflow.Draft(sections=[workflow.Section(heading='结果', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=[evidence[0]['id']])])]) if evidence else workflow.Draft()
-                    return researcher_output(action='finish', draft=draft)
+                    return researcher_output(action='finish')
                 if prompt_id == 'literature/analyst':
-                    return workflow.AnalystOutput(sufficient=True, covered_requirements=['accuracy'], review='ok')
+                    return review(sufficient=True, covered_requirements=['accuracy'], review='ok')
                 if prompt_id == 'literature/reporter':
                     evidence = payload['evidence']
-                    return workflow.Draft(sections=[workflow.Section(heading='结果', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=[evidence[0]['id']])])]) if evidence else workflow.Draft()
+                    return f"# 结果\n\n准确率为 92%。 [[{evidence[0]['id']}]]" if evidence else '> 局限：没有证据。'
                 raise AssertionError(prompt_id)
 
         def retrieve(project_id, query, source):
@@ -596,112 +581,6 @@ class WorkflowTests(unittest.TestCase):
         view = workflow._candidate_view(candidate, 'web', text_limit=240)
 
         self.assertEqual(sum(len(item['content']) for item in view['content_blocks']), 240)
-
-    def test_reporter_checks_section_headings_for_markup_links_and_numbers(self):
-        evidence = {'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study', 'source_level': 'abstract', 'text': 'Accuracy was 92%.'}
-        draft = workflow.Draft(sections=[
-            workflow.Section(heading='<script>alert(1)</script>', paragraphs=[workflow.Claim(text='准确率为92%', citations=['a1'])]),
-            workflow.Section(heading='见 https://example.org/private', paragraphs=[workflow.Claim(text='准确率为92%', citations=['a1'])]),
-            workflow.Section(heading='准确率100%', paragraphs=[workflow.Claim(text='准确率为92%', citations=['a1'])]),
-            workflow.Section(heading='准确率', paragraphs=[workflow.Claim(text='准确率为92%', citations=['a1'])]),
-        ])
-        rendered = workflow._render_draft(draft, [evidence], 'local', title='# 研究报告')
-        self.assertNotIn('<script>', rendered['content'])
-        self.assertNotIn('https://example.org/private', rendered['content'])
-        self.assertNotIn('准确率100%', rendered['content'])
-        self.assertIn('### 准确率', rendered['content'])
-        self.assertEqual([item['id'] for item in rendered['evidence']], ['a1'])
-
-    def test_reporter_with_no_valid_citations_restores_vetted_stage_findings(self):
-        evidence = {
-            'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study',
-            'source_level': 'abstract', 'text': 'Accuracy was 92%.',
-            'research_source': 'paper',
-        }
-        finding = workflow.Claim(text='阶段检查记录准确率为 92%。', citations=['a1']).model_dump()
-        state = {
-            'research': {'project_id': 1, 'query': 'accuracy', 'source': 'local'},
-            'history': [], 'background': {}, 'plan': {}, 'errors': [], 'warnings': [],
-            'rounds': [{
-                'source': 'paper', 'findings': [finding], 'draft': {'sections': [], 'limitations': []},
-                'review': {'sufficient': False, 'gaps': ['仍需与其他来源交叉核对'], 'next_steps': ['补充独立来源']},
-            }],
-            'evidence_pool': [evidence],
-            'candidate_pools': {'paper': [], 'web': []},
-        }
-        invalid_report = workflow.ReporterOutput(sections=[workflow.Section(
-            heading='错误引用', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=['invented'])],
-        )])
-        with patch.object(workflow, 'structured', return_value=invalid_report), self.assertLogs('tufa.agent', level='WARNING') as logs:
-            result = workflow._reporter(state, None)
-
-        self.assertIn('证据不足', result['content'])
-        self.assertIn('阶段性发现（尚未完成核验）', result['content'])
-        self.assertIn('阶段检查记录准确率为 92%。 [a1]', result['content'])
-        self.assertIn('仍需与其他来源交叉核对', result['content'])
-        self.assertNotIn('invented', result['content'])
-        self.assertEqual(result['final_evidence'], [evidence])
-        self.assertIn('report_validation run_id=na', logs.output[0])
-        self.assertIn('fallback_reason=no_valid_report_citations', logs.output[0])
-        self.assertNotIn('阶段检查记录', logs.output[0])
-
-    def test_reporter_with_no_valid_citations_and_no_vetted_findings_says_insufficient(self):
-        evidence = {
-            'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study',
-            'source_level': 'abstract', 'text': 'Accuracy was 92%.',
-            'research_source': 'paper',
-        }
-        state = {
-            'research': {'project_id': 1, 'query': 'accuracy', 'source': 'local'},
-            'history': [], 'background': {}, 'plan': {}, 'errors': [], 'warnings': [],
-            'rounds': [{
-                'source': 'paper', 'findings': [], 'draft': {'sections': [], 'limitations': []},
-                'review': {'sufficient': False, 'gaps': ['仍需核验来源'], 'next_steps': []},
-            }],
-            'evidence_pool': [evidence],
-            'candidate_pools': {'paper': [], 'web': []},
-        }
-        invalid_report = workflow.ReporterOutput(sections=[workflow.Section(
-            heading='错误引用', paragraphs=[workflow.Claim(text='准确率为 92%。', citations=['invented'])],
-        )])
-        with patch.object(workflow, 'structured', return_value=invalid_report):
-            result = workflow._reporter(state, None)
-
-        self.assertIn('证据不足', result['content'])
-        self.assertNotIn('阶段性发现（尚未完成核验）', result['content'])
-        self.assertIn('没有通过引用检查的报告结论或阶段性发现', result['content'])
-        self.assertIn('仍需核验来源', result['content'])
-        self.assertNotIn('invented', result['content'])
-        self.assertEqual(result['final_evidence'], [])
-
-    def test_reporter_fallback_bounds_two_large_rounds_and_keeps_analyst_gaps(self):
-        evidence = {'id': 'a1', 'paper_id': 7, 'title': 'Accuracy study', 'source_level': 'abstract', 'text': 'Accuracy was 92%.'}
-        many_sections = workflow.Draft(sections=[
-            workflow.Section(
-                heading=f'结果 {index}',
-                paragraphs=[workflow.Claim(text='材料支持相关研究结论。', citations=['a1']) for _ in range(3)],
-            )
-            for index in range(8)
-        ]).model_dump()
-        state = {
-            'research': {'project_id': 1, 'query': 'accuracy', 'source': 'local'},
-            'evidence_pool': [evidence],
-            'rounds': [
-                {'source': 'paper', 'draft': many_sections, 'review': {'sufficient': False, 'gaps': ['补充样本量及置信区间'] }},
-                {'source': 'web', 'draft': many_sections, 'review': {'sufficient': False, 'gaps': ['核对网页原文与更新时间'] }},
-            ],
-        }
-        result = workflow._reporter_fallback(state, '报告模型不可用。')
-        self.assertIn('# 研究报告', result['content'])
-        self.assertIn('## 关键点', result['content'])
-        self.assertIn('## 概述', result['content'])
-        self.assertIn('## 详细分析', result['content'])
-        self.assertIn('## 关键引文', result['content'])
-        self.assertNotIn('# 阶段性研究结果', result['content'])
-        self.assertNotIn('补充样本量及置信区间', result['content'])
-        self.assertIn('核对网页原文与更新时间', result['content'])
-        self.assertIn('材料支持相关研究结论', result['content'])
-        self.assertLessEqual(len(result['evidence']), 1)
 
 
 if __name__ == '__main__':

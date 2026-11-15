@@ -57,6 +57,8 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(replay(trace), '只能诊断，无法离线复现')
         self.assertEqual(replay([]), '诊断格式无效')
         self.assertEqual(replay({'context': []}), '诊断格式无效')
+        invalid_plan = {'kind': 'model_validation', 'context': {'prompt_id': 'literature/planner'}, 'response': 'missing control'}
+        self.assertTrue(replay(invalid_plan).startswith('复现：'))
 
     def test_write_failure_is_safe(self):
         with patch('src.infrastructure.diagnostics.data_directory', side_effect=OSError('sensitive')):
@@ -67,7 +69,7 @@ class DiagnosticsTest(unittest.TestCase):
         finish = {'action': 'finish'}
         self.assertEqual(replay({**base, 'payload': {'phase': 'act'}, 'response': finish}), '未复现')
         self.assertTrue(replay({**base, 'payload': {'phase': 'draft'}, 'response': finish}).startswith('复现：'))
-        draft = {'draft': {'sections': [], 'limitations': []}, 'findings': []}
+        draft = '# 研究结果\n\n结果 [[e1]]'
         self.assertEqual(replay({**base, 'payload': {'phase': 'draft'}, 'response': draft}), '未复现')
 
 

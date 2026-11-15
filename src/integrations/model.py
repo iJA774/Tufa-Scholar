@@ -248,7 +248,7 @@ def structured_input_units(prompt_id, payload, schema, *, template_context=None,
     A fixed timestamp keeps the result deterministic; the runtime timestamp has
     the same format and length. JSON serialization matches ``structured``.
     """
-    json_schema = schema.model_json_schema()
+    json_schema = schema.model_json_schema() if schema is not None else None
     prompt = _render_prompt(
         prompt_id,
         template_context,
@@ -594,49 +594,6 @@ def _native_decision_from_stream(call_fragments, native_tools, finish_reason):
     return _native_decision_from_message({'tool_calls': [call]}, native_tools, finish_reason)
 
 
-def _repair_reporter_legacy_limitations(content, validation_error, schema):
-    """Move only the known legacy sections[].limitations field, then validate."""
-    errors = validation_error.errors(include_input=False, include_context=False, include_url=False)
-    if not errors or any(
-        error.get('type') != 'extra_forbidden'
-        or len(error.get('loc', ())) != 3
-        or error['loc'][0] != 'sections'
-        or type(error['loc'][1]) is not int
-        or error['loc'][2] != 'limitations'
-        for error in errors
-    ):
-        return None
-    try:
-        report = json.loads(content, object_pairs_hook=_json_without_duplicate_keys)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(report, dict) or not isinstance(report.get('sections'), list):
-        return None
-    if not all(isinstance(section, dict) for section in report['sections']):
-        return None
-    legacy_limitations = []
-    for section in report['sections']:
-        if 'limitations' not in section:
-            continue
-        value = section['limitations']
-        if not isinstance(value, list):
-            return None
-        legacy_limitations.extend(value)
-        del section['limitations']
-    if not legacy_limitations:
-        return None
-    top_level = report.get('limitations', [])
-    if not isinstance(top_level, list):
-        return None
-    report['limitations'] = top_level + legacy_limitations
-    repaired = json.dumps(report, ensure_ascii=False)
-    try:
-        schema.model_validate_json(repaired, strict=True)
-    except ValidationError:
-        return None
-    return repaired
-
-
 def _usage_log_fields(usage):
     """Return only standard numeric usage fields, never provider response text."""
     usage = usage if isinstance(usage, dict) else {}
@@ -882,7 +839,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         config = dict(config, model=model_options['model_name'])
     if not config.get('base_url') or not config.get('model'):
         raise RuntimeError('请先在设置中配置模型地址和模型名称')
-    json_schema = schema.model_json_schema()
+    json_schema = schema.model_json_schema() if schema is not None else None
     tool_definitions = _native_tool_definitions(native_tools)
     headers = {'Authorization': 'Bearer ' + config['api_key']} if config.get('api_key') else {}
     scope = diagnostic_context()
@@ -928,7 +885,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         secrets = (config['api_key'],) if config.get('api_key') else ()
         try:
             request_body = {'model': config['model'], 'messages': list(messages), **options}
-            if native_tools is None:
+            if native_tools is None and schema is not None:
                 request_body['response_format'] = {'type': 'json_object'}
             elif tool_definitions:
                 request_body['tools'] = tool_definitions
@@ -960,7 +917,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 _emit_stream(on_stream, 'model.delta', {'attempt': attempt, 'phase': phase, 'text': display})
             repaired = None
             try:
-                result = (
+                result = content if schema is None else (
                     schema.model_validate(native_decision, strict=True)
                     if native_tools is not None
                     else schema.model_validate_json(content, strict=True)
@@ -971,13 +928,13 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 error_types = {error['type'] for error in exc.errors(include_input=False)}
                 if error_types == {'json_invalid'}:
                     repaired = _repair_structured_json(content, finish_reason)
-                elif prompt_id == 'literature/reporter':
-                    repaired = _repair_reporter_legacy_limitations(content, exc, schema)
                 if repaired is None:
                     raise
                 result = schema.model_validate_json(repaired, strict=True)
             else:
-                if native_tools is None:
+                if schema is None and (not isinstance(content, str) or not content.strip() or finish_reason in ('length', 'content_filter')):
+                    raise ValueError('incomplete text response')
+                if native_tools is None and schema is not None:
                     json.loads(content, object_pairs_hook=_json_without_duplicate_keys,
                                parse_constant=_reject_json_constant)
             completed = {'attempt': attempt, 'phase': phase}
@@ -1026,6 +983,6 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                            diagnostic_id,
                            _usage_log_fields(usage))
             output_cap_reached = finish_reason == 'length' and 'max_completion_tokens' in request_body
-            if attempt == 2 or native_tools is not None or output_cap_reached:
-                raise StructuredOutputError('模型返回的结构化结果无效') from None
+            if attempt == 2 or native_tools is not None or output_cap_reached or schema is None:
+                raise StructuredOutputError('模型返回的文本无效' if schema is None else '模型返回的结构化结果无效') from None
             validation_feedback = errors

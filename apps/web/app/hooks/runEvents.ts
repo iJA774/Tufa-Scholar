@@ -191,6 +191,13 @@ export function extractVisibleModelText(source: string, node: string, mode?: Res
   const quick = node === "dispatcher" && mode === "quick";
   const deepOutput = node === "reporter" || node === "researcher";
   if (!quick && !deepOutput) return "";
+  if (deepOutput && !/^\s*(?:```json\s*)?\{/.test(source)) {
+    const visible = removePrivateThought(source).replace(/```tufa-control[\s\S]*$/i, "").trim();
+    const unwrapped = /^```(?:markdown|md)[ \t]*(?:\r?\n|$)/i.test(visible)
+      ? visible.replace(/^```(?:markdown|md)[ \t]*(?:\r?\n|$)/i, "").replace(/\r?\n```[ \t]*$/, "")
+      : visible;
+    return unwrapped.replace(/\[\[([^\]]+)\]\]/g, "[$1]").trim();
+  }
   const input = removePrivateThought(source).replace(/^\s*```(?:json)?\s*/i, "");
   const rootStart = input.indexOf("{");
   if (rootStart === -1) return "";
@@ -251,6 +258,12 @@ export function buildModelPreviews(events: RunEvent[], mode?: ResearchMode | "au
   const previews = new Map<string, ModelPreview>();
   const raw = new Map<string, string>();
   for (const event of events) {
+    if (event.kind === "node.completed" && ["planner", "analyst"].includes(String(event.data.node)) && typeof event.data.body === "string") {
+      const node = String(event.data.node);
+      const text = removePrivateThought(event.data.body).replace(/```tufa-control[\s\S]*$/i, "").trim();
+      if (text) previews.set(`${node}:${event.id}`, { key: `${node}:${event.id}`, node, text, status: "complete" });
+      continue;
+    }
     if (!event.kind.startsWith("model.")) continue;
     const node = typeof event.data.node === "string" ? event.data.node : "";
     const canShow = (node === "dispatcher" && mode === "quick") || node === "reporter" || node === "researcher";

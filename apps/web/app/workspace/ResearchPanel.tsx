@@ -311,7 +311,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
       <section id={reportPanelId} role="tabpanel" aria-labelledby={reportTabId} hidden={tab !== "report"} tabIndex={0} className={`${styles.tabPanel} ${styles.reportPanel}`}>
         {hasReport && report ? <>
           <article className={styles.reportContent}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+            <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
               a: ({ href, children }) => {
                 const safeHref = safeSourceUrl(href);
                 return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
@@ -325,7 +325,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
           </div>}
         </> : reportPreview ? <article className={`${styles.reportContent} ${styles.reportPreview}`}>
           <div className={styles.reportPreviewLabel}>实时草稿 · 未核验</div>
-          <p>{reportPreview.text}</p>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({children}) => <span>{children}</span>, img: () => null }} skipHtml>{reportPreview.text}</ReactMarkdown>
         </article> : <p className={styles.emptyState}>报告生成后会显示在这里。</p>}
       </section>
 
@@ -405,13 +405,13 @@ export default function ResearchPanel({ run, report, events, open, status, stage
             const draftKey = `${run.id}:${preview.key}`;
             const complete = preview.status === "complete";
             const expanded = draftExpanded[draftKey] ?? !complete;
-            const title = preview.node === "reporter" ? "报告草稿" : "研究草稿";
+            const title = preview.node === "reporter" ? "报告草稿" : preview.node === "planner" ? "研究计划" : preview.node === "analyst" ? "研究审查" : "研究草稿";
             const draftDetailsId = `draft-details-${run.id}-${preview.key}`;
             return <article className={styles.streamedDraft} key={preview.key}>
               {complete ? <button type="button" className={styles.liveActivityToggle} aria-expanded={expanded} aria-controls={expanded ? draftDetailsId : undefined} onClick={() => setDraftExpanded(current => ({ ...current, [draftKey]: !expanded }))}>
                 <strong>{title}</strong><small>实时输出 · 未核验 · 已生成</small><span className={`${styles.liveActivityChevron} ${expanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
               </button> : <div><strong className={active ? styles.liveActivityShimmer : ""}>{title}</strong><span>实时输出 · 未核验</span></div>}
-              {expanded && <p id={draftDetailsId}>{preview.text}</p>}
+              {expanded && <div id={draftDetailsId} className={styles.reportContent}><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({children}) => <span>{children}</span>, img: () => null }} skipHtml>{preview.text}</ReactMarkdown></div>}
             </article>;
           })}
         </section>}

@@ -10,8 +10,8 @@ class ReporterGapsTests(unittest.TestCase):
         return {
             "research": {"query": "研究问题", "source": "web", "research_depth": depth},
             "rounds": [
-                {"review": old, "draft": {"limitations": [{"text": "旧缺口", "citations": []}]}},
-                {"review": current, "draft": {"limitations": []}},
+                {"review": old, "draft": "> 局限：旧缺口"},
+                {"review": current, "draft": ""},
             ],
             "current_review": current,
             "background": {"gaps": ["背景旧缺口"]},
@@ -38,22 +38,28 @@ class ReporterGapsTests(unittest.TestCase):
         self.assertEqual(literature._outstanding_gaps(state, fallback=True), ["当前缺口", "当前补查"])
         self.assertIn("当前缺口", literature._warning_caveats(state))
 
-    def test_sufficient_review_supersedes_latest_draft_process_gap(self):
-        state = self.state()
-        state["rounds"][-1]["draft"]["limitations"] = [
-            {"text": "本轮尚未找到论文原文", "citations": []},
-        ]
-        fallback = literature._reporter_fallback(state, "报告模型不可用")
-        self.assertNotIn("本轮尚未找到论文原文", fallback["content"])
-        state["current_review"] = {}
-        state["rounds"][-1]["review"] = {}
-        fallback_without_review = literature._reporter_fallback(state, "报告模型不可用")
-        self.assertIn("本轮尚未找到论文原文", fallback_without_review["content"])
-
     def test_background_gaps_retained_when_no_review_exists(self):
         state = self.state()
         state.update(rounds=[], current_review={})
         self.assertIn("背景旧缺口", literature._outstanding_gaps(state, fallback=True))
+
+    def test_fallback_preserves_latest_valid_scoped_draft(self):
+        state = self.state()
+        state['research'].update(source='collection', paper_ids=[1])
+        state['evidence_pool'] = [
+            {'id': 'old', 'paper_id': 1, 'title': 'old', 'text': 'accuracy 80%', 'source_level': 'abstract'},
+            {'id': 'new', 'paper_id': 1, 'title': 'new', 'text': 'accuracy 92%', 'source_level': 'abstract'},
+            {'id': 'outside', 'paper_id': 2, 'title': 'outside', 'text': 'accuracy 99%', 'source_level': 'abstract'},
+        ]
+        state['rounds'][0]['draft'] = '# 旧稿\n\naccuracy 80% [[old]]'
+        state['rounds'][1]['draft'] = '# 新稿\n\naccuracy 92% [[new]]\n\naccuracy 99% [[outside]]'
+        fallback = literature._reporter_fallback(state, '终稿失败')
+        self.assertIn('# 新稿', fallback['content'])
+        self.assertIn('accuracy 92%', fallback['content'])
+        self.assertNotIn('旧稿', fallback['content'])
+        self.assertNotIn('99%', fallback['content'])
+        self.assertIn('最近一份通过校验的研究草稿', fallback['content'])
+        self.assertEqual([item['id'] for item in fallback['evidence']], ['new'])
 
     def test_deep_review_retains_current_contradiction(self):
         state = self.state("deep")

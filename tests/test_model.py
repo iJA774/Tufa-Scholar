@@ -85,8 +85,9 @@ class ModelTests(unittest.TestCase):
             clock.now.side_effect = clock_values
             for index, (prompt_id, role, mode, tools) in enumerate(cases):
                 with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response(json.dumps(output))) as post:
-                    result = structured(prompt_id, payload, Output, template_context=self.context(role, mode, tools))
-                self.assertEqual(result.model_dump(), output)
+                    text_output = prompt_id in {'literature/planner', 'literature/researcher', 'literature/analyst', 'literature/reporter'}
+                    result = structured(prompt_id, payload, None if text_output else Output, template_context=self.context(role, mode, tools))
+                self.assertEqual(json.loads(result) if text_output else result.model_dump(), output)
                 body = post.call_args.kwargs['json']
                 system, user = body['messages']
                 expected_time = clock_values[index].isoformat(timespec='seconds')
@@ -97,12 +98,16 @@ class ModelTests(unittest.TestCase):
                 for tool in tools:
                     self.assertNotIn(tool['name'], system['content'])
                     self.assertNotIn(tool['description'], system['content'])
-                self.assertIn(json.dumps(Output.model_json_schema(), ensure_ascii=False, separators=(',', ':')), system['content'])
+                if not text_output:
+                    self.assertIn(json.dumps(Output.model_json_schema(), ensure_ascii=False, separators=(',', ':')), system['content'])
                 self.assertNotIn('{{ CURRENT_TIME }}', system['content'])
                 self.assertNotIn('{{ OUTPUT_SCHEMA }}', system['content'])
                 self.assertEqual(user['role'], 'user')
                 self.assertEqual(json.loads(user['content']), payload)
-                self.assertEqual(body['response_format'], {'type': 'json_object'})
+                if text_output:
+                    self.assertNotIn('response_format', body)
+                else:
+                    self.assertEqual(body['response_format'], {'type': 'json_object'})
         self.assertEqual(clock.now.call_count, len(cases))
 
     def test_structured_input_units_measure_rendered_system_and_serialized_payload_deterministically(self):
@@ -762,25 +767,20 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result.answer, 'ok')
         self.assertEqual(post.call_count, 1)
 
-    def test_reporter_repairs_only_legacy_section_limitations_and_validates_merged_data(self):
-        from src.agents.literature import ReporterOutput
-
-        output = {
-            'sections': [{
-                'heading': '研究结果',
-                'paragraphs': [{'text': '已有结论。', 'citations': ['E1']}],
-                'limitations': [{'text': '章节局限。', 'citations': []}],
-            }],
-            'limitations': [{'text': '报告局限。', 'citations': []}],
-        }
+    def test_reporter_returns_markdown_without_json_mode(self):
         config = {'base_url': 'https://report-repair.example/v1', 'model': 'test'}
-        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response(json.dumps(output))) as post:
-            result = structured('literature/reporter', {'evidence': [{'id': 'E1'}]}, ReporterOutput,
-                                template_context=self.context())
+        with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=self.response('# 研究\n\n结论 [[E1]]')) as post:
+            result = structured('literature/reporter', {'evidence': [{'id': 'E1'}]}, None, template_context=self.context())
+        self.assertEqual(result, '# 研究\n\n结论 [[E1]]')
+        self.assertNotIn('response_format', post.call_args.kwargs['json'])
 
-        self.assertEqual(post.call_count, 1)
-        self.assertEqual([item.text for item in result.limitations], ['报告局限。', '章节局限。'])
-        self.assertEqual(result.sections[0].paragraphs[0].citations, ['E1'])
+    def test_incomplete_markdown_is_rejected(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        for reason in ('length', 'content_filter'):
+            response = self.response('partial', finish_reason=reason)
+            with self.subTest(reason=reason), patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response):
+                with self.assertRaises(StructuredOutputError):
+                    structured('literature/reporter', {}, None, template_context=self.context())
 
     def test_planner_gets_local_filenames_and_role_without_rendering_context_values_again(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}

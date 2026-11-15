@@ -5,17 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+from markdown_fixture import plan, review
 
 
-def researcher_output(*, action="finish", tool_name="", arguments=None, reason="", draft=None, findings=None):
-    """Return a lightweight test response independent of either phase schema."""
+def researcher_output(*, action="finish", tool_name="", arguments=None, reason=""):
     return SimpleNamespace(
         action=action,
         tool_name=tool_name,
         arguments=arguments or {},
         reason=reason,
-        draft=draft or workflow.Draft(),
-        findings=findings or [],
     )
 
 
@@ -53,7 +51,7 @@ class WebWorkflowModel:
             )
         if prompt_id == 'literature/planner':
             count = payload['round_count']
-            return workflow.PlannerOutput(
+            return plan(
                 requirements=['核实准确率'],
                 plan=['搜索官方准确率结果'],
                 source='web',
@@ -63,6 +61,10 @@ class WebWorkflowModel:
         if prompt_id == 'literature/researcher':
             candidates = payload.get('current_candidates', [])
             evidence = [item for item in payload.get('evidence', []) if item.get('source_level') in {'web_snippet', 'web_content'}]
+            if payload['phase'] == 'draft':
+                if evidence:
+                    return f"## 网页资料\n\n搜索结果报告准确率为 92%。 [[{evidence[0]['id']}]]"
+                return '> 局限：当前没有网页证据可用于核验。'
             if not candidates and (self.research_search_limit is None or self.research_searches < self.research_search_limit):
                 self.research_searches += 1
                 return researcher_output(
@@ -74,14 +76,9 @@ class WebWorkflowModel:
                     action='tool', tool_name='collect_evidence',
                     arguments={'query': 'accuracy', 'candidate_ids': [candidates[0]['candidate_id']]},
                 )
-            draft = workflow.Draft(
-                sections=[workflow.Section(heading='网页资料', paragraphs=[workflow.Claim(text='搜索结果报告准确率为 92%。', citations=[evidence[0]['id']])])]
-                if evidence else [],
-                limitations=[workflow.Claim(text='当前没有网页证据可用于核验。', citations=[])] if not evidence else [],
-            )
-            return researcher_output(action='finish', draft=draft)
+            return researcher_output(action='finish')
         if prompt_id == 'literature/analyst':
-            return workflow.AnalystOutput(
+            return review(
                 sufficient=False,
                 covered_requirements=[],
                 gaps=['仍需核对页面原文和网页获取时间'],
@@ -92,11 +89,9 @@ class WebWorkflowModel:
             self.reporter_payloads.append(payload)
             evidence = payload.get('evidence', [])
             if not evidence:
-                return workflow.Draft(sections=[], limitations=[workflow.Claim(text='当前没有可核查的网页证据。', citations=[])])
-            return workflow.Draft(
-                sections=[workflow.Section(heading='检索结果', paragraphs=[workflow.Claim(text='搜索摘要报告准确率为 92%。', citations=[evidence[0]['id']])])],
-                limitations=[workflow.Claim(text='搜索摘要不代表完整网页正文。', citations=[evidence[0]['id']])],
-            )
+                return '> 局限：当前没有可核查的网页证据。'
+            identifier = evidence[0]['id']
+            return f'## 检索结果\n\n搜索摘要报告准确率为 92%。 [[{identifier}]]\n\n搜索摘要不代表完整网页正文。 [[{identifier}]]'
         raise AssertionError(prompt_id)
 
 
@@ -174,16 +169,13 @@ class WebWorkflowTests(unittest.TestCase):
                         return workflow.BackgroundOutput(source='web', queries=['accuracy'])
                     return workflow.BackgroundOutput(source='web', summary='没有候选', gaps=['暂无候选'])
                 if prompt_id == 'literature/planner':
-                    return workflow.PlannerOutput(
+                    return plan(
                         requirements=['核实准确率'], plan=['accuracy plan'], source='web',
                         action='research' if payload['round_count'] == 0 else 'report', rationale='fixture',
                     )
                 if prompt_id == 'literature/researcher':
                     if payload['phase'] == 'draft':
-                        return researcher_output(
-                            action='finish',
-                            draft=workflow.Draft(limitations=[workflow.Claim(text='没有取得可核查证据。', citations=[])]),
-                        )
+                        return '> 局限：未能取得可核查证据。'
                     act_count = sum(phase.get('phase') == 'act' for role, phase in model_calls if role == 'literature/researcher')
                     if act_count in {1, 3}:
                         return researcher_output(
@@ -192,9 +184,9 @@ class WebWorkflowTests(unittest.TestCase):
                         )
                     return researcher_output(action='finish')
                 if prompt_id == 'literature/analyst':
-                    return workflow.AnalystOutput(sufficient=False, gaps=['无证据'], review='资料不足。')
+                    return review(sufficient=False, gaps=['无证据'], review='资料不足。')
                 if prompt_id == 'literature/reporter':
-                    return workflow.ReporterOutput(limitations=[workflow.Claim(text='没有取得可核查证据。', citations=[])])
+                    return '> 局限：未能取得可核查证据。'
                 raise AssertionError(prompt_id)
 
         search_responses = [[], RuntimeError('first failure'), [], RuntimeError('later failure')]
@@ -226,10 +218,7 @@ class WebWorkflowTests(unittest.TestCase):
                     action='tool', tool_name='read_web_page',
                     arguments={'candidate_id': 'web:inaccessible', 'offset': 0},
                 )
-            return researcher_output(
-                action='finish',
-                draft=workflow.Draft(limitations=[workflow.Claim(text='网页无法读取，证据不足。', citations=[])]),
-            )
+            return '> 局限：网页无法读取，证据不足。'
 
         state = {
             'research': {'project_id': 1, 'query': 'accuracy', 'source': 'web'},
@@ -251,7 +240,7 @@ class WebWorkflowTests(unittest.TestCase):
 
         self.assertEqual(invoke.call_count, 1)
         self.assertEqual([payload['phase'] for _, payload in model_calls], ['act', 'act', 'draft'])
-        self.assertEqual(result['current_draft']['limitations'][0]['text'], '网页无法读取，证据不足。')
+        self.assertIn('网页无法读取，证据不足。', result['current_draft'])
         self.assertEqual(result['errors'][-2]['code'], 'web_page_read_failed')
         self.assertEqual(result['errors'][-1]['code'], 'duplicate_web_read_skipped')
         self.assertNotIn(candidate['url'], str(result['errors']))

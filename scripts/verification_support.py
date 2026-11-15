@@ -143,7 +143,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     message['tool_calls'] = tool_calls
                 self._send_json({'choices': [{'index': 0, 'message': message, 'finish_reason': finish_reason}]})
             return
-        content = json.dumps(result, ensure_ascii=False)
+        content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
         prompt_tokens = max(1, len(system) // 4) + max(1, len(messages[1].get('content', '')) // 4) if len(messages) > 1 else max(1, len(system) // 4)
         completion_tokens = max(1, len(content) // 4)
         if request.get('stream') and role == 'reporter' and 'stream-fixture' in payload.get('question', ''):
@@ -213,13 +213,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
             source = preferred if preferred in allowed else allowed[0]
             count = payload.get('round_count', 0)
             two_rounds = 'two-rounds' in folded or 'context-cutoff-fixture' in folded
-            return {
+            control = {
                 'requirements': ['查证准确率及其来源'],
                 'plan': ['收集并核对与问题直接相关的证据'],
                 'source': source,
                 'action': 'research' if count == 0 or (two_rounds and count == 1) else 'report',
                 'rationale': '使用隔离 HTTP 验收计划。',
+                'completion_confirmed': False,
             }
+            return '核查准确率及其来源。\n\n```tufa-control\n' + json.dumps(control, ensure_ascii=False) + '\n```'
 
         if role == 'researcher':
             candidates = payload.get('current_candidates', [])
@@ -246,24 +248,21 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return {'action': 'finish'}
             if matching:
                 claim = '网页搜索摘要记录准确率为 92%。' if mode == 'web' else '论文证据记录准确率为 92%。'
-                return {
-                    'draft': {'sections': [{'heading': '研究结果', 'paragraphs': [{'text': claim, 'citations': [matching[0]['id']]}]}], 'limitations': []},
-                    'findings': [{'text': claim, 'citations': [matching[0]['id']]}],
-                }
-            return {
-                'draft': {'sections': [], 'limitations': [{'text': '本轮没有获得可核查资料，无法确认准确率。', 'citations': []}]},
-                'findings': [],
-            }
+                return f"# 研究结果\n\n{claim} [[{matching[0]['id']}]]"
+            return '# 研究结果\n\n本轮没有获得可核查资料，无法确认准确率。'
 
         if role == 'analyst':
             has_evidence = bool(payload.get('evidence'))
-            return {
+            control = {
                 'sufficient': has_evidence,
                 'covered_requirements': ['准确率'] if has_evidence else [],
                 'gaps': [] if has_evidence else ['没有取得可核查证据'],
                 'next_steps': [] if has_evidence else ['更换查询或来源后重新检索'],
-                'review': '模拟审查了本轮初稿及证据。',
+                'unresolved_contradictions': [],
+                'evidence_reliability_confirmed': has_evidence,
+                'important_conclusions_cross_validated': has_evidence,
             }
+            return '已审查当前证据。\n\n```tufa-control\n' + json.dumps(control, ensure_ascii=False) + '\n```'
 
         if role == 'reporter':
             evidence = payload.get('evidence', [])
@@ -271,19 +270,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 source = evidence[0].get('source_level')
                 claim = '网页搜索摘要记录准确率为 92%。' if source in {'web_content', 'web_snippet'} else '论文证据记录准确率为 92%。'
                 citation_id = 'fixture-unavailable' if 'reporter-invalid-citation' in folded else evidence[0]['id']
-                section = {'heading': '核查结果', 'paragraphs': [{'text': claim, 'citations': [citation_id]}]}
-                if 'dense-search-fixture' in folded:
-                    section['limitations'] = [{'text': '尚需核对更多独立来源。', 'citations': []}]
-                report = {'sections': [section], 'limitations': []}
-                if 'dense-search-fixture' in folded:
-                    report['title'] = '准确率核查'
-                    report['key_points'] = [{'text': '网页资料给出了可核查的准确率。', 'citations': [citation_id]}]
-                    report['overview'] = [{'text': '核查以模拟机构发布的结果为依据。', 'citations': [citation_id]}]
-                return report
-            return {
-                'sections': [],
-                'limitations': [{'text': '当前没有可核查证据，无法确认准确率。', 'citations': []}],
-            }
+                return f'# 准确率核查\n\n## 核查结果\n\n{claim} [[{citation_id}]]'
+            return '# 准确率核查\n\n当前没有可核查证据，无法确认准确率。'
 
         raise AssertionError(f'Unexpected model node role: {role}')
 
