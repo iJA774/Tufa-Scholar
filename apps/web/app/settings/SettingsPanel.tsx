@@ -3,7 +3,7 @@
 import { type ChangeEvent, type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
 import { api } from "../workspace/api";
-import type { WorkspacePreferences } from "../workspace/preferences";
+import { DEFAULT_PREFERENCES, type ReportFormat, type WorkspacePreferences } from "../workspace/preferences";
 import WebSearchSettings from "./WebSearchSettings";
 import RuntimeLogsSettings from "./RuntimeLogsSettings";
 import styles from "./SettingsPanel.module.css";
@@ -30,6 +30,137 @@ const relevanceOptions = [
   { value: "standard", label: "标准（推荐）", description: "结合研究问题、Planner 子任务和候选标题摘要评分；明显不相关的结果不进入优先取证队列。" },
   { value: "strict", label: "严格", description: "优先采用直接回答当前研究子问题的材料，降低噪声；可能漏掉有价值的间接证据。" },
 ] as const;
+
+const depthOptions = [
+  { value: "light", label: "轻量" },
+  { value: "standard", label: "标准（默认）" },
+  { value: "deep", label: "深入" },
+] as const;
+
+const depthDescriptions: Record<WorkspacePreferences["researchDepth"], string> = {
+  light: "预算上限：1 轮、4 次工具动作、1 次背景搜索；证据充分时可提前结束。",
+  standard: "预算上限：2 轮、10 次工具动作、2 次背景搜索；证据充分时可提前结束。",
+  deep: "预算上限：3 轮、15 次工具动作、3 次背景搜索；证据充分时可提前结束。可能消耗大量 Token。",
+};
+
+const reportFormatOptions: { value: ReportFormat; label: string }[] = [
+  { value: "academic", label: "学术综述" },
+  { value: "exploratory", label: "探索发现" },
+];
+
+function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange: (value: ReportFormat) => void }) {
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menuId = useId();
+  const selectedIndex = Math.max(0, reportFormatOptions.findIndex(option => option.value === value));
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+
+  useEffect(() => {
+    if (!open) setActiveIndex(selectedIndex);
+  }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [open]);
+
+  const chooseFormat = (index: number) => {
+    const option = reportFormatOptions[index];
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+    trigger.current?.focus();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      return;
+    }
+    if (event.key === "Tab") {
+      if (open) setOpen(false);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      if (!open) {
+        setActiveIndex(selectedIndex);
+        setOpen(true);
+      } else {
+        setActiveIndex(index => (index + delta + reportFormatOptions.length) % reportFormatOptions.length);
+      }
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      setActiveIndex(event.key === "Home" ? 0 : reportFormatOptions.length - 1);
+      setOpen(true);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (open) chooseFormat(activeIndex);
+      else {
+        setActiveIndex(selectedIndex);
+        setOpen(true);
+      }
+    }
+  };
+
+  return <div ref={root} className={styles.reportFormatPicker}>
+    <button
+      ref={trigger}
+      className={styles.reportFormatTrigger}
+      type="button"
+      role="combobox"
+      aria-label="报告格式"
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-controls={menuId}
+      aria-activedescendant={open ? `${menuId}-option-${activeIndex}` : undefined}
+      onClick={() => {
+        if (open) setOpen(false);
+        else {
+          setActiveIndex(selectedIndex);
+          setOpen(true);
+        }
+      }}
+      onKeyDown={handleKeyDown}
+    >
+      <span>{reportFormatOptions[selectedIndex]?.label}</span>
+      <svg className={open ? styles.reportFormatChevronOpen : styles.reportFormatChevron} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+    </button>
+    <div
+      id={menuId}
+      className={`${styles.reportFormatMenu} ${open ? styles.reportFormatMenuOpen : styles.reportFormatMenuClosed}`}
+      role="listbox"
+      aria-label="报告格式"
+      aria-hidden={!open}
+      inert={!open}
+    >
+      {reportFormatOptions.map((option, index) => <div
+        id={`${menuId}-option-${index}`}
+        key={option.value}
+        className={`${styles.reportFormatOption} ${index === activeIndex ? styles.reportFormatOptionActive : ""} ${option.value === value ? styles.reportFormatOptionSelected : ""}`}
+        role="option"
+        aria-selected={option.value === value}
+        onMouseEnter={() => setActiveIndex(index)}
+        onClick={() => chooseFormat(index)}
+      >
+        <span>{option.label}</span>
+        <svg className={styles.reportFormatCheck} viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3.2 3.2L13 4.5" /></svg>
+      </div>)}
+    </div>
+  </div>;
+}
 
 function SettingsHelp({ label, children }: { label: string; children: ReactNode }) {
   const descriptionId = useId();
@@ -139,6 +270,11 @@ export default function SettingsPanel({
     onPreferencesChange({ ...preferences, [key]: value });
   };
 
+  const resetPreferences = () => {
+    onPreferencesChange({ ...DEFAULT_PREFERENCES, modelChoice: preferences.modelChoice });
+    notify("界面偏好已重置，模型选择与服务配置已保留。");
+  };
+
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     let next = index;
     if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % tabs.length;
@@ -238,28 +374,28 @@ export default function SettingsPanel({
               <h2>本次提问模型</h2>
               <ModelControls value={preferences.modelChoice} onChange={value => updatePreference("modelChoice", value)} disabled={false} />
             </section>
+
+            <section className={styles.resetSection}>
+              <p>恢复界面偏好默认值。API、URL 和模型选择会保留。</p>
+              <button className={styles.resetButton} type="button" onClick={resetPreferences}>重置所有设置</button>
+            </section>
           </div>}
 
           {activeTab === "research" && <section className={`${styles.card} ${styles.researchPreferences}`}>
             <div className={styles.settingControl}>
               <div className={styles.settingHeading}>
                 <strong>研究深度</strong>
-                <SettingsHelp label="研究深度说明">档位设置研究预算上限，不代表必须完成的轮数或搜索次数。研究者会按计划收集资料，Analyst 检查证据缺口后可建议补充检索；证据充分时 Planner 可以提前结束。预算依次为：轻量 1 轮、4 次 researcher 工具动作、1 次背景搜索；标准 2 轮、10 次工具动作、2 次背景搜索；深入 3 轮、15 次工具动作、3 次背景搜索。分析证据缺口始终开启，补充检索受当前档位预算约束，预计消耗由低到高。</SettingsHelp>
               </div>
-              <fieldset className={styles.depthOptions} aria-label="研究深度">
-                <label className={preferences.researchDepth === "light" ? styles.depthOptionSelected : styles.depthOption}>
-                  <input type="radio" name="research-depth" value="light" checked={preferences.researchDepth === "light"} onChange={() => updatePreference("researchDepth", "light")} />
-                  <span>轻量</span>
-                </label>
-                <label className={preferences.researchDepth === "standard" ? styles.depthOptionSelected : styles.depthOption}>
-                  <input type="radio" name="research-depth" value="standard" checked={preferences.researchDepth === "standard"} onChange={() => updatePreference("researchDepth", "standard")} />
-                  <span>标准（默认）</span>
-                </label>
-                <label className={preferences.researchDepth === "deep" ? styles.depthOptionSelected : styles.depthOption}>
-                  <input type="radio" name="research-depth" value="deep" checked={preferences.researchDepth === "deep"} onChange={() => updatePreference("researchDepth", "deep")} />
-                  <span>深入</span>
-                </label>
+              <fieldset className={styles.segmentedOptions} aria-label="研究深度">
+                {depthOptions.map(option => <label key={option.value} className={`${styles.segmentedOption} ${preferences.researchDepth === option.value ? styles.segmentedOptionSelected : ""}`}>
+                  <input type="radio" name="research-depth" value={option.value} checked={preferences.researchDepth === option.value} onChange={() => updatePreference("researchDepth", option.value)} />
+                  <span>{option.label}</span>
+                </label>)}
               </fieldset>
+              <p className={`${styles.depthDescription} ${preferences.researchDepth === "deep" ? styles.depthDescriptionWarning : ""}`} aria-live="polite">
+                <strong>{depthOptions.find(option => option.value === preferences.researchDepth)?.label}：</strong>
+                {depthDescriptions[preferences.researchDepth]}
+              </p>
             </div>
 
             <div className={`${styles.settingControl} ${styles.settingControlBordered}`}>
@@ -276,8 +412,8 @@ export default function SettingsPanel({
               <div className={styles.settingHeading}>
                 <strong>相关性过滤强度</strong>
               </div>
-              <fieldset className={`${styles.relevanceOptions} ${preferences.relevanceFilter === "strict" ? styles.relevanceOptionsStrict : ""}`} aria-label="相关性过滤强度">
-                {relevanceOptions.map(option => <label key={option.value} className={preferences.relevanceFilter === option.value ? `${styles.relevanceOption} ${styles.relevanceOptionSelected} ${option.value === "strict" ? styles.relevanceOptionStrict : ""}` : styles.relevanceOption}>
+              <fieldset className={`${styles.segmentedOptions} ${preferences.relevanceFilter === "strict" ? styles.segmentedOptionsStrict : ""}`} aria-label="相关性过滤强度">
+                {relevanceOptions.map(option => <label key={option.value} className={`${styles.segmentedOption} ${preferences.relevanceFilter === option.value ? styles.segmentedOptionSelected : ""} ${option.value === "strict" ? styles.segmentedOptionStrict : ""}`}>
                   <input type="radio" name="relevance-filter" value={option.value} checked={preferences.relevanceFilter === option.value} onChange={() => updatePreference("relevanceFilter", option.value)} />
                   {option.value === "strict" && preferences.relevanceFilter === "strict" && <svg className={styles.warningIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 22 20.5H2L12 3.5Z" /><path d="M12 9v5.3M12 17.6v.1" /></svg>}
                   <span>{option.label}</span>
@@ -291,10 +427,7 @@ export default function SettingsPanel({
 
             <div className={`${styles.settingControl} ${styles.settingControlBordered} ${styles.reportFormatRow}`}>
               <span><strong>报告格式</strong><small>暂不生效 · 终稿按当前工作流生成。</small></span>
-              <select value={preferences.reportFormat} onChange={event => updatePreference("reportFormat", event.target.value as WorkspacePreferences["reportFormat"])} aria-label="报告格式">
-                <option value="academic">学术综述</option>
-                <option value="exploratory">探索发现</option>
-              </select>
+              <ReportFormatPicker value={preferences.reportFormat} onChange={value => updatePreference("reportFormat", value)} />
             </div>
           </section>}
 

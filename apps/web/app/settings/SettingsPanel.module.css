@@ -346,16 +346,16 @@
   width: 30px;
   height: 30px;
   place-items: center;
-  border: 1px solid rgba(187, 169, 255, .25);
-  border-radius: 50%;
-  background: rgba(133, 111, 207, .1);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: #aaa2cf;
   cursor: pointer;
   list-style: none;
 }
 
-.settingHelpButton:hover, .settingHelpButton:focus-visible { border-color: rgba(192, 173, 255, .55); background: rgba(133, 111, 207, .2); color: #e1d9ff; }
-.settingHelpButton:focus-visible { outline: 2px solid #b9a3ff; outline-offset: 3px; }
+.settingHelpButton:hover { color: #e1d9ff; }
+.settingHelpButton:focus-visible { outline: none; filter: drop-shadow(0 0 3px rgba(185, 163, 255, .85)); color: #e1d9ff; }
 .settingHelpButton svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 .settingHelpButton .helpDot { fill: currentColor; stroke: none; }
 
@@ -392,19 +392,19 @@
 
 .researchPreferences {
   gap: 0;
-  padding: 14px 18px;
+  padding: 11px 18px;
 }
 
 .settingControl {
   display: grid;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
-  padding: 0 2px 9px;
+  padding: 0 2px 6px;
 }
 
 .settingControlBordered {
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 7px;
+  padding-bottom: 7px;
   border-top: 1px solid rgba(255, 255, 255, .075);
 }
 
@@ -422,77 +422,7 @@
   font-weight: 580;
 }
 
-.depthOptions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.depthOption,
-.depthOptionSelected {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  min-height: 40px;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, .09);
-  border-radius: 10px;
-  background: rgba(4, 4, 10, .28);
-  color: #aaa7b8;
-  cursor: pointer;
-  font-size: 12px;
-  text-align: center;
-  transition: color .16s, border-color .16s, background .16s, box-shadow .16s;
-}
-
-.depthOption:hover,
-.relevanceOption:hover {
-  border-color: rgba(182, 155, 255, .34);
-  color: #eeeaff;
-}
-
-.depthOptionSelected {
-  border-color: rgba(182, 155, 255, .44);
-  background: linear-gradient(115deg, rgba(136, 98, 232, .2), rgba(87, 91, 175, .13));
-  box-shadow: inset 0 0 0 1px rgba(182, 155, 255, .08);
-  color: #f0eaff;
-}
-
-.depthOption input,
-.depthOptionSelected input,
-.relevanceOption input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.depthOption:focus-within,
-.depthOptionSelected:focus-within,
-.relevanceOption:focus-within {
-  outline: 2px solid #b9a3ff;
-  outline-offset: 2px;
-}
-
-.toggleHelpRow .toggleRow {
-  padding-top: 7px;
-  padding-bottom: 7px;
-}
-
-.settingControl .toggleHelpRow {
-  min-height: 0;
-  padding: 0;
-  border-top: 0;
-}
-
-.relevanceOptions {
+.segmentedOptions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 3px;
@@ -504,12 +434,7 @@
   transition: border-color .18s, box-shadow .18s;
 }
 
-.relevanceOptionsStrict {
-  border-color: rgba(241, 95, 117, .72);
-  box-shadow: 0 0 0 2px rgba(204, 55, 79, .12), 0 0 22px rgba(204, 55, 79, .1);
-}
-
-.relevanceOption {
+.segmentedOption {
   position: relative;
   display: flex;
   min-width: 0;
@@ -524,21 +449,72 @@
   color: #aaa7b8;
   cursor: pointer;
   font-size: 12px;
+  text-align: center;
   transition: color .16s, border-color .16s, background .16s, box-shadow .16s;
 }
 
-.relevanceOptionSelected {
+.segmentedOption:hover {
+  border-color: rgba(201, 174, 255, .22);
+  color: #eeeaff;
+}
+
+.segmentedOptionSelected {
   border-color: rgba(201, 174, 255, .22);
   background: linear-gradient(105deg, rgba(136, 98, 232, .28), rgba(217, 113, 171, .19));
   box-shadow: inset 0 0 0 1px rgba(217, 180, 255, .08);
   color: #f3edff;
 }
 
-.relevanceOptionStrict.relevanceOptionSelected {
+.segmentedOptionsStrict {
+  border-color: rgba(241, 95, 117, .72);
+  box-shadow: 0 0 0 2px rgba(204, 55, 79, .12), 0 0 22px rgba(204, 55, 79, .1);
+}
+
+.segmentedOptionStrict { color: #d4a0a7; }
+
+.segmentedOptionStrict.segmentedOptionSelected {
   border-color: rgba(255, 133, 148, .62);
   background: linear-gradient(105deg, rgba(192, 48, 72, .35), rgba(128, 32, 55, .28));
   box-shadow: inset 0 0 0 1px rgba(255, 150, 163, .12);
   color: #ffe7ea;
+}
+
+.segmentedOptionsStrict .segmentedOptionSelected .warningIcon { color: #ff8392; }
+
+.segmentedOption input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.segmentedOption:focus-within {
+  outline: 2px solid #b9a3ff;
+  outline-offset: 2px;
+}
+
+.dialog input[type="checkbox"]:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.dialog input[type="checkbox"]:focus-visible {
+  outline: 2px solid #b9a3ff;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px rgba(167, 131, 255, .12);
+}
+
+.toggleHelpRow .toggleRow {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.settingControl .toggleHelpRow {
+  min-height: 0;
+  padding: 0;
+  border-top: 0;
 }
 
 .warningIcon {
@@ -552,21 +528,20 @@
   stroke-linejoin: round;
 }
 
-.relevanceOptionStrict { color: #d4a0a7; }
-.relevanceOptionStrict.relevanceOptionSelected .warningIcon { color: #ff8392; }
-
-.relevanceDescription {
+.relevanceDescription,
+.depthDescription {
   margin: 0;
-  padding: 7px 10px;
+  padding: 5px 10px;
   border: 1px solid rgba(182, 155, 255, .16);
   border-radius: 9px;
   background: rgba(136, 98, 232, .075);
   color: #c8c3d5;
   font-size: 12px;
-  line-height: 1.7;
+  line-height: 1.5;
 }
 
-.relevanceDescription strong { color: #e8dfff; }
+.relevanceDescription strong,
+.depthDescription strong { color: #e8dfff; }
 
 .relevanceDescriptionStrict {
   border-color: rgba(241, 95, 117, .28);
@@ -576,7 +551,16 @@
 
 .relevanceDescriptionStrict strong { color: #ff9eaa; }
 
+.depthDescriptionWarning {
+  border-color: rgba(241, 124, 143, .34);
+  background: rgba(175, 58, 84, .12);
+  color: #f0c0c7;
+}
+
+.depthDescriptionWarning strong { color: #ff9eaa; }
+
 .reportFormatRow {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(160px, .85fr);
   align-items: center;
@@ -595,14 +579,161 @@
   line-height: 1.55;
 }
 
-.reportFormatRow select {
+.reportFormatPicker {
+  position: relative;
+  min-width: 0;
+}
+
+.reportFormatTrigger {
+  display: flex;
   width: 100%;
-  padding: 9px 10px;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 11px;
   border: 1px solid rgba(255, 255, 255, .13);
-  border-radius: 8px;
-  background: rgba(4, 4, 10, .36);
+  border-radius: 9px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .02));
   color: #efedf8;
+  cursor: pointer;
   font-size: 12px;
+  text-align: left;
+  transition: border-color .16s, background .16s, color .16s;
+}
+
+.reportFormatTrigger:hover,
+.reportFormatTrigger[aria-expanded="true"] {
+  border-color: rgba(182, 155, 255, .4);
+  background: linear-gradient(145deg, rgba(136, 98, 232, .17), rgba(217, 113, 171, .08));
+}
+
+.reportFormatTrigger:focus-visible {
+  outline: 2px solid #b9a3ff;
+  outline-offset: 2px;
+}
+
+.reportFormatChevron,
+.reportFormatChevronOpen {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: #aaa7b8;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform .16s;
+}
+
+.reportFormatChevronOpen { transform: rotate(180deg); }
+
+.reportFormatMenu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 7px);
+  z-index: 12;
+  width: 100%;
+  min-width: 180px;
+  padding: 5px;
+  border: 1px solid rgba(187, 169, 255, .24);
+  border-radius: 11px;
+  background: #171521;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .52), 0 0 24px rgba(129, 87, 255, .1);
+  transform-origin: bottom right;
+  transition: opacity .14s ease, transform .14s ease, visibility .14s;
+}
+
+.reportFormatMenuClosed {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(.985);
+}
+
+.reportFormatMenuOpen {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.reportFormatOption {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  color: #c8c3d5;
+  cursor: pointer;
+  font-size: 12px;
+  transition: color .14s, background .14s;
+}
+
+.reportFormatOptionActive,
+.reportFormatOption:hover {
+  background: rgba(136, 98, 232, .16);
+  color: #f0eaff;
+}
+
+.reportFormatOptionSelected { color: #eee6ff; }
+
+.reportFormatCheck {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: #c8b7ff;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+}
+
+.reportFormatOptionSelected .reportFormatCheck { opacity: 1; }
+
+.resetSection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 17px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .018);
+}
+
+.resetSection strong {
+  color: #ddd9eb;
+  font-size: 12px;
+  font-weight: 580;
+}
+
+.resetSection p {
+  margin: 0;
+  color: #9390a2;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.resetButton {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(241, 124, 143, .24);
+  border-radius: 8px;
+  background: rgba(175, 58, 84, .08);
+  color: #e8acb6;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+  transition: border-color .16s, background .16s, color .16s;
+}
+
+.resetButton:hover {
+  border-color: rgba(241, 124, 143, .42);
+  background: rgba(175, 58, 84, .16);
+  color: #ffdce2;
 }
 
 @media (hover: hover) {
@@ -946,15 +1077,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .dialog, .dialog::backdrop, .tabIndicator { transition: none; }
-  .depthOption, .depthOptionSelected, .relevanceOptions, .relevanceOption { transition: none; }
+  .segmentedOption, .segmentedOptions, .reportFormatTrigger, .reportFormatChevron, .reportFormatChevronOpen,
+  .reportFormatMenu, .reportFormatOption { transition: none; }
 }
 
 @media (max-width: 440px) {
   .content { --setting-help-width: min(280px, calc(100vw - 164px)); }
 
-  .depthOptions { gap: 5px; }
-  .depthOption, .depthOptionSelected { padding: 8px 5px; font-size: 11px; }
-  .relevanceOption { gap: 3px; padding: 6px 4px; font-size: 11px; }
+  .segmentedOptions { gap: 2px; }
+  .segmentedOption { gap: 3px; padding: 6px 4px; font-size: 11px; }
   .warningIcon { width: 13px; height: 13px; }
 
   .layout {
