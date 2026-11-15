@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, type CSSProperties, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type CSSProperties, type KeyboardEvent, useCallback, useEffect, useId, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
 import { api } from "../workspace/api";
 import type { WorkspacePreferences } from "../workspace/preferences";
@@ -24,6 +24,36 @@ const tabs: { id: PanelTab; label: string }[] = [
   { id: "search", label: "网页搜索" },
   { id: "files", label: "本地文件" },
 ];
+
+function SettingsHelp({ label, children }: { label: string; children: string }) {
+  const descriptionId = useId();
+  const [open, setOpen] = useState(false);
+  return <div className={styles.settingHelp} data-open={open}>
+    <button
+      className={styles.settingHelpButton}
+      type="button"
+      aria-label={label}
+      aria-describedby={descriptionId}
+      aria-controls={descriptionId}
+      aria-expanded={open}
+      onClick={event => {
+        const next = !open;
+        setOpen(next);
+        if (!next) event.currentTarget.blur();
+      }}
+      onBlur={() => setOpen(false)}
+      onKeyDown={event => {
+        if (event.key === "Escape") {
+          setOpen(false);
+          event.currentTarget.blur();
+        }
+      }}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 10.5v5" /><circle className={styles.helpDot} cx="12" cy="7.5" r=".65" /></svg>
+    </button>
+    <span id={descriptionId} className={styles.settingHelpTooltip} role="tooltip">{children}</span>
+  </div>;
+}
 
 export default function SettingsPanel({
   onClose,
@@ -175,7 +205,6 @@ export default function SettingsPanel({
           {activeTab === "general" && <div className={styles.sectionStack}>
             <section className={styles.card}>
               <h2>新问题的默认模式</h2>
-              <p>可在每次提问时切换。快速探索由分流模型直接回答；深度研究会检索并整理证据。</p>
               <div className={styles.modeChoices} role="radiogroup" aria-label="新问题的默认模式">
                 <label className={preferences.mode === "quick" ? styles.choiceSelected : styles.choice}>
                   <input type="radio" name="default-mode" value="quick" checked={preferences.mode === "quick"} onChange={() => updatePreference("mode", "quick")} />
@@ -186,15 +215,17 @@ export default function SettingsPanel({
                   <span><strong>深度研究</strong><small>检索、分析并生成报告。</small></span>
                 </label>
               </div>
-              <label className={styles.toggleRow}>
-                <span><strong>Enter 发送消息</strong><small>关闭后，按 Enter 换行；使用 Ctrl+Enter 或发送按钮提交。</small></span>
-                <input type="checkbox" checked={preferences.enterToSend} onChange={event => updatePreference("enterToSend", event.target.checked)} />
-              </label>
+              <div className={styles.toggleHelpRow}>
+                <label className={styles.toggleRow}>
+                  <span><strong>Enter 发送消息</strong></span>
+                  <input type="checkbox" checked={preferences.enterToSend} onChange={event => updatePreference("enterToSend", event.target.checked)} />
+                </label>
+                <SettingsHelp label="Enter 发送消息说明">关闭后，按 Enter 换行；使用 Ctrl+Enter 或发送按钮提交。</SettingsHelp>
+              </div>
             </section>
 
             <section className={styles.card}>
               <h2>本次提问模型</h2>
-              <p>选择会随下一次问题提交；它不会更改保存的服务地址、密钥或其他已提交任务。</p>
               <ModelControls value={preferences.modelChoice} onChange={value => updatePreference("modelChoice", value)} disabled={false} />
             </section>
           </div>}
@@ -221,16 +252,20 @@ export default function SettingsPanel({
           </section>}
 
           {activeTab === "appearance" && <section className={styles.card}>
-            <h2>外观</h2>
-            <p>这些偏好保存在此浏览器中，并立即应用到研究工作台。</p>
-            <label className={styles.toggleRow}>
-              <span><strong>环境光效</strong><small>显示工作台的柔和边缘光。</small></span>
-              <input type="checkbox" checked={preferences.glow} onChange={event => updatePreference("glow", event.target.checked)} />
-            </label>
-            <label className={styles.toggleRow}>
-              <span><strong>背景网格</strong><small>显示低对比度的工作区网格。</small></span>
-              <input type="checkbox" checked={preferences.grid} onChange={event => updatePreference("grid", event.target.checked)} />
-            </label>
+            <div className={styles.toggleHelpRow}>
+              <label className={styles.toggleRow}>
+                <span><strong>环境光效</strong></span>
+                <input type="checkbox" checked={preferences.glow} onChange={event => updatePreference("glow", event.target.checked)} />
+              </label>
+              <SettingsHelp label="环境光效说明">显示工作台的柔和边缘光。</SettingsHelp>
+            </div>
+            <div className={styles.toggleHelpRow}>
+              <label className={styles.toggleRow}>
+                <span><strong>背景网格</strong></span>
+                <input type="checkbox" checked={preferences.grid} onChange={event => updatePreference("grid", event.target.checked)} />
+              </label>
+              <SettingsHelp label="背景网格说明">显示低对比度的工作区网格。</SettingsHelp>
+            </div>
             <fieldset className={styles.densityGroup}>
               <legend>内容密度</legend>
               <label className={preferences.density === "default" ? styles.choiceSelected : styles.choice}>
@@ -253,7 +288,6 @@ export default function SettingsPanel({
 
           {activeTab === "files" && <section className={styles.card}>
             <h2>本地文件</h2>
-            <p>浏览器需支持文件夹选择；仅列出文件路径，不读取或上传内容。刷新后需重新选择。</p>
             <input
               ref={element => {
                 directoryInput.current = element;
@@ -371,7 +405,6 @@ function ApiSettings() {
 
   return <section className={`card settings-card ${styles.card}`} aria-busy={busy}>
     <h2>模型与论文服务</h2>
-    <p>模型和 OpenAlex 密钥只在显式保存后写入本机设置。已保存的密钥不会回显；环境变量来源只读。</p>
     {loadError && <p className={styles.error} role="alert">{loadError}</p>}
     {error && <p className={styles.error} role="alert">{error}</p>}
     {notice && <p className={styles.notice} role="status">{notice}</p>}

@@ -202,6 +202,7 @@
 }
 
 .content {
+  --setting-help-width: min(280px, calc(100vw - 190px));
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -313,6 +314,86 @@
   padding: 13px 2px;
   border-top: 1px solid rgba(255, 255, 255, .075);
   cursor: pointer;
+}
+
+.toggleHelpRow {
+  display: flex;
+  min-width: 0;
+  min-height: 55px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 2px;
+  border-top: 1px solid rgba(255, 255, 255, .075);
+}
+
+.toggleHelpRow .toggleRow {
+  flex: 1;
+  min-width: 0;
+  border-top: 0;
+  padding: 13px 0;
+}
+
+.settingHelp {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+}
+
+.settingHelpButton {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(187, 169, 255, .25);
+  border-radius: 50%;
+  background: rgba(133, 111, 207, .1);
+  color: #aaa2cf;
+  cursor: pointer;
+  list-style: none;
+}
+
+.settingHelpButton:hover, .settingHelpButton:focus-visible { border-color: rgba(192, 173, 255, .55); background: rgba(133, 111, 207, .2); color: #e1d9ff; }
+.settingHelpButton:focus-visible { outline: 2px solid #b9a3ff; outline-offset: 3px; }
+.settingHelpButton svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+.settingHelpButton .helpDot { fill: currentColor; stroke: none; }
+
+.settingHelpTooltip {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 5;
+  width: var(--setting-help-width, min(280px, calc(100vw - 44px)));
+  padding: 10px 12px;
+  border: 1px solid rgba(187, 169, 255, .24);
+  border-radius: 9px;
+  background: #171521;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .44);
+  color: #d2cee2;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity .15s ease, transform .15s ease, visibility .15s;
+}
+
+.settingHelp:focus-within .settingHelpTooltip,
+.settingHelp[data-open="true"] .settingHelpTooltip {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@media (hover: hover) {
+  .settingHelp:hover .settingHelpTooltip {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
 }
 
 .toggleRow input[type="checkbox"],
@@ -619,6 +700,7 @@
   }
 
   .content {
+    --setting-help-width: min(280px, calc(100vw - 180px));
     padding: 16px 13px 22px;
   }
 
@@ -645,6 +727,8 @@
 }
 
 @media (max-width: 440px) {
+  .content { --setting-help-width: min(280px, calc(100vw - 164px)); }
+
   .layout {
     grid-template-columns: 100px minmax(0, 1fr);
   }
