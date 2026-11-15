@@ -51,6 +51,31 @@ class WorkflowFailureTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.addCleanup(self.tmp.cleanup)
 
+    def test_analyst_retries_invalid_control_and_keeps_the_corrected_review(self):
+        state = {"research": {"query": "accuracy", "source": "local"}}
+        corrected = review(sufficient=True, covered_requirements=["accuracy"])
+        with patch.object(workflow, "_model", side_effect=["Review with no final control block", corrected]) as model:
+            result = workflow._analyst(state, None, None)
+
+        self.assertTrue(result["current_review"]["sufficient"])
+        self.assertEqual(result["current_review"]["covered_requirements"], ["accuracy"])
+        first, second = (call.args[2] for call in model.call_args_list)
+        self.assertEqual(second, {**first, "retry_reason": "invalid_analyst_control"})
+
+    def test_analyst_distinguishes_invalid_output_from_service_failure(self):
+        cases = [(["invalid", "still invalid"], "invalid_output", "格式检查"),
+                 ([ModelServiceError("private details")], "model_failed", "服务不可用")]
+        for responses, code, expected_message in cases:
+            with self.subTest(code=code):
+                state = {"research": {"query": "accuracy", "source": "local"}}
+                with patch.object(workflow, "_model", side_effect=responses) as model:
+                    result = workflow._analyst(state, None, None)
+                self.assertEqual(model.call_count, len(responses))
+                self.assertFalse(result["current_review"]["sufficient"])
+                self.assertIn(expected_message, result["current_review"]["gaps"][0])
+                self.assertEqual(result["errors"][-1]["code"], code)
+                self.assertNotIn("private details", str(result))
+
     @staticmethod
     def answer_with_evidence(evidence, text="材料与问题相关。"):
         return draft_text(

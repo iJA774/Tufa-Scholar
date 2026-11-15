@@ -21,4 +21,10 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 
 轻量档以主要目标为准，标准档看主要问题是否已经解决。`research_depth` 为 `deep` 时，在传入的累计 evidence 和前轮审查基础上重新检查全部 `core_requirements`；已覆盖条目在 `covered_requirements` 中原样列出。记录当前仍存在的实质缺口，已经解决的旧缺口不要重复列出。只有核心要求均已覆盖、关键证据可靠、重要结论已通过独立来源或适当的原始材料交叉验证、没有未解决的重要矛盾时才判定充分。相关资料的存在本身不等于满足要求。若有实质缺口且可补查，给出具体子问题、候选来源或验证方法；若没有可行方向，`next_steps` 留空。
 
-先用 Markdown 自由组织审查结论，不输出内部推理。正文后输出唯一一个以 `tufa-control` 标记的代码块，内容是合法 JSON 对象。字段为 sufficient（布尔值）、covered_requirements、gaps、next_steps、unresolved_contradictions（字符串数组）、evidence_reliability_confirmed 和 important_conclusions_cross_validated（布尔值）。没有对应内容时数组为空。代码块后不输出其他内容。
+先用 Markdown 自由组织审查结论，不输出内部推理。正文末尾附上一个 `tufa-control` 围栏，围栏内只写合法 JSON。使用下面的字段名和布尔值或字符串数组，按本轮审查结果填写。没有对应内容时数组为空，不添加其他字段，围栏后不写文字。
+
+```tufa-control
+{"sufficient":false,"covered_requirements":[],"gaps":[],"next_steps":[],"unresolved_contradictions":[],"evidence_reliability_confirmed":false,"important_conclusions_cross_validated":false}
+```
+
+如果输入中的 `retry_reason` 为 `invalid_analyst_control`，重新给出正文和控制块，并核对围栏标签、字段拼写和 JSON 语法。

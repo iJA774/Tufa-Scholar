@@ -1955,18 +1955,30 @@ def _analyst(state, on_stage, on_subtask):
         for partial, previous in zip(payload["rounds"], state.get("rounds", [])):
             partial["review"]["unresolved_contradictions"] = previous.get("review", {}).get("unresolved_contradictions", [])
     try:
-        result = _model(state, "literature/analyst", payload, None, node_role="analyst", search_mode=mode, available_tools=[])
-        body, review = _parse_control(result, AnalystOutput)
+        for attempt in (1, 2):
+            result = _model(state, "literature/analyst", payload, None, node_role="analyst", search_mode=mode, available_tools=[])
+            try:
+                body, review = _parse_control(result, AnalystOutput)
+            except StructuredOutputError:
+                logger.warning("analyst_control_invalid run_id=%s attempt=%d", diagnostic_context().get("run_id", "na"), attempt)
+                if attempt == 2:
+                    raise
+                payload = {**payload, "retry_reason": "invalid_analyst_control"}
+            else:
+                break
         review["review"] = body
-    except (ModelServiceError, StructuredOutputError):
+    except (ModelServiceError, StructuredOutputError) as exc:
+        service_failed = isinstance(exc, ModelServiceError)
+        reason = "审查模型服务不可用" if service_failed else "审查输出未通过格式检查"
+        code = "model_failed" if service_failed else "invalid_output"
         review = {
             "sufficient": False,
             "covered_requirements": [],
-            "gaps": ["审查模型不可用，当前初稿和证据尚未完成语义审查。"],
+            "gaps": [f"{reason}，当前初稿和证据尚未完成语义审查。"],
             "next_steps": ["针对原问题补充检索并复核现有资料。"],
-            "review": "审查模型不可用。",
+            "review": f"{reason}。",
         }
-        state["errors"] = list(state.get("errors", [])) + [_safe_error("analyst", "model_failed", "审查模型不可用，保留缺口后继续。")]
+        state["errors"] = list(state.get("errors", [])) + [_safe_error("analyst", code, f"{reason}，保留缺口后继续。")]
     evidence_by_id = {item["id"]: item for item in state.get("evidence_pool", [])}
     findings = []
     for claim in state.get("current_findings", []):

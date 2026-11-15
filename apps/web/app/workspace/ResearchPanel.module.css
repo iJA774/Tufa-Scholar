@@ -136,12 +136,12 @@
 .liveActivityItem hr { height: 1px; margin: 10px 0; border: 0; background: rgba(217, 214, 243, .09); }
 .liveDrafts { display: flex; flex-direction: column; gap: 10px; margin: 14px 16px 18px; }
 .streamedDraft { min-width: 0; padding: 11px 13px; border: 1px solid rgba(174, 158, 245, .1); border-radius: 9px; background: rgba(31, 29, 42, .55); }
-.streamedDraft > span, .streamedDraft > div { display: flex; align-items: baseline; gap: 9px; color: #cfc9ee; font-size: 11px; }
-.streamedDraft > div span { color: var(--panel-muted); font-size: 10px; }
-.streamedDraft > div strong { font-weight: 530; }
+.draftMeta { display: flex; align-items: baseline; gap: 9px; color: #cfc9ee; font-size: 11px; }
+.draftMeta span { color: var(--panel-muted); font-size: 10px; }
+.draftMeta strong { font-weight: 530; }
 .streamedDraft > .liveActivityToggle { width: 100%; color: #cfc9ee; font-size: 11px; }
 .streamedDraft > .liveActivityToggle small { color: var(--panel-muted); font-size: 10px; }
-.streamedDraft p { max-height: 240px; margin: 7px 0 0; overflow: auto; color: #c8c5d4; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.draftBody { min-width: 0; padding: 10px 0 0; color: #c8c5d4; font-size: 13px; line-height: 1.7; }
 
 .activityList { display: flex; flex-direction: column; margin: 0; padding: 4px 16px 16px; list-style: none; }
 .activityItem { animation: activityEnter .3s ease-out both; }

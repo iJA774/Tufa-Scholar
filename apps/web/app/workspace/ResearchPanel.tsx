@@ -410,8 +410,8 @@ export default function ResearchPanel({ run, report, events, open, status, stage
             return <article className={styles.streamedDraft} key={preview.key}>
               {complete ? <button type="button" className={styles.liveActivityToggle} aria-expanded={expanded} aria-controls={expanded ? draftDetailsId : undefined} onClick={() => setDraftExpanded(current => ({ ...current, [draftKey]: !expanded }))}>
                 <strong>{title}</strong><small>实时输出 · 未核验 · 已生成</small><span className={`${styles.liveActivityChevron} ${expanded ? styles.liveActivityChevronExpanded : ""}`} aria-hidden="true"><span /></span>
-              </button> : <div><strong className={active ? styles.liveActivityShimmer : ""}>{title}</strong><span>实时输出 · 未核验</span></div>}
-              {expanded && <div id={draftDetailsId} className={styles.reportContent}><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({children}) => <span>{children}</span>, img: () => null }} skipHtml>{preview.text}</ReactMarkdown></div>}
+              </button> : <div className={styles.draftMeta}><strong className={active ? styles.liveActivityShimmer : ""}>{title}</strong><span>实时输出 · 未核验</span></div>}
+              {expanded && <div id={draftDetailsId} className={`${styles.reportContent} ${styles.draftBody}`}><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({children}) => <span>{children}</span>, img: () => null }} skipHtml>{preview.text}</ReactMarkdown></div>}
             </article>;
           })}
         </section>}
