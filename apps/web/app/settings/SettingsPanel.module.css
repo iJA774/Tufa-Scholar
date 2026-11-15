@@ -251,6 +251,8 @@
   border: 0;
 }
 
+.modeChoices { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+
 .densityGroup legend {
   margin-bottom: 9px;
   color: #dbd8e9;

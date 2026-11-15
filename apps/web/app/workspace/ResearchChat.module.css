@@ -109,6 +109,7 @@
 }
 
 .composer:focus-within { border-color: rgba(159, 144, 244, .49); box-shadow: 0 12px 55px rgba(0, 0, 0, .4), 0 0 32px rgba(122, 103, 252, .095); }
+.composer:hover:not(:focus-within) { border-color: rgba(159, 144, 244, .3); box-shadow: 0 13px 42px rgba(0, 0, 0, .34), 0 0 25px rgba(122, 103, 252, .07); }
 .composer::before { position: absolute; top: 0; left: 8%; right: 8%; height: 1px; background: linear-gradient(90deg, transparent, rgba(83, 204, 248, .32), rgba(181, 116, 255, .25), rgba(237, 106, 163, .21), transparent); content: ""; pointer-events: none; }
 
 .composer textarea {
@@ -133,6 +134,7 @@
 .composerToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px 14px; }
 
 .modeSwitch {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -142,12 +144,16 @@
   background: rgba(114, 95, 190, .095);
   color: #c3b9ea;
   font-size: 12px;
-  transition: background .2s;
+  transition: background .2s, border-color .2s, box-shadow .2s;
 }
 
 .modeSwitch:hover { background: rgba(121, 102, 208, .17); }
-.modeSwitch:disabled { cursor: default; opacity: .65; }
-.modeSwitch:focus-visible, .sendButton:focus-visible, .preset:focus-visible, .conversationNew:focus-visible, .progressOpen:focus-visible, .progressClose:focus-visible, .retryButton:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
+.modeSwitch:focus-within { border-color: rgba(177, 159, 248, .45); box-shadow: 0 0 0 2px rgba(146, 161, 255, .12); outline: 2px solid #c7b9ff; outline-offset: 3px; }
+.modeValue { max-width: 140px; overflow: hidden; color: inherit; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.modeSelect { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; appearance: none; outline: 0; background: transparent; opacity: 0; cursor: pointer; }
+.modeSelect:disabled { cursor: not-allowed; }
+.modeSelect option { background: #171521; color: #e6e3f0; }
+.sendButton:focus-visible, .preset:focus-visible, .conversationNew:focus-visible, .progressOpen:focus-visible, .progressClose:focus-visible, .retryButton:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
 .modeSpark { width: 15px; height: 15px; fill: none; stroke: #aa9afa; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .modeChevron { width: 12px; height: 12px; margin-left: 3px; fill: none; stroke: currentColor; stroke-width: 1.7; opacity: .6; }
 .composerRight { display: flex; align-items: center; gap: 12px; }

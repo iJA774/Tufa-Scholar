@@ -12,7 +12,7 @@ export type WorkspacePreferences = {
 
 export const PREFERENCES_KEY = "tufa-scholar-workspace-prefs-v1";
 export const DEFAULT_PREFERENCES: WorkspacePreferences = {
-  mode: "deep",
+  mode: "auto",
   enterToSend: true,
   glow: true,
   grid: true,
@@ -24,7 +24,7 @@ export function readWorkspacePreferences(): WorkspacePreferences {
   try {
     const stored = JSON.parse(window.localStorage.getItem(PREFERENCES_KEY) || "null") as Partial<WorkspacePreferences> | null;
     return {
-      mode: stored?.mode === "quick" ? "quick" : "deep",
+      mode: stored?.mode === "quick" || stored?.mode === "deep" || stored?.mode === "auto" ? stored.mode : "auto",
       enterToSend: typeof stored?.enterToSend === "boolean" ? stored.enterToSend : DEFAULT_PREFERENCES.enterToSend,
       glow: typeof stored?.glow === "boolean" ? stored.glow : DEFAULT_PREFERENCES.glow,
       grid: typeof stored?.grid === "boolean" ? stored.grid : DEFAULT_PREFERENCES.grid,

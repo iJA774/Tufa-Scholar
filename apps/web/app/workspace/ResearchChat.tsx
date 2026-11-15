@@ -3,7 +3,7 @@
 import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { useRunEvents } from "../hooks/useRunEvents";
-import { buildModelPreviews } from "../hooks/runEvents";
+import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
 import type { ModelChoice } from "./preferences";
@@ -52,11 +52,26 @@ const stageText: Record<string, string> = {
   reporter: "整理最终报告",
 };
 
-function modeText(mode?: ResearchMode | "auto") {
+function modeText(mode?: ResearchMode) {
   if (mode === "quick") return "快速探索";
   if (mode === "deep") return "深度研究";
   if (mode === "auto") return "自动判断";
   return "研究任务";
+}
+
+const deepResearchNodes = new Set(["background_investigator", "planner", "supervisor", "researcher", "analyst", "coder", "reporter"]);
+
+function isDeepResearchRun(run?: Run, events: RunEvent[] = []) {
+  if (!run) return false;
+  if (run.research_mode === "deep") return true;
+  if (run.research_mode !== "auto") return false;
+  if (run.stage && deepResearchNodes.has(run.stage)) return true;
+  if (run.subtasks?.length) return true;
+  return events.some(event =>
+    (event.kind === "node.started" || event.kind === "node.completed")
+    && typeof event.data.node === "string"
+    && deepResearchNodes.has(event.data.node),
+  );
 }
 
 function stageLabel(run: Run) {
@@ -150,6 +165,7 @@ export default function ResearchChat({
   const [busy, setBusy] = useState("");
   const [loadingConversation, setLoadingConversation] = useState(false);
   const requestedHistoryRuns = useRef(new Set<number>());
+  const autoOpenedRuns = useRef(new Set<number>());
   const actionController = useRef<AbortController | null>(null);
   const selectionEpoch = useRef(0);
   const selected = useRef({ projectId, conversationId, resetKey });
@@ -161,9 +177,9 @@ export default function ResearchChat({
   const activeRun = run && ["queued", "pending", "running"].includes(run.status);
   const hasConversation = conversationId !== undefined;
   const modeName = modeText(mode);
-  const panelRun = run?.research_mode === "deep" ? run : runs.find(item => item.research_mode === "deep");
-  const progressRun = hasConversation && loadedConversationId === conversationId ? panelRun : undefined;
-  const progressReport = progressRun ? [...messages].reverse().find(message => message.role === "assistant" && message.run_id === progressRun.id && message.metadata?.report_id !== undefined) : undefined;
+  const historyRunCandidate = isDeepResearchRun(run) ? undefined
+    : runs.find(item => item.id !== run?.id && isDeepResearchRun(item))
+      ?? runs.find(item => item.id !== run?.id && item.research_mode === "auto");
   const updateFromEventStream = (next: Run) => {
     setRun(previous => previous?.id === next.id ? next : previous);
     setRuns(previous => previous.some(item => item.id === next.id) ? previous.map(item => item.id === next.id ? next : item) : [next, ...previous]);
@@ -177,13 +193,22 @@ export default function ResearchChat({
     onRunUpdate: updateFromEventStream,
   });
   const historyEvents = useRunEvents({
-    run: progressRun?.id !== run?.id ? progressRun : undefined,
+    run: historyRunCandidate,
     projectId,
     conversationId,
     fetchRun: (id, signal) => api<Run>(`/runs/${id}`, { signal }),
     onRunUpdate: updateFromEventStream,
   });
-  const progressEvents = progressRun?.id === run?.id ? liveEvents : historyEvents;
+  const panelRun = isDeepResearchRun(run, liveEvents) ? run : runs.find(item => {
+    if (item.id === run?.id) return false;
+    const events = item.id === historyRunCandidate?.id ? historyEvents : [];
+    return isDeepResearchRun(item, events);
+  });
+  const progressRun = hasConversation && loadedConversationId === conversationId ? panelRun : undefined;
+  const progressReport = progressRun ? [...messages].reverse().find(message => message.role === "assistant" && message.run_id === progressRun.id && message.metadata?.report_id !== undefined) : undefined;
+  const progressEvents = progressRun?.id === run?.id
+    ? liveEvents
+    : progressRun?.id === historyRunCandidate?.id ? historyEvents : [];
   const quickDraft = run?.research_mode === "quick"
     ? buildModelPreviews(liveEvents, run.research_mode).find(preview => preview.node === "dispatcher")?.text
     : undefined;
@@ -240,7 +265,11 @@ export default function ResearchChat({
       const nextRun = nextRuns.find(item => item.conversation_id === conversationId);
       setRun(nextRun);
       setLoadedConversationId(conversationId);
-      setResearchPanelOpen(nextRun?.research_mode === "deep" && ["queued", "pending", "running"].includes(nextRun.status));
+      const shouldOpenPanel = !!nextRun
+        && isDeepResearchRun(nextRun)
+        && ["queued", "pending", "running"].includes(nextRun.status);
+      if (shouldOpenPanel && nextRun?.research_mode === "auto") autoOpenedRuns.current.add(nextRun.id);
+      setResearchPanelOpen(shouldOpenPanel);
     }).catch(error => {
       if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
     }).finally(() => {
@@ -327,6 +356,12 @@ export default function ResearchChat({
     onError: error => onError(messageOf(error)),
   });
 
+  useEffect(() => {
+    if (!activeRun || run?.research_mode !== "auto" || !isDeepResearchRun(run, liveEvents) || autoOpenedRuns.current.has(run.id)) return;
+    autoOpenedRuns.current.add(run.id);
+    setResearchPanelOpen(true);
+  }, [activeRun, run?.id, run?.research_mode, run?.stage, run?.subtasks, liveEvents]);
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!query.trim() || busy || projectLoading || activeRun) return;
@@ -362,7 +397,12 @@ export default function ResearchChat({
       setRuns(nextRuns);
       setRun(nextRun);
       setLoadedConversationId(submitted.conversation_id);
-      setResearchPanelOpen(nextRun.research_mode === "deep");
+      const autoDeepActive = nextRun.research_mode === "auto"
+        && ["queued", "pending", "running"].includes(nextRun.status)
+        && isDeepResearchRun(nextRun);
+      const shouldOpenPanel = nextRun.research_mode === "deep" || autoDeepActive;
+      if (autoDeepActive) autoOpenedRuns.current.add(nextRun.id);
+      setResearchPanelOpen(shouldOpenPanel);
       submittedConversationRef.current = submitted.conversation_id;
       onConversationChange(submitted.conversation_id, targetProjectId);
     } catch (error) {
@@ -384,7 +424,13 @@ export default function ResearchChat({
       if (selectionEpoch.current !== marker) return;
       setRun(next);
       setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
-      if (run.research_mode === "deep" || next.research_mode === "deep") setResearchPanelOpen(true);
+      const autoDeepActive = next.research_mode === "auto"
+        && ["queued", "pending", "running"].includes(next.status)
+        && isDeepResearchRun(next);
+      if (run.research_mode === "deep" || next.research_mode === "deep" || autoDeepActive) {
+        if (autoDeepActive) autoOpenedRuns.current.add(next.id);
+        setResearchPanelOpen(true);
+      }
       onHistoryUpdated();
     }).catch(error => {
       if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
@@ -496,19 +542,26 @@ export default function ResearchChat({
           disabled={projectLoading || !!busy || !!activeRun}
           onChange={event => setQuery(event.target.value)}
           onKeyDown={submitOnEnter}
-          placeholder={mode === "deep" ? "提出一个问题，开始深度研究..." : "提出一个问题，快速获得直接回答..."}
+          placeholder={mode === "deep" ? "提出一个问题，开始深度研究..." : mode === "quick" ? "提出一个问题，快速获得直接回答..." : "提出一个问题，自动判断是否需要研究..."}
           aria-label="输入你的研究问题"
         />
         <div className={styles.composerToolbar}>
-          <button
-            className={styles.modeSwitch}
-            type="button"
-            title="切换研究模式"
-            aria-label={`当前模式：${modeName}。切换为${mode === "deep" ? "快速探索" : "深度研究"}`}
-            aria-pressed={mode === "quick"}
-            disabled={!!busy || !!activeRun}
-            onClick={() => onModeChange(mode === "deep" ? "quick" : "deep")}
-          ><svg className={styles.modeSpark} viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.8 7.2L21 11l-7.2 1.8L12 20l-1.8-7.2L3 11l7.2-1.8L12 2Z" /></svg><span>{modeName}</span><svg className={styles.modeChevron} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button>
+          <div className={styles.modeSwitch}>
+            <svg className={styles.modeSpark} viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 1.8 7.2L21 11l-7.2 1.8L12 20l-1.8-7.2L3 11l7.2-1.8L12 2Z" /></svg>
+            <span className={styles.modeValue} aria-hidden="true">{modeName}</span>
+            <select
+              className={styles.modeSelect}
+              value={mode}
+              aria-label="研究模式"
+              disabled={!!busy || !!activeRun}
+              onChange={event => onModeChange(event.currentTarget.value as ResearchMode)}
+            >
+              <option value="auto">自动判断</option>
+              <option value="deep">深度研究</option>
+              <option value="quick">快速探索</option>
+            </select>
+            <svg className={styles.modeChevron} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+          </div>
           <div className={styles.composerRight}><span className={styles.shortcut}>{enterToSend ? "ENTER ↵ TO START" : "CTRL + ENTER TO START"}</span>
             <button className={`${styles.sendButton} ${query.trim() && !busy && !activeRun && !projectLoading ? styles.sendButtonReady : ""}`} type="submit" disabled={!query.trim() || !!busy || !!activeRun || projectLoading} aria-label="发送研究问题">
               {busy === "send" ? <span className={styles.spinner} /> : <svg className={styles.sendIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v12" /></svg>}
