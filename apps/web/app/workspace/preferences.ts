@@ -1,6 +1,6 @@
 import type { ResearchMode } from "./types";
 
-export type ModelChoice = { model_name: string; reasoning_effort: string };
+export type ModelChoice = { model_name: string };
 export type ResearchDepth = "light" | "standard" | "deep";
 export type RelevanceFilter = "relaxed" | "standard" | "strict";
 export type ReportFormat = "academic" | "exploratory";
@@ -28,7 +28,7 @@ export const DEFAULT_PREFERENCES: WorkspacePreferences = {
   glow: true,
   grid: true,
   density: "default",
-  modelChoice: { model_name: "", reasoning_effort: "" },
+  modelChoice: { model_name: "" },
 };
 
 export function readWorkspacePreferences(): WorkspacePreferences {
@@ -46,7 +46,6 @@ export function readWorkspacePreferences(): WorkspacePreferences {
       density: stored?.density === "compact" ? "compact" : "default",
       modelChoice: {
         model_name: typeof stored?.modelChoice?.model_name === "string" ? stored.modelChoice.model_name : "",
-        reasoning_effort: typeof stored?.modelChoice?.reasoning_effort === "string" ? stored.modelChoice.reasoning_effort : "",
       },
     };
   } catch {

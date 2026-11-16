@@ -88,6 +88,7 @@ function eventHeading(event: RunEvent) {
   if (event.kind === "tool.completed") return `${toolLabels[tool] || tool || "工具调用"}完成`;
   if (event.kind === "tool.failed") return `${toolLabels[tool] || tool || "工具调用"}失败`;
   if (event.kind === "model.failed") return `${nodeLabels[node] || node || "模型输出"}生成失败`;
+  if (event.kind === "report.fallback") return "正在整理已有研究结果";
   return "研究活动";
 }
 
@@ -194,6 +195,7 @@ function mergeActivityEvents(events: RunEvent[]) {
       continue;
     }
     const node = textField(event.data, "node");
+    if (event.kind === "report.fallback") { entries.push({ event }); continue; }
     if (node === "dispatcher" || event.kind === "dispatch") continue;
     if (event.kind === "node.started") {
       const index = entries.push({ event }) - 1;
@@ -236,6 +238,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
       return latest;
     }, [] as ReturnType<typeof buildModelPreviews>);
   const reportPreview = activityPreviews.find(preview => preview.node === "reporter");
+  const fallbackNotice = [...events].reverse().find(event => event.kind === "report.fallback");
   const reportTabAvailable = hasReport || !!reportPreview;
   const [tab, setTab] = useState<"report" | "activities">(reportTabAvailable ? "report" : "activities");
   const tabWasChosen = useRef(false);
@@ -307,6 +310,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
         </div>
         <button ref={closeButtonRef} className={styles.closeButton} type="button" aria-label="关闭研究面板" onClick={onClose}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </div>
+      {!hasReport && fallbackNotice && <p className={styles.liveActivityDetail} role="status">{textField(fallbackNotice.data, "message")}</p>}
 
       <section id={reportPanelId} role="tabpanel" aria-labelledby={reportTabId} hidden={tab !== "report"} tabIndex={0} className={`${styles.tabPanel} ${styles.reportPanel}`}>
         {hasReport && report ? <>

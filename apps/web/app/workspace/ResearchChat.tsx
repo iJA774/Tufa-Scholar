@@ -353,6 +353,9 @@ export default function ResearchChat({
   const progressEvents = progressRun?.id === run?.id
     ? liveEvents
     : progressRun?.id === historyRunCandidate?.id ? historyEvents : [];
+  const fallbackNotice = progressRun?.id === run?.id && !researchPanelOpen && !progressReport
+    ? [...progressEvents].reverse().find(event => event.kind === "report.fallback")?.data.message
+    : undefined;
   const quickDraft = run?.research_mode === "quick"
     ? buildModelPreviews(liveEvents, run.research_mode).find(preview => preview.node === "dispatcher")?.text
     : undefined;
@@ -529,7 +532,6 @@ export default function ResearchChat({
           prefer_primary_evidence: preferPrimaryEvidence,
           relevance_filter: relevanceFilter,
           model_name: modelChoice.model_name.trim() || undefined,
-          reasoning_effort: modelChoice.reasoning_effort || undefined,
         }), signal: controller.signal },
       );
       const [nextRun, nextMessages, nextRuns] = await Promise.all([
@@ -660,6 +662,10 @@ export default function ResearchChat({
             <div className={styles.messageLabel}>TUFA · 快速探索 <small className={styles.streamPreviewLabel}>实时草稿 · 未核验</small></div>
             <div className={styles.messageContent}>{quickDraft}</div>
           </div>
+        </article>}
+        {typeof fallbackNotice === "string" && <article className={`${styles.message} ${styles.messageAssistant}`} role="status">
+          <div className={styles.avatar} aria-hidden="true">✧</div>
+          <div className={styles.messageBubble}><div className={styles.messageLabel}>TUFA · 深度研究</div><div className={styles.messageContent}>{fallbackNotice}</div></div>
         </article>}
         {!loadingConversation && messages.length === 0 && <p className={styles.loadingMessages}>此会话暂无消息。</p>}
         {activeRun && <div className={styles.liveStatus} role="status"><span className={`${styles.spinner} ${styles.spinnerResearch}`} />

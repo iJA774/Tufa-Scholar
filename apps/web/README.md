@@ -24,7 +24,7 @@
 | `workspace/api.ts`、`workspace/types.ts`、`workspace/sourceLabels.ts` | 工作区请求辅助、API 数据类型及来源标签 |
 | `workspace/preferences.ts` | 研究模式、研究偏好、Enter 发送、外观选项和模型选择的本地工作区偏好 |
 | `app/hooks/useRunPolling.ts`、`app/hooks/runPolling.ts` | 任务轮询的 React 生命周期适配与独立调度逻辑 |
-| `app/ModelControls.tsx` | 提问模型和思考强度选择 |
+| `app/ModelControls.tsx` | 提问模型 ID 手动输入与环境变量锁定 |
 
 切换项目、会话、任务或卸载时取消旧请求，防止过时结果更新当前界面。
 

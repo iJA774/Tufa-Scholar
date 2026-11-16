@@ -973,6 +973,13 @@
   color: #efedf8;
 }
 
+.dialog :global(.model-select input) {
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-radius: 6px;
+  padding: 10px 11px;
+  font-size: 12px;
+}
+
 .dialog :global(.settings-card label),
 .dialog :global(.select-group label) {
   color: #ddd9eb;

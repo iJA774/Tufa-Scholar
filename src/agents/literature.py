@@ -2114,7 +2114,7 @@ def _reporter_fallback(state, reason):
         ):
             limitations = checked
     checked = limitations or {"content": "现有资料不足以形成有证据支持的结论。", "evidence": [], "rejected": []}
-    return _publish_report(checked, [f"证据不足：{reason}", *_warning_caveats(state, fallback=True)])
+    return _publish_report(checked, [f"终稿未完成：{reason}", "未找到通过校验且包含有效引用的研究草稿。", *_warning_caveats(state, fallback=True)])
 
 
 def _log_report_validation(*, input_evidence_count, final_evidence_count, rejected_claim_count, fallback_rejected_count, fallback_reason):
@@ -2249,12 +2249,25 @@ def _reporter(state, on_stage):
         result = _model(state, "literature/reporter", payload, None, node_role="reporter",
                         search_mode=_report_mode(state), available_tools=[])
         checked = validate_markdown(result, working, allowed_paper_ids=allowed, citation_only=True)
-    except ModelServiceError:
-        reason = "报告模型服务不可用，未能形成完整终稿。"
+    except ModelServiceError as exc:
+        reason = {
+            "timeout": "报告生成超时，未能完成终稿。",
+            "network": "无法连接报告模型服务，未能完成终稿。",
+            "rate_limit": "报告模型服务触发限流，可能是请求过于频繁或额度不足，未能完成终稿。",
+            "auth": "报告模型服务的 API 密钥或访问权限不可用，未能完成终稿。",
+            "model_not_found": "报告模型不存在或无法访问，未能完成终稿。",
+            "not_found": "报告模型服务地址或模型不可用，未能完成终稿。",
+            "bad_request": "报告模型服务无法处理本次请求，请检查模型设置。",
+            "context_length": "报告内容超出模型的输入长度限制，未能完成终稿。",
+        }.get(exc.category, "报告模型服务暂时不可用，未能完成终稿。")
         reason_code = "model_service_failed"
         errors.append(_safe_error("reporter", reason_code, reason))
-    except StructuredOutputError:
-        reason = "报告生成中断或返回空内容，未能形成完整终稿。"
+    except StructuredOutputError as exc:
+        reason = {
+            "length": "报告生成达到长度限制，未能完成终稿。",
+            "filtered": "报告内容受到模型服务限制，未能完成终稿。",
+            "empty": "报告模型返回了空内容，未能完成终稿。",
+        }.get(exc.category, "报告模型返回的内容无法使用，未能完成终稿。")
         reason_code = "invalid_report_output"
         errors.append(_safe_error("reporter", "invalid_output", reason))
     else:
@@ -2281,6 +2294,7 @@ def _reporter(state, on_stage):
         fallback = False
     else:
         rejected = checked["rejected"] if checked else []
+        _emit_event(state, "report.fallback", {"node": "reporter", "message": f"{reason}正在整理通过校验的研究草稿或已知缺口。"})
         report = _reporter_recovery(
             state, reason=reason, reason_code=reason_code,
             input_evidence_count=len(working), rejected_claim_count=len(rejected),
