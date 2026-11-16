@@ -2092,7 +2092,7 @@ def _outstanding_gaps(state, *, fallback=False):
     return _clean_labels(gaps, limit=40)
 
 
-def _reporter_fallback(state, reason):
+def _reporter_fallback(state):
     allowed = _allowed_report_papers(state)
     evidence = _visible_report_evidence(state.get("evidence_pool", []), allowed)
     rounds = state.get("rounds", [])
@@ -2105,16 +2105,13 @@ def _reporter_fallback(state, reason):
     for index, draft in enumerate(reversed(drafts)):
         checked = validate_markdown(draft, evidence, allowed_paper_ids=allowed)
         if checked["evidence"]:
-            report = _publish_report(checked, _warning_caveats(state, fallback=True))
-            notice = f"> 终稿未能完成，以下为最近一份通过校验的研究草稿。\n> {reason}"
-            report["content"] = f'{notice}\n\n{report["content"]}'
-            return report
+            return _publish_report(checked, _warning_caveats(state, fallback=True))
         if index == 0 and not review.get("sufficient") and any(
             line.lstrip().startswith("> 局限") for line in checked["content"].splitlines()
         ):
             limitations = checked
     checked = limitations or {"content": "现有资料不足以形成有证据支持的结论。", "evidence": [], "rejected": []}
-    return _publish_report(checked, [f"证据不足：{reason}", *_warning_caveats(state, fallback=True)])
+    return _publish_report(checked, _warning_caveats(state, fallback=True))
 
 
 def _log_report_validation(*, input_evidence_count, final_evidence_count, rejected_claim_count, fallback_rejected_count, fallback_reason):
@@ -2132,8 +2129,8 @@ def _log_report_validation(*, input_evidence_count, final_evidence_count, reject
     )
 
 
-def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, rejected_claim_count=0):
-    result = _reporter_fallback(state, reason)
+def _reporter_recovery(state, *, reason_code, input_evidence_count, rejected_claim_count=0):
+    result = _reporter_fallback(state)
     _log_report_validation(
         input_evidence_count=input_evidence_count,
         final_evidence_count=len(result["evidence"]),
@@ -2245,16 +2242,45 @@ def _reporter(state, on_stage):
     )
     errors = list(state.get("errors", []))
     checked = None
+    suggestion = "请稍后重试，或更换模型后重试。"
     try:
         result = _model(state, "literature/reporter", payload, None, node_role="reporter",
                         search_mode=_report_mode(state), available_tools=[])
         checked = validate_markdown(result, working, allowed_paper_ids=allowed, citation_only=True)
-    except ModelServiceError:
-        reason = "报告模型服务不可用，未能形成完整终稿。"
+    except ModelServiceError as exc:
+        reason = {
+            "timeout": "报告生成超时，未能完成终稿。",
+            "network": "无法连接报告模型服务，未能完成终稿。",
+            "rate_limit": "报告模型服务触发限流，可能是请求过于频繁或额度不足，未能完成终稿。",
+            "auth": "报告模型服务的 API 密钥或访问权限不可用，未能完成终稿。",
+            "model_not_found": "报告模型不存在或无法访问，未能完成终稿。",
+            "not_found": "报告模型服务地址或模型不可用，未能完成终稿。",
+            "bad_request": "报告模型服务无法处理本次请求，请检查模型设置。",
+            "context_length": "报告内容超出模型的输入长度限制，未能完成终稿。",
+        }.get(exc.category, "报告模型服务暂时不可用，未能完成终稿。")
+        suggestion = {
+            "timeout": "请稍后重试，或降低研究深度后重试。",
+            "network": "请检查模型服务地址和网络连接后重试。",
+            "rate_limit": "请检查服务额度，等待一段时间后重试。",
+            "auth": "请检查 API 密钥和模型访问权限后重试。",
+            "model_not_found": "请检查手动填写的模型 ID 及访问权限，或选择其他模型。",
+            "not_found": "请检查模型服务地址和手动填写的模型 ID。",
+            "bad_request": "请检查模型设置，或更换支持所需功能的模型。",
+            "context_length": "请缩短问题或降低研究深度后重试。",
+        }.get(exc.category, suggestion)
         reason_code = "model_service_failed"
         errors.append(_safe_error("reporter", reason_code, reason))
-    except StructuredOutputError:
-        reason = "报告生成中断或返回空内容，未能形成完整终稿。"
+    except StructuredOutputError as exc:
+        reason = {
+            "length": "报告生成达到长度限制，未能完成终稿。",
+            "filtered": "报告内容受到模型服务限制，未能完成终稿。",
+            "empty": "报告模型返回了空内容，未能完成终稿。",
+        }.get(exc.category, "报告模型返回的内容无法使用，未能完成终稿。")
+        suggestion = {
+            "length": "请缩短问题或降低研究深度后重试。",
+            "filtered": "请调整问题表述或更换模型后重试。",
+            "empty": "请稍后重试，或更换模型。",
+        }.get(exc.category, suggestion)
         reason_code = "invalid_report_output"
         errors.append(_safe_error("reporter", "invalid_output", reason))
     else:
@@ -2281,8 +2307,9 @@ def _reporter(state, on_stage):
         fallback = False
     else:
         rejected = checked["rejected"] if checked else []
+        _emit_event(state, "report.fallback", {"node": "reporter", "message": reason, "suggestion": suggestion})
         report = _reporter_recovery(
-            state, reason=reason, reason_code=reason_code,
+            state, reason_code=reason_code,
             input_evidence_count=len(working), rejected_claim_count=len(rejected),
         )
         rejected = rejected + report["rejected"]
@@ -2471,6 +2498,7 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
     graph = _graph(on_stage, on_subtask)
     result = graph.invoke(initial, config={"recursion_limit": 40})
     if result.get("content") is None:
-        fallback = _reporter_fallback(result, "研究流程未能形成报告，以下为可核查资料及当前缺口。")
+        _emit_event(initial, "report.fallback", {"node": "reporter", "message": "研究流程未能形成完整报告。", "suggestion": "请稍后重试，或降低研究深度后重试。"})
+        fallback = _reporter_fallback(result)
         return fallback["content"], fallback["evidence"]
     return result["content"], result.get("final_evidence", result.get("evidence", []))

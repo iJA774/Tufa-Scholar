@@ -142,9 +142,17 @@ def discover(url, key, *, details=False):
 class ModelServiceError(RuntimeError):
     """Model service HTTP or transport failure."""
 
+    def __init__(self, message, *, category='service'):
+        super().__init__(message)
+        self.category = category
+
 
 class StructuredOutputError(RuntimeError):
     """Model response remained invalid after format correction."""
+
+    def __init__(self, message, *, category='invalid'):
+        super().__init__(message)
+        self.category = category
 
 
 def _safe_validation_errors(exc, json_schema):
@@ -352,7 +360,7 @@ def _response_error_payloads(response):
     text = response.text
     try:
         body = json.loads(text)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         body = None
     payloads = [body] if isinstance(body, dict) else []
 
@@ -369,7 +377,7 @@ def _response_error_payloads(response):
             return
         try:
             value = json.loads(data)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             return
         if isinstance(value, dict):
             payloads.append(value)
@@ -383,13 +391,40 @@ def _response_error_payloads(response):
     return payloads
 
 
+def _model_http_failure_category(response):
+    """Map only known protocol values; never expose provider messages."""
+    status = response.status_code
+    if status in (401, 403):
+        return 'auth'
+    if status == 429:
+        return 'rate_limit'
+    if status == 408:
+        return 'timeout'
+    if status not in (400, 404, 413, 422):
+        return 'service'
+    try:
+        payloads = _response_error_payloads(response)
+    except (ValueError, TypeError, RecursionError, httpx.HTTPError):
+        payloads = []
+    for body in payloads:
+        error = body.get('error') if isinstance(body.get('error'), dict) else body
+        code = error.get('code', body.get('code'))
+        if isinstance(code, str):
+            code = code.lower()
+            if code in {'model_not_found', 'model_not_exist'}:
+                return 'model_not_found'
+            if code in {'context_length_exceeded', 'context_window_exceeded', 'max_tokens_exceeded'}:
+                return 'context_length'
+    return {404: 'not_found', 400: 'bad_request', 413: 'context_length'}.get(status, 'service')
+
+
 def _rejected_optional_parameter(response, request_body):
     """Identify only an explicit 400/422 rejection of a sent option."""
     if response.status_code not in (400, 422):
         return None
     try:
         payloads = _response_error_payloads(response)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     for body in payloads:
         error = body.get('error') if isinstance(body.get('error'), dict) else body
@@ -806,6 +841,8 @@ def _post_structured(config, headers, request_body, *, on_stream, attempt, phase
             with httpx.stream('POST', url, headers=headers, json=request_body, timeout=90) as response:
                 if _disable_rejected_optional_parameter(response, request_body, config):
                     continue
+                if response.status_code in (400, 404, 413, 422):
+                    response.read()
                 response.raise_for_status()
                 content, usage, finish_reason, native_decision = _stream_response(
                     response, on_stream, attempt, phase, secrets, native_tools,
@@ -958,7 +995,9 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
                            int((time.monotonic() - attempt_started) * 1000), exc.response.status_code,
                            type(exc).__name__, diagnostic_id)
-            raise ModelServiceError(f'模型服务请求失败 (HTTP {exc.response.status_code})') from None
+            status = exc.response.status_code
+            category = _model_http_failure_category(exc.response)
+            raise ModelServiceError(f'模型服务请求失败 (HTTP {status})', category=category) from None
         except httpx.RequestError as exc:
             # A partial stream may already have been billed; never retry it.
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
@@ -966,7 +1005,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
             logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
                            int((time.monotonic() - attempt_started) * 1000), type(exc).__name__, diagnostic_id)
-            raise ModelServiceError('模型服务连接失败或超时，请检查设置') from None
+            raise ModelServiceError('模型服务连接失败或超时，请检查设置', category='timeout' if isinstance(exc, httpx.TimeoutException) else 'network') from None
         except (ValueError, KeyError, IndexError, TypeError, RecursionError) as exc:
             if isinstance(exc, ValidationError):
                 errors = _safe_validation_errors(exc, json_schema)
@@ -984,5 +1023,6 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                            _usage_log_fields(usage))
             output_cap_reached = finish_reason == 'length' and 'max_completion_tokens' in request_body
             if attempt == 2 or native_tools is not None or output_cap_reached or schema is None:
-                raise StructuredOutputError('模型返回的文本无效' if schema is None else '模型返回的结构化结果无效') from None
+                category = 'length' if finish_reason == 'length' else 'filtered' if finish_reason == 'content_filter' else 'empty' if isinstance(content, str) and not content.strip() else 'invalid'
+                raise StructuredOutputError('模型返回的文本无效' if schema is None else '模型返回的结构化结果无效', category=category) from None
             validation_feedback = errors

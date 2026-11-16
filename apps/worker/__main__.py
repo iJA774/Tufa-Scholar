@@ -12,6 +12,7 @@ from src.tools import ToolContext, ToolRegistry
 from src.persistence.storage import initialize_storage
 from src.infrastructure.logging_setup import configure_logging, safe_stack
 from src.infrastructure.diagnostics import diagnostic_scope
+from src.integrations.model import ModelServiceError, StructuredOutputError
 
 
 def _local_papers(project_id, source, paper_ids):
@@ -73,7 +74,42 @@ def run_once():
         safe_http = re.fullmatch(r'(?:模型服务请求失败 \(HTTP [0-9]{3}\)|OpenAlex 请求失败 \(HTTP [0-9]{3}\)；请检查网络、额度或 OPENALEX_API_KEY)', message)
         if message not in safe_errors and not safe_http:
             message = '任务执行失败，请查看 worker 日志'
-        repository.fail_task(task["id"], message)
+        if task.get('kind') == 'chat':
+            suggestions = {
+                '请先在设置中配置模型地址和模型名称': '请在设置中填写模型服务地址和模型名称后重试。',
+                '模型服务连接失败或超时，请检查设置': '请检查模型服务地址和网络连接，或稍后重试。',
+                '模型返回的结构化结果无效': '请更换支持结构化输出的模型，或降低研究深度后重试。',
+            }
+            model_failures = {
+                'timeout': ('模型服务响应超时。', '请稍后重试，或降低研究深度后重试。'),
+                'network': ('无法连接模型服务。', '请检查模型服务地址和网络连接后重试。'),
+                'rate_limit': ('模型服务触发限流或额度不足。', '请检查服务额度，等待一段时间后重试。'),
+                'auth': ('模型服务的密钥或访问权限不可用。', '请检查 API 密钥和模型访问权限后重试。'),
+                'model_not_found': ('模型不存在或无法访问。', '请检查手动填写的模型 ID 及访问权限，或选择其他模型。'),
+                'not_found': ('模型服务地址或模型不可用。', '请检查模型服务地址和手动填写的模型 ID。'),
+                'context_length': ('输入超出模型长度限制。', '请缩短问题或降低研究深度后重试。'),
+                'bad_request': ('模型服务无法处理本次请求。', '请检查模型设置，或更换支持所需功能的模型。'),
+            }
+            output_failures = {
+                'length': ('模型输出达到长度限制。', '请缩短问题或降低研究深度后重试。'),
+                'filtered': ('模型输出受到服务限制。', '请调整问题表述或更换模型后重试。'),
+                'empty': ('模型返回了空内容。', '请稍后重试，或更换模型。'),
+            }
+            if isinstance(exc, ModelServiceError):
+                message, suggestion = model_failures.get(exc.category, ('模型服务暂时不可用。', '请检查模型设置，或稍后重试。'))
+            elif isinstance(exc, StructuredOutputError):
+                message, suggestion = output_failures.get(exc.category, ('模型返回的内容无法使用。', '请更换模型或稍后重试。'))
+            elif safe_http and message.startswith('模型服务'):
+                message = '模型服务未能处理本次请求。'
+                suggestion = '请检查模型服务地址、密钥、模型 ID 和访问权限后重试。'
+            elif safe_http:
+                message = '文献检索服务未能处理本次请求。'
+                suggestion = '请检查网络和检索服务额度，或稍后重试。'
+            else:
+                suggestion = suggestions.get(message, '请检查网络和相关服务设置，或稍后重试。')
+            repository.fail_task(task['id'], message, event={'message': message, 'suggestion': suggestion})
+        else:
+            repository.fail_task(task['id'], message)
     return True
 
 def main():

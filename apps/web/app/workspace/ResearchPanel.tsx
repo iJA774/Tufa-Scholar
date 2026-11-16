@@ -16,6 +16,7 @@ import alertCircleAnimation from "../../../../assets/animations/alert-circle.jso
 import type { Message, Run } from "./types";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import styles from "./ResearchPanel.module.css";
+import { displayReport, safeRunError } from "./reportDisplay";
 
 type Props = {
   run: Run;
@@ -88,6 +89,7 @@ function eventHeading(event: RunEvent) {
   if (event.kind === "tool.completed") return `${toolLabels[tool] || tool || "工具调用"}完成`;
   if (event.kind === "tool.failed") return `${toolLabels[tool] || tool || "工具调用"}失败`;
   if (event.kind === "model.failed") return `${nodeLabels[node] || node || "模型输出"}生成失败`;
+  if (event.kind === "report.fallback") return "正在整理已有研究结果";
   return "研究活动";
 }
 
@@ -194,6 +196,7 @@ function mergeActivityEvents(events: RunEvent[]) {
       continue;
     }
     const node = textField(event.data, "node");
+    if (event.kind === "report.fallback") { entries.push({ event }); continue; }
     if (node === "dispatcher" || event.kind === "dispatch") continue;
     if (event.kind === "node.started") {
       const index = entries.push({ event }) - 1;
@@ -236,6 +239,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
       return latest;
     }, [] as ReturnType<typeof buildModelPreviews>);
   const reportPreview = activityPreviews.find(preview => preview.node === "reporter");
+
   const reportTabAvailable = hasReport || !!reportPreview;
   const [tab, setTab] = useState<"report" | "activities">(reportTabAvailable ? "report" : "activities");
   const tabWasChosen = useRef(false);
@@ -317,7 +321,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
                 return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
               },
               img: () => null,
-            }}>{report.content}</ReactMarkdown>
+            }}>{displayReport(report.content, events.some(event => event.kind === "report.fallback"))}</ReactMarkdown>
           </article>
           {reportId && <div className={styles.reportDownloads}>
             <a href={`/api/reports/${reportId}/markdown`}>下载研究报告</a>
@@ -338,7 +342,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
           <span className={`${styles.rainbowText} ${active ? styles.rainbowAnimated : ""}`}>{stage || status}</span>
           {status !== stage && <span className={styles.statusLabel}>{status}</span>}
         </div>
-        {run.error && <p className={styles.runError}>{run.error}</p>}
+        {run.error && <p className={styles.runError}>{safeRunError(run.error).message}</p>}
         {timeline.length > 0 && <ol className={styles.liveActivityList} aria-label="实时研究活动">
           {timeline.map(({ event, ending }) => {
             const displayEvent = ending || event;

@@ -28,7 +28,7 @@ class ReporterGapsTests(unittest.TestCase):
                 caveats = literature._warning_caveats(state, fallback=True)
                 self.assertTrue(any("预算耗尽" in item for item in caveats))
                 self.assertFalse(any("旧缺口" in item for item in caveats))
-                fallback = literature._reporter_fallback(state, "报告模型不可用")
+                fallback = literature._reporter_fallback(state)
                 self.assertNotIn("旧缺口", fallback["content"])
 
     def test_current_incomplete_review_is_preserved(self):
@@ -53,12 +53,12 @@ class ReporterGapsTests(unittest.TestCase):
         ]
         state['rounds'][0]['draft'] = '# 旧稿\n\naccuracy 80% [[old]]'
         state['rounds'][1]['draft'] = '# 新稿\n\naccuracy 92% [[new]]\n\naccuracy 99% [[outside]]'
-        fallback = literature._reporter_fallback(state, '终稿失败')
+        fallback = literature._reporter_fallback(state)
         self.assertIn('# 新稿', fallback['content'])
         self.assertIn('accuracy 92%', fallback['content'])
         self.assertNotIn('旧稿', fallback['content'])
         self.assertNotIn('99%', fallback['content'])
-        self.assertIn('最近一份通过校验的研究草稿', fallback['content'])
+        self.assertNotIn('最近一份通过校验的研究草稿', fallback['content'])
         self.assertEqual([item['id'] for item in fallback['evidence']], ['new'])
 
     def test_deep_review_retains_current_contradiction(self):

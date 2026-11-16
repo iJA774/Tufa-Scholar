@@ -2,6 +2,7 @@
 
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { createPortal } from "react-dom";
 import remarkGfm from "remark-gfm";
 import { useRunPolling } from "../hooks/useRunPolling";
 import { useRunEvents } from "../hooks/useRunEvents";
@@ -12,6 +13,7 @@ import type { ModelChoice, ResearchDepth, RelevanceFilter } from "./preferences"
 import { webSourceLabel } from "./sourceLabels";
 import HeroEmblem from "./HeroEmblem";
 import ResearchPanel from "./ResearchPanel";
+import { displayReport, safeRunError } from "./reportDisplay";
 import styles from "./ResearchChat.module.css";
 
 const statusText: Record<string, string> = {
@@ -301,6 +303,9 @@ export default function ResearchChat({
   onError,
 }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const [closingNotice, setClosingNotice] = useState(false);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [query, setQuery] = useState("");
   const [run, setRun] = useState<Run>();
   const [loadedConversationId, setLoadedConversationId] = useState<number>();
@@ -353,6 +358,40 @@ export default function ResearchChat({
   const progressEvents = progressRun?.id === run?.id
     ? liveEvents
     : progressRun?.id === historyRunCandidate?.id ? historyEvents : [];
+  const noticeRun = hasConversation && loadedConversationId === conversationId ? run : undefined;
+  const noticeEvents = noticeRun?.id === run?.id ? liveEvents : [];
+  const fallbackEvent = [...noticeEvents].reverse().find(event => event.kind === "report.fallback");
+  const failedEvent = [...noticeEvents].reverse().find(event => event.kind === "task.failed");
+  const failed = noticeRun && ["failed", "interrupted"].includes(noticeRun.status);
+  const noticeKey = noticeRun && (failed || fallbackEvent) ? `${conversationId}:${noticeRun.id}:${failed ? "failed" : "fallback"}` : undefined;
+  const failureDetails = safeRunError(noticeRun?.error);
+  const fallbackMessage = typeof fallbackEvent?.data.message === "string" ? fallbackEvent.data.message : "终稿未能完成，已保留已有研究结果。";
+  const noticeMessage = failed ? (typeof failedEvent?.data.message === "string" && !/HTTP\s*\d/i.test(failedEvent.data.message) ? failedEvent.data.message : failureDetails.message) : fallbackMessage;
+  const suggestionValue = failed ? failedEvent?.data.suggestion : fallbackEvent?.data.suggestion;
+  const noticeSuggestion = typeof suggestionValue === "string" && suggestionValue ? suggestionValue : failed ? failureDetails.suggestion : /模型不存在或无法访问/.test(fallbackMessage) ? "请检查手动填写的模型 ID 及访问权限，或选择其他模型。" : "请检查服务配置后重试。";
+  const noticeVisible = !!noticeKey && !dismissed.has(noticeKey);
+  useEffect(() => {
+    try { setDismissed(new Set(JSON.parse(sessionStorage.getItem("tufa.dismissedResearchNotices") || "[]"))); } catch { /* Storage may be unavailable. */ }
+  }, []);
+  useEffect(() => {
+    setClosingNotice(false);
+    return () => { if (noticeTimer.current) clearTimeout(noticeTimer.current); noticeTimer.current = null; };
+  }, [noticeKey]);
+  const closeNotice = () => {
+    if (!noticeKey || noticeTimer.current || closingNotice) return;
+    const finish = () => {
+      noticeTimer.current = null;
+      setDismissed(previous => {
+        const next = new Set(previous).add(noticeKey);
+        try { sessionStorage.setItem("tufa.dismissedResearchNotices", JSON.stringify([...next])); } catch { /* Storage may be unavailable. */ }
+        return next;
+      });
+      setClosingNotice(false);
+    };
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { finish(); return; }
+    setClosingNotice(true);
+    noticeTimer.current = setTimeout(finish, 180);
+  };
   const quickDraft = run?.research_mode === "quick"
     ? buildModelPreviews(liveEvents, run.research_mode).find(preview => preview.node === "dispatcher")?.text
     : undefined;
@@ -529,7 +568,6 @@ export default function ResearchChat({
           prefer_primary_evidence: preferPrimaryEvidence,
           relevance_filter: relevanceFilter,
           model_name: modelChoice.model_name.trim() || undefined,
-          reasoning_effort: modelChoice.reasoning_effort || undefined,
         }), signal: controller.signal },
       );
       const [nextRun, nextMessages, nextRuns] = await Promise.all([
@@ -609,6 +647,10 @@ export default function ResearchChat({
   ];
 
   return <main className={`${styles.workspace} ${hasConversation ? styles.workspaceConversation : ""} ${density === "compact" ? styles.compact : ""} ${progressRun ? styles.workspaceResearchLayout : ""} ${progressRun && researchPanelOpen ? styles.workspaceWithPanel : ""}`}>
+    {noticeVisible && typeof document !== "undefined" && createPortal(<div className={`${styles.researchNotice} ${closingNotice ? styles.researchNoticeClosing : ""}`}>
+      <div role="status" aria-live="polite"><strong>{failed ? "研究任务未完成" : "报告已降级"}</strong><p>{noticeMessage}</p><p>{noticeSuggestion}</p></div>
+      <button type="button" aria-label="关闭研究通知" onClick={closeNotice}>×</button>
+    </div>, document.body)}
     <div className={styles.chatColumn}>
     {!hasConversation ? <section className={styles.welcome} aria-label="开始一项新研究">
       <div className={`${styles.heroLight} ${!ambient ? styles.heroLightMuted : ""}`} aria-hidden="true" />
@@ -638,7 +680,7 @@ export default function ResearchChat({
                     return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
                   },
                   img: () => null,
-                }}>{message.content}</ReactMarkdown> : message.content}
+                }}>{displayReport(message.content, message.run_id === noticeRun?.id && !!fallbackEvent)}</ReactMarkdown> : message.content}
               </div>
               {message.metadata?.evidence?.map((citation, index) => {
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
@@ -671,7 +713,7 @@ export default function ResearchChat({
 
     <div className={`${styles.chatBottom} ${hasConversation ? styles.chatBottomConversation : ""}`}>
       {run && !["succeeded", "success", "completed"].includes(run.status) && !activeRun && <div className={styles.runNotice} role="status">
-        <div><strong>{statusText[run.status] || run.status}</strong>{stageSuffix(run) && <span>{stageSuffix(run)}</span>}{run.research_mode && <span> · {modeText(run.research_mode)}</span>}{run.error && <p>{run.error}</p>}</div>
+        <div><strong>{statusText[run.status] || run.status}</strong>{stageSuffix(run) && <span>{stageSuffix(run)}</span>}{run.research_mode && <span> · {modeText(run.research_mode)}</span>}{run.error && <p>{safeRunError(run.error).message}</p>}</div>
         {(["failed", "interrupted"].includes(run.status)) && <button type="button" disabled={!!busy} onClick={retry}>{busy === "retry" ? "重新执行中…" : "重新执行"}</button>}
       </div>}
       <form className={styles.composer} onSubmit={submit} autoComplete="off">

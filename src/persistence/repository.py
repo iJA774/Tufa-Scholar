@@ -294,8 +294,13 @@ def finish_task(task_id, result):
         db.commit()
 
 
-def fail_task(task_id, error):
+def fail_task(task_id, error, event=None):
     with connect_database() as db:
+        if event is not None:
+            db.execute("""INSERT INTO research_events(run_id, kind, data)
+                SELECT id, 'task.failed', ? FROM tasks WHERE id=? AND kind='chat' AND status='running'
+                AND NOT EXISTS (SELECT 1 FROM research_events WHERE run_id=tasks.id AND kind='task.failed')""",
+                (json.dumps(event, ensure_ascii=False, separators=(',', ':')), task_id))
         db.execute("UPDATE tasks SET status='failed',stage='failed',error=? WHERE id=?", (str(error),task_id))
         db.commit()
 

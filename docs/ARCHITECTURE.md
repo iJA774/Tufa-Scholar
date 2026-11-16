@@ -36,7 +36,7 @@ Next.js `/` 是独立开始页，只提供“开始使用”和 GitHub 两个入
 
 API 创建任务并返回 ID，单 worker 领取后准备范围数据和对话历史。Agent 只接收研究输入与显式历史，不读写任务表；`on_stage(stage)` 将节点阶段交给 worker 持久化，`on_subtask(note)` 将轮次小结交给 worker 展示和保存。Agent 返回最终正文与引用证据，worker 与消息、报告在任务完成时提交结果。worker 重启时将遗留运行任务标为中断，用户可显式重试。
 
-`on_event(kind, data)` 将研究节点、工具和模型输出事件交给 worker，按任务写入 SQLite。`GET /runs/{id}/events` 用 SSE 发送有序事件并在任务终态后关闭。客户端可用 `after` 或 `Last-Event-ID` 续读，任务重试使用新任务 ID，删除任务时清除关联事件。模型工具决策可带简短的公开操作目的，理由与工具实际参数分开。报告正文及证据仍由原有校验和事务决定。
+`on_event(kind, data)` 将研究节点、工具和模型输出事件交给 worker，按任务写入 SQLite。`GET /runs/{id}/events` 用 SSE 发送有序事件并在任务终态后关闭。客户端可用 `after` 或 `Last-Event-ID` 续读，任务重试使用新任务 ID，删除任务时清除关联事件。模型工具决策可带简短的公开操作目的，理由与工具实际参数分开。终稿开始降级时发出 `report.fallback`，worker 将 `task.failed` 与任务失败状态一起提交。两类通知事件提供预定义的原因和处理建议，由工作区顶部通知展示。报告正文及证据仍由原有校验和事务决定。
 
 会话的置顶状态通过 `PATCH /conversations/{conversation_id}` 写入 SQLite；既有会话迁移后默认不置顶。历史删除在用户确认后调用 `DELETE /conversations/{conversation_id}`。仓储在同一写事务中检查任务状态和删除会话、消息、报告及其任务，保留项目与文献；有待处理或正在运行的任务时返回 409。
 

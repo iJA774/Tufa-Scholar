@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from src.agents import literature as workflow
+from src.integrations.model import ModelServiceError, StructuredOutputError
 
 
 def evidence(identifier, **fields):
@@ -10,6 +11,48 @@ def evidence(identifier, **fields):
 
 
 class ReporterEvidenceTests(unittest.TestCase):
+    def test_fallback_announces_safe_reason_before_recovery_and_saves_it(self):
+        cases = [(ModelServiceError('secret', category='timeout'), '超时'),
+                 (ModelServiceError('secret', category='rate_limit'), '频繁'),
+                 (ModelServiceError('secret', category='auth'), '权限'),
+                 (ModelServiceError('secret', category='model_not_found'), '模型不存在'),
+                 (ModelServiceError('secret', category='context_length'), '输入长度限制'),
+                 (ModelServiceError('secret', category='not_found'), '地址或模型'),
+                 (ModelServiceError('secret', category='bad_request'), '模型设置'),
+                 (StructuredOutputError('secret', category='length'), '长度限制'),
+                 (StructuredOutputError('secret', category='empty'), '空内容')]
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                events = []
+                state = {'research': {'query': 'study', 'source': 'auto'}, 'evidence_pool': [],
+                         '_event_context': workflow._EventContext(lambda kind, data: events.append((kind, data)))}
+                original = workflow._reporter_fallback
+                def recover(*args):
+                    self.assertEqual(events[-1][0], 'report.fallback')
+                    return original(*args)
+                with patch.object(workflow, '_model', side_effect=error), patch.object(workflow, '_reporter_fallback', side_effect=recover):
+                    result = workflow._reporter(state, None)
+                self.assertTrue(result['report_fallback'])
+                self.assertNotIn(expected, result['content'])
+                self.assertNotIn('终稿未完成', result['content'])
+                self.assertTrue(events[-1][1]['suggestion'])
+                self.assertNotIn('证据不足：', result['content'])
+                self.assertIn(expected, events[-1][1]['message'])
+                self.assertNotIn('secret', str(events) + result['content'])
+
+    def test_missing_graph_content_announces_fallback(self):
+        events = []
+        graph = unittest.mock.Mock()
+        graph.invoke.return_value = {'research': {'source': 'local'}, 'evidence_pool': [], 'rounds': []}
+        with patch.object(workflow, '_graph', return_value=graph):
+            content, evidence = workflow.run(
+                {'query': 'study', 'project_id': 1, 'source': 'local'},
+                history=[], on_event=lambda kind, data: events.append((kind, data)))
+        self.assertTrue(content)
+        self.assertEqual(evidence, [])
+        self.assertEqual(events[0][0], 'report.fallback')
+        self.assertTrue(events[0][1]['suggestion'])
+
     def test_later_evidence_reaches_model_and_final_report(self):
         old = [evidence(f'old{i}') for i in range(12)]
         new = evidence('later', title='Supplement', source_level='web_content',

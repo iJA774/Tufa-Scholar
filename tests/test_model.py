@@ -942,6 +942,40 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(self.diagnostics_mock.call_args.kwargs['kind'], 'http_error')
                 self.assertNotIn('response', self.diagnostics_mock.call_args.kwargs)
 
+    def test_report_failure_categories_are_derived_from_protocol(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            for status, category in [(429, 'rate_limit'), (401, 'auth'), (403, 'auth'), (503, 'service'), (408, 'timeout'), (404, 'not_found'), (400, 'bad_request'), (413, 'context_length')]:
+                with self.subTest(status=status), patch('src.integrations.model.httpx.post', return_value=self.response('private', status=status)):
+                    with self.assertRaises(ModelServiceError) as error:
+                        structured('literature/reporter', {}, None, template_context=self.context())
+                    self.assertEqual(error.exception.category, category)
+
+            for code, category in [('model_not_found', 'model_not_found'), ('context_length_exceeded', 'context_length'), ('secret model_not_found', 'bad_request')]:
+                response = httpx.Response(400, request=httpx.Request('POST', config['base_url']),
+                    json={'error': {'code': code, 'message': 'private'}})
+                with self.subTest(code=code), patch('src.integrations.model.httpx.post', return_value=response):
+                    with self.assertRaises(ModelServiceError) as error:
+                        structured('literature/reporter', {}, None, template_context=self.context())
+                    self.assertEqual(error.exception.category, category)
+            for finish, content, category in [('length', 'partial', 'length'), ('content_filter', '', 'filtered'), ('stop', '', 'empty')]:
+                response = httpx.Response(200, request=httpx.Request('POST', config['base_url']),
+                    json={'choices': [{'message': {'content': content}, 'finish_reason': finish}]})
+                with self.subTest(category=category), patch('src.integrations.model.httpx.post', return_value=response):
+                    with self.assertRaises(StructuredOutputError) as error:
+                        structured('literature/reporter', {}, None, template_context=self.context())
+                    self.assertEqual(error.exception.category, category)
+
+    def test_error_categories_skip_unneeded_bodies_and_tolerate_malformed_json(self):
+        for status in (401, 403, 408, 429, 500):
+            response = httpx.Response(status, request=httpx.Request('POST', 'https://example.invalid'))
+            with self.subTest(status=status), patch.object(response, 'read', side_effect=AssertionError('unexpected read')):
+                model_client._model_http_failure_category(response)
+        response = httpx.Response(400, request=httpx.Request('POST', 'https://example.invalid'), content=b'{')
+        self.assertEqual(model_client._model_http_failure_category(response), 'bad_request')
+        with patch('src.integrations.model.json.loads', side_effect=RecursionError):
+            self.assertEqual(model_client._model_http_failure_category(response), 'bad_request')
+
     def test_corrected_validation_failure_writes_replayable_diagnostic(self):
         from src.agents.literature import DispatcherOutput
         from src.infrastructure.diagnostics import diagnostic_scope

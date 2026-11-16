@@ -136,6 +136,31 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(data[0]['context'], {'run_id': task['run_id'], 'project_id': project})
             self.assertEqual(data[1]['context'], {})
             self.assertEqual(repository.get_task(task['run_id'])['status'], 'failed')
+            status, events = repository.research_event_batch(task['run_id'], 0)
+            self.assertEqual(status, 'failed')
+            failures = [event for event in events if event['kind'] == 'task.failed']
+            self.assertEqual(len(failures), 1)
+            self.assertTrue(failures[0]['data']['suggestion'])
+            self.assertNotIn('failure', str(failures))
+            self.assertEqual(repository.research_event_batch(task['run_id'], failures[0]['id'])[1], [])
+
+    def test_model_failure_categories_are_safe_and_replayed(self):
+        from apps.worker.__main__ import run_once
+        from src.integrations.model import ModelServiceError
+        for category, expected in [('rate_limit', '限流'), ('auth', '权限'),
+                                   ('not_found', '地址或模型'), ('timeout', '超时')]:
+            with self.subTest(category=category), tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
+                initialize_storage()
+                project = repository.create_project('failure')['id']
+                run_id = repository.create_question(project, None, 'question', 'local')['run_id']
+                with patch('src.agents.literature.run', side_effect=ModelServiceError('secret', category=category)):
+                    run_once()
+                status, events = repository.research_event_batch(run_id, 0)
+                self.assertEqual(status, 'failed')
+                self.assertEqual(len(events), 1)
+                self.assertIn(expected, events[0]['data']['message'])
+                self.assertTrue(events[0]['data']['suggestion'])
+                self.assertNotIn('secret', str(events))
 
     def test_local_ranking_via_actual_worker_entry(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):

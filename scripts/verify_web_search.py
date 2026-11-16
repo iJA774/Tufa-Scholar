@@ -250,9 +250,17 @@ def main():
             recovered = wait(rejected_report['run_id'])
             assert recovered['status'] == 'succeeded', recovered
             recovered_report = recovered['result']
-            assert '草稿' in recovered_report['content']
+            assert '终稿未能完成' not in recovered_report['content']
+            assert '终稿未完成' not in recovered_report['content']
+            assert '最近一份通过校验的研究草稿' not in recovered_report['content']
             assert '92%' in recovered_report['content']
             assert 'fixture-unavailable' not in recovered_report['content']
+            replay = client.get(f"/runs/{rejected_report['run_id']}/events")
+            replay.raise_for_status()
+            replayed_events = [json.loads(line[6:]) for line in replay.text.splitlines() if line.startswith('data: ')]
+            fallback_events = [event for event in replayed_events if event['kind'] == 'report.fallback']
+            assert len(fallback_events) == 1, fallback_events
+            assert fallback_events[0]['data'].get('message') and fallback_events[0]['data'].get('suggestion')
             stage_citations = {identifier for step in recovered['subtasks']
                                for finding in step['findings'] for identifier in finding['citations']}
             recovered_ids = {item['id'] for item in recovered_report['evidence']}
