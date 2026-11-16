@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
+import { type ChangeEvent, type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
 import { api } from "../workspace/api";
 import { DEFAULT_PREFERENCES, type ReportFormat, type WorkspacePreferences } from "../workspace/preferences";
@@ -48,9 +48,33 @@ const reportFormatOptions: { value: ReportFormat; label: string }[] = [
   { value: "exploratory", label: "探索发现" },
 ];
 
+function PreferenceSegments<T extends string>({ label, name, options, value, warningValue, onChange }: {
+  label: string;
+  name: string;
+  options: readonly { value: T; label: string }[];
+  value: T;
+  warningValue: T;
+  onChange: (value: T) => void;
+}) {
+  const index = options.findIndex(option => option.value === value);
+
+  return <fieldset
+    className={styles.segmentedOptions}
+    aria-label={label}
+    data-warning={value === warningValue}
+    style={{ "--active-segment-index": index } as CSSProperties}
+  >
+    {options.map(option => <label key={option.value} className={styles.segmentedOption} data-warning={option.value === warningValue}>
+      <input type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} />
+      {value === option.value && option.value === warningValue && <svg className={styles.warningIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 22 20.5H2L12 3.5Z" /><path d="M12 9v5.3M12 17.6v.1" /></svg>}
+      <span>{option.label}</span>
+    </label>)}
+  </fieldset>;
+}
+
 function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange: (value: ReportFormat) => void }) {
-  const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const selectedIndex = Math.max(0, reportFormatOptions.findIndex(option => option.value === value));
   const [open, setOpen] = useState(false);
@@ -60,51 +84,48 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
     if (!open) setActiveIndex(selectedIndex);
   }, [open, selectedIndex]);
 
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [open]);
+  useLayoutEffect(() => {
+    const anchor = trigger.current;
+    const list = menu.current;
+    if (!open || !anchor || !list) return;
 
-  useEffect(() => {
-    if (!open) return;
-    const frame = window.requestAnimationFrame(() => {
-      const menu = root.current?.querySelector<HTMLElement>("[role='listbox']");
-      const scroller = root.current?.closest<HTMLElement>("[role='tabpanel']");
-      if (!menu || !scroller) return;
-      const menuBottom = menu.getBoundingClientRect().bottom;
-      const scrollerBottom = scroller.getBoundingClientRect().bottom;
-      const overflow = menuBottom - scrollerBottom;
-      if (overflow > 0) {
-        scroller.scrollBy({
-          top: overflow + 12,
-          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-        });
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [open, menuId]);
+    const positionMenu = () => {
+      const gap = 7;
+      const inset = 8;
+      const { clientWidth, clientHeight } = document.documentElement;
+      const rect = anchor.getBoundingClientRect();
+      const width = Math.min(Math.max(rect.width, 180), clientWidth - inset * 2);
+      list.style.width = `${width}px`;
+      list.style.left = `${Math.max(inset, Math.min(rect.right - width, clientWidth - width - inset))}px`;
+      const height = list.scrollHeight + (list.offsetHeight - list.clientHeight);
+      const below = clientHeight - rect.bottom - gap - inset;
+      const above = rect.top - gap - inset;
+      const opensAbove = below < height && above > below;
+      const available = Math.max(0, opensAbove ? above : below);
+      list.style.maxHeight = `${available}px`;
+      list.style.top = `${opensAbove ? rect.top - gap - Math.min(height, available) : rect.bottom + gap}px`;
+    };
+
+    positionMenu();
+    window.addEventListener("resize", positionMenu);
+    window.addEventListener("scroll", positionMenu, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("resize", positionMenu);
+      window.removeEventListener("scroll", positionMenu, true);
+    };
+  }, [open]);
 
   const chooseFormat = (index: number) => {
     const option = reportFormatOptions[index];
     if (!option) return;
     onChange(option.value);
-    setOpen(false);
-    trigger.current?.focus();
+    menu.current?.hidePopover();
+    trigger.current?.focus({ preventScroll: true });
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === "Escape" && open) {
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      return;
-    }
     if (event.key === "Tab") {
-      if (open) setOpen(false);
+      if (open) menu.current?.hidePopover();
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -112,7 +133,7 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
       const delta = event.key === "ArrowDown" ? 1 : -1;
       if (!open) {
         setActiveIndex(selectedIndex);
-        setOpen(true);
+        event.currentTarget.click();
       } else {
         setActiveIndex(index => (index + delta + reportFormatOptions.length) % reportFormatOptions.length);
       }
@@ -121,7 +142,7 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
       setActiveIndex(event.key === "Home" ? 0 : reportFormatOptions.length - 1);
-      setOpen(true);
+      if (!open) event.currentTarget.click();
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -129,12 +150,12 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
       if (open) chooseFormat(activeIndex);
       else {
         setActiveIndex(selectedIndex);
-        setOpen(true);
+        event.currentTarget.click();
       }
     }
   };
 
-  return <div ref={root} className={styles.reportFormatPicker}>
+  return <div className={styles.reportFormatPicker}>
     <button
       ref={trigger}
       className={styles.reportFormatTrigger}
@@ -145,25 +166,20 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
       aria-expanded={open}
       aria-controls={menuId}
       aria-activedescendant={open ? `${menuId}-option-${activeIndex}` : undefined}
-      onClick={() => {
-        if (open) setOpen(false);
-        else {
-          setActiveIndex(selectedIndex);
-          setOpen(true);
-        }
-      }}
+      popoverTarget={menuId}
       onKeyDown={handleKeyDown}
     >
       <span>{reportFormatOptions[selectedIndex]?.label}</span>
       <svg className={open ? styles.reportFormatChevronOpen : styles.reportFormatChevron} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
     </button>
     <div
+      ref={menu}
       id={menuId}
-      className={`${styles.reportFormatMenu} ${open ? styles.reportFormatMenuOpen : styles.reportFormatMenuClosed}`}
+      className={styles.reportFormatMenu}
+      popover="auto"
       role="listbox"
       aria-label="报告格式"
-      aria-hidden={!open}
-      inert={!open}
+      onToggle={event => setOpen(event.newState === "open")}
     >
       {reportFormatOptions.map((option, index) => <div
         id={`${menuId}-option-${index}`}
@@ -355,7 +371,7 @@ export default function SettingsPanel({
           </div>
 
           <main
-            className={styles.content}
+            className={`${styles.content} ${activeTab === "research" ? styles.researchContent : ""}`}
             id="settings-content"
             role="tabpanel"
             aria-labelledby={`settings-tab-${activeTab}`}
@@ -405,13 +421,7 @@ export default function SettingsPanel({
               <div className={styles.settingHeading}>
                 <strong>研究深度</strong>
               </div>
-              <fieldset className={`${styles.segmentedOptions} ${preferences.researchDepth === "deep" ? styles.segmentedOptionsStrict : ""}`} aria-label="研究深度">
-                {depthOptions.map(option => <label key={option.value} className={`${styles.segmentedOption} ${preferences.researchDepth === option.value ? styles.segmentedOptionSelected : ""} ${option.value === "deep" ? styles.segmentedOptionStrict : ""}`}>
-                  <input type="radio" name="research-depth" value={option.value} checked={preferences.researchDepth === option.value} onChange={() => updatePreference("researchDepth", option.value)} />
-                  {option.value === "deep" && preferences.researchDepth === "deep" && <svg className={styles.warningIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 22 20.5H2L12 3.5Z" /><path d="M12 9v5.3M12 17.6v.1" /></svg>}
-                  <span>{option.label}</span>
-                </label>)}
-              </fieldset>
+              <PreferenceSegments label="研究深度" name="research-depth" options={depthOptions} value={preferences.researchDepth} warningValue="deep" onChange={value => updatePreference("researchDepth", value)} />
               <p className={`${styles.depthDescription} ${preferences.researchDepth === "deep" ? styles.depthDescriptionWarning : ""}`} aria-live="polite">
                 <strong>{depthOptions.find(option => option.value === preferences.researchDepth)?.label}：</strong>
                 {depthDescriptions[preferences.researchDepth]}
@@ -432,13 +442,7 @@ export default function SettingsPanel({
               <div className={styles.settingHeading}>
                 <strong>相关性过滤强度</strong>
               </div>
-              <fieldset className={`${styles.segmentedOptions} ${preferences.relevanceFilter === "strict" ? styles.segmentedOptionsStrict : ""}`} aria-label="相关性过滤强度">
-                {relevanceOptions.map(option => <label key={option.value} className={`${styles.segmentedOption} ${preferences.relevanceFilter === option.value ? styles.segmentedOptionSelected : ""} ${option.value === "strict" ? styles.segmentedOptionStrict : ""}`}>
-                  <input type="radio" name="relevance-filter" value={option.value} checked={preferences.relevanceFilter === option.value} onChange={() => updatePreference("relevanceFilter", option.value)} />
-                  {option.value === "strict" && preferences.relevanceFilter === "strict" && <svg className={styles.warningIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 22 20.5H2L12 3.5Z" /><path d="M12 9v5.3M12 17.6v.1" /></svg>}
-                  <span>{option.label}</span>
-                </label>)}
-              </fieldset>
+              <PreferenceSegments label="相关性过滤强度" name="relevance-filter" options={relevanceOptions} value={preferences.relevanceFilter} warningValue="strict" onChange={value => updatePreference("relevanceFilter", value)} />
               <p className={`${styles.relevanceDescription} ${preferences.relevanceFilter === "strict" ? styles.relevanceDescriptionStrict : ""}`} aria-live="polite">
                 <strong>{relevanceOptions.find(option => option.value === preferences.relevanceFilter)?.label}：</strong>
                 {relevanceOptions.find(option => option.value === preferences.relevanceFilter)?.description}

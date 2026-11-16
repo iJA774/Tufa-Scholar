@@ -1,4 +1,5 @@
 .dialog {
+  --selection-slide: transform .21s cubic-bezier(.2, 0, .38, .9);
   --dialog-fade-in-duration: 200ms;
   --dialog-enter-duration: 250ms;
   --dialog-exit-duration: 180ms;
@@ -143,7 +144,7 @@
   background: linear-gradient(105deg, rgba(136, 98, 232, .2), rgba(87, 91, 175, .09));
   box-shadow: inset 2px 0 #a88aff;
   pointer-events: none;
-  transition: transform .21s cubic-bezier(.2, 0, .38, .9);
+  transition: var(--selection-slide);
 }
 
 .tabs .tabIndicator { transform: translateY(calc(var(--indicator-step) * var(--active-tab-index, 0))); }
@@ -211,6 +212,8 @@
   scrollbar-color: rgba(183, 164, 226, .32) transparent;
   scrollbar-width: thin;
 }
+
+.content.researchContent { padding-block: 14px 16px; }
 
 .sectionStack {
   display: grid;
@@ -423,15 +426,39 @@
 }
 
 .segmentedOptions {
+  --segment-gap: 3px;
+  --segment-inset: 3px;
+  position: relative;
+  min-inline-size: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 3px;
+  gap: var(--segment-gap);
   margin: 0;
-  padding: 3px;
-  border: 1px solid rgba(178, 146, 255, .24);
+  padding: var(--segment-inset);
+  border: 0;
   border-radius: 999px;
   background: rgba(4, 4, 10, .34);
-  transition: border-color .18s, box-shadow .18s;
+}
+
+.segmentedOptions::before {
+  position: absolute;
+  inset: var(--segment-inset) auto var(--segment-inset) var(--segment-inset);
+  width: calc((100% - 2 * var(--segment-inset) - 2 * var(--segment-gap)) / 3);
+  box-sizing: border-box;
+  border: 1px solid rgba(201, 174, 255, .22);
+  border-radius: inherit;
+  background: linear-gradient(105deg, rgba(136, 98, 232, .28), rgba(217, 113, 171, .19));
+  box-shadow: inset 0 0 0 1px rgba(217, 180, 255, .08);
+  content: "";
+  pointer-events: none;
+  transform: translateX(calc((100% + var(--segment-gap)) * var(--active-segment-index)));
+  transition: var(--selection-slide);
+}
+
+.segmentedOptions[data-warning="true"]::before {
+  border-color: rgba(255, 133, 148, .62);
+  background: linear-gradient(105deg, rgba(192, 48, 72, .35), rgba(128, 32, 55, .28));
+  box-shadow: inset 0 0 0 1px rgba(255, 150, 163, .12);
 }
 
 .segmentedOption {
@@ -443,43 +470,20 @@
   justify-content: center;
   gap: 5px;
   padding: 6px 8px;
-  border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
   color: #aaa7b8;
   cursor: pointer;
   font-size: 12px;
   text-align: center;
-  transition: color .16s, border-color .16s, background .16s, box-shadow .16s;
+  transition: color .16s;
 }
 
-.segmentedOption:hover {
-  border-color: rgba(201, 174, 255, .22);
-  color: #eeeaff;
-}
-
-.segmentedOptionSelected {
-  border-color: rgba(201, 174, 255, .22);
-  background: linear-gradient(105deg, rgba(136, 98, 232, .28), rgba(217, 113, 171, .19));
-  box-shadow: inset 0 0 0 1px rgba(217, 180, 255, .08);
-  color: #f3edff;
-}
-
-.segmentedOptionsStrict {
-  border-color: rgba(241, 95, 117, .72);
-  box-shadow: 0 0 0 2px rgba(204, 55, 79, .12), 0 0 22px rgba(204, 55, 79, .1);
-}
-
-.segmentedOptionStrict { color: #d4a0a7; }
-
-.segmentedOptionStrict.segmentedOptionSelected {
-  border-color: rgba(255, 133, 148, .62);
-  background: linear-gradient(105deg, rgba(192, 48, 72, .35), rgba(128, 32, 55, .28));
-  box-shadow: inset 0 0 0 1px rgba(255, 150, 163, .12);
-  color: #ff9eaa;
-}
-
-.segmentedOptionsStrict .segmentedOptionSelected .warningIcon { color: #ff8392; }
+.segmentedOption[data-warning="true"] { color: #d4a0a7; }
+.segmentedOption:hover,
+.segmentedOption:has(input:checked) { color: #f3edff; }
+.segmentedOption[data-warning="true"]:has(input:checked) { color: #ff9eaa; }
+.segmentedOption .warningIcon { color: #ff8392; }
 
 .segmentedOption input {
   position: absolute;
@@ -490,9 +494,9 @@
   white-space: nowrap;
 }
 
-.segmentedOption:focus-within {
+.segmentedOption:has(input:focus-visible) {
   outline: 2px solid #b9a3ff;
-  outline-offset: 2px;
+  outline-offset: -4px;
 }
 
 .dialog input[type="checkbox"]:focus {
@@ -580,7 +584,6 @@
 }
 
 .reportFormatPicker {
-  position: relative;
   min-width: 0;
 }
 
@@ -629,35 +632,23 @@
 .reportFormatChevronOpen { transform: rotate(180deg); }
 
 .reportFormatMenu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 7px);
-  z-index: 12;
-  width: 100%;
-  min-width: 180px;
+  position: fixed;
+  inset: 100dvh auto auto;
+  margin: 0;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 5px;
   border: 1px solid rgba(187, 169, 255, .24);
   border-radius: 11px;
   background: #171521;
   box-shadow: 0 12px 32px rgba(0, 0, 0, .52), 0 0 24px rgba(129, 87, 255, .1);
   transform-origin: top right;
-  transition: opacity .14s ease, transform .14s ease, visibility .14s;
+  transition: opacity .14s ease, transform .14s ease;
 }
 
-.reportFormatMenuClosed {
-  visibility: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(4px) scale(.985);
-}
-
-.reportFormatMenuOpen {
-  position: static;
-  margin-top: 7px;
-  visibility: visible;
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0) scale(1);
+@starting-style {
+  .reportFormatMenu:popover-open { opacity: 0; transform: scale(.985); }
 }
 
 .reportFormatOption {
@@ -1079,14 +1070,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .dialog, .dialog::backdrop, .tabIndicator { transition: none; }
-  .segmentedOption, .segmentedOptions, .reportFormatTrigger, .reportFormatChevron, .reportFormatChevronOpen,
+  .segmentedOption, .segmentedOptions::before, .reportFormatTrigger, .reportFormatChevron, .reportFormatChevronOpen,
   .reportFormatMenu, .reportFormatOption { transition: none; }
 }
 
 @media (max-width: 440px) {
   .content { --setting-help-width: min(280px, calc(100vw - 164px)); }
 
-  .segmentedOptions { gap: 2px; }
+  .segmentedOptions { --segment-gap: 2px; }
   .segmentedOption { gap: 3px; padding: 6px 4px; font-size: 11px; }
   .warningIcon { width: 13px; height: 13px; }
 
