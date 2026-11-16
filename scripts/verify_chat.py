@@ -205,7 +205,20 @@ def main():
 
             messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
             assert len(messages) == 2
-            print('Simulated model: API/worker, research preference retry persistence, direct answer, PDF evidence, report and empty collection passed.')
+            # Regeneration uses the current model and the original question/scope,
+            # while retaining the old report and avoiding a duplicate user message.
+            before = len(fixture.model_requests)
+            regenerated = call('POST', f"/runs/{retry['id']}/regenerate", json={'model_name': 'fixture-replacement'})
+            assert regenerated['origin_run_id'] == pending['run_id']
+            assert {key: regenerated[key] for key in preferences} == preferences
+            regenerated_task = wait(regenerated['id'])
+            assert regenerated_task['status'] == 'succeeded', regenerated_task
+            assert regenerated_task['result']['evidence']
+            assert all(request['model'] == 'fixture-replacement' for request in fixture.model_requests[before:])
+            messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
+            assert [message['role'] for message in messages] == ['user', 'assistant', 'assistant']
+            assert client.get(f'/reports/{report_id}/markdown').status_code == 200
+            print('Simulated model: API/worker, retry and regeneration, direct answer, PDF evidence, report and empty collection passed.')
             print('Cloud model and real-provider quality were not exercised.')
     finally:
         try:

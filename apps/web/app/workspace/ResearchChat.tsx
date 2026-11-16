@@ -625,6 +625,30 @@ export default function ResearchChat({
     });
   };
 
+  const regenerate = async (runId: number) => {
+    if (busy || activeRun || loadingConversation || actionController.current) return;
+    const marker = selectionEpoch.current;
+    const controller = new AbortController();
+    actionController.current = controller;
+    setBusy(`regenerate:${runId}`);
+    try {
+      const next = await api<Run>(`/runs/${runId}/regenerate`, {
+        ...json({ model_name: modelChoice.model_name.trim() || undefined }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || selectionEpoch.current !== marker) return;
+      setRun(next);
+      setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
+      setResearchPanelOpen(isDeepResearchRun(next));
+      onHistoryUpdated();
+    } catch (error) {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
+    } finally {
+      if (actionController.current === controller) actionController.current = null;
+      if (selectionEpoch.current === marker) setBusy("");
+    }
+  };
+
   const choosePreset = (value: string) => {
     setQuery(value);
     textarea.current?.focus();
@@ -684,6 +708,18 @@ export default function ResearchChat({
                   img: () => null,
                 }}>{displayReport(message.content, message.run_id === noticeRun?.id && !!fallbackEvent)}</ReactMarkdown> : message.content}
               </div>
+              {message.role === "user" && message.run_id && <div className={styles.questionActions}>
+                <button
+                  className={styles.regenerateButton}
+                  type="button"
+                  disabled={!!busy || !!activeRun || loadingConversation || projectLoading}
+                  onClick={() => void regenerate(message.run_id!)}
+                  title="使用当前模型设置重新回答，保留原问题和研究范围"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" /></svg>
+                  {busy === `regenerate:${message.run_id}` ? "正在提交…" : "重新回答"}
+                </button>
+              </div>}
               {message.metadata?.evidence?.map((citation, index) => {
                 if (citation.id && referenceIds.has(citation.id)) return null;
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);

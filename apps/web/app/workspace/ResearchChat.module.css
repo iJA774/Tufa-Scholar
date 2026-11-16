@@ -321,6 +321,12 @@
 .citation a, .reportLinks a { color: #a7a0e7; text-decoration: none; }
 .citation a:hover, .reportLinks a:hover { color: #d4d0ff; text-decoration: underline; }
 .reportLinks { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 12px; font-size: 11px; }
+.questionActions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.regenerateButton { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #b8afd9; font: inherit; font-size: 11px; cursor: pointer; }
+.regenerateButton svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.regenerateButton:hover:not(:disabled) { border-color: rgba(190, 174, 255, .22); background: rgba(137, 112, 207, .12); color: #e1d9ff; }
+.regenerateButton:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
+.regenerateButton:disabled { opacity: .45; cursor: not-allowed; }
 .loadingMessages { margin: auto; color: #777587; font-size: 12px; }
 
 .activity { margin: 10px 0; color: #a6a1b6; font-size: 11px; }
