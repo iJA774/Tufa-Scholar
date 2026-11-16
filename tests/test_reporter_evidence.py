@@ -33,11 +33,25 @@ class ReporterEvidenceTests(unittest.TestCase):
                 with patch.object(workflow, '_model', side_effect=error), patch.object(workflow, '_reporter_fallback', side_effect=recover):
                     result = workflow._reporter(state, None)
                 self.assertTrue(result['report_fallback'])
-                self.assertIn(expected, result['content'])
-                self.assertIn('未找到通过校验且包含有效引用的研究草稿', result['content'])
+                self.assertNotIn(expected, result['content'])
+                self.assertNotIn('终稿未完成', result['content'])
+                self.assertTrue(events[-1][1]['suggestion'])
                 self.assertNotIn('证据不足：', result['content'])
                 self.assertIn(expected, events[-1][1]['message'])
                 self.assertNotIn('secret', str(events) + result['content'])
+
+    def test_missing_graph_content_announces_fallback(self):
+        events = []
+        graph = unittest.mock.Mock()
+        graph.invoke.return_value = {'research': {'source': 'local'}, 'evidence_pool': [], 'rounds': []}
+        with patch.object(workflow, '_graph', return_value=graph):
+            content, evidence = workflow.run(
+                {'query': 'study', 'project_id': 1, 'source': 'local'},
+                history=[], on_event=lambda kind, data: events.append((kind, data)))
+        self.assertTrue(content)
+        self.assertEqual(evidence, [])
+        self.assertEqual(events[0][0], 'report.fallback')
+        self.assertTrue(events[0][1]['suggestion'])
 
     def test_later_evidence_reaches_model_and_final_report(self):
         old = [evidence(f'old{i}') for i in range(12)]
