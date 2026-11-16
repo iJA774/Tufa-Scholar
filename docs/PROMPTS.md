@@ -23,13 +23,14 @@
 | 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、`queries`、`selected_candidate_ids`、`summary`、`gaps`。查询预算和每次搜索结果上限见[工作流预算表](ARCHITECTURE.md#工作流预算)；筛选阶段只能选择实际返回的候选。 |
 | 计划 Markdown 与调度控制块 | 正文由模型自由组织。末尾 `tufa-control` 块包含 `requirements`、`plan`、`source`、`action`、`rationale` 和深入档的 `completion_confirmed`，按 `PlannerOutput` 校验。首轮必须研究且计划非空。 |
 | 工具决策 | 模型接口返回原生函数调用或表示本轮结束。函数名和参数须通过目录及范围校验。`reason` 是用户可见的简短操作目的，执行前从业务参数中取出。 |
-| 初稿与终稿 | 自由 Markdown 正文，在支持主张的段落、列表项或表格行内使用 `[[证据ID]]`。无引用的过程性缺口用 `> 局限：…`。 |
+| 初稿 | 自由 Markdown 正文，在支持主张的段落、列表项或表格行内使用 `[[证据ID]]`。无引用的过程性缺口用 `> 局限：…`。 |
+| 终稿 | 自由 Markdown 正文。引用可选，建议用 `[[证据ID]]` 标注有直接依据的关键事实。区分材料支持的事实与模型的分析判断。 |
 | 审查 Markdown 与调度控制块 | 正文解释问题覆盖和剩余缺口。末尾 `tufa-control` 块包含 `sufficient`、`covered_requirements`、`gaps`、`next_steps`，深入档另用 `unresolved_contradictions`、`evidence_reliability_confirmed`、`important_conclusions_cross_validated`，按 `AnalystOutput` 校验。 |
 
-段落引用由代码映射到累计证据。报告中的引用不得越出项目或收藏夹快照；引用缺失、无效数字/单位、缺少成本依据或不安全引用会被剔除或明确列为局限。引用为空可由 reporter 返回，但不能作为有证据支持的结论展示。Reporter 汇总所有轮次，因此模型即使收到旧轮次的结论，也必须让最终事实引用指向本任务累计证据。
+段落引用由代码映射到当前节点可见证据，遵守项目和收藏夹快照范围。初稿校验事实段落的引用、数值和成本依据。终稿保留无引用正文，只验证显式引用是否存在并符合范围。证据可追溯性与事实、数值判断由写作要求分别约束。
 
 研究模式字段保存在 task：`auto` 是旧 API 客户端的缺省兼容模式，collection 来源在 auto 下强制研究；`quick` 优先于 collection 约束，不读取收藏夹且直接回答；`deep` 绕过 dispatcher 判断并启动研究。用户可通过 API 请求选择模式，API 校验后由 worker 传入可信模板上下文；问题、历史或检索材料中的指令不能改变该模式。任务重试复制原模式，既有 task 通过 additive migration 补为 `auto`。
 
-研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据。终稿的 `search_mode` 由首轮研究方向确定；后续渠道切换只影响每轮取证。Reporter 根据实际收束原因与 `outstanding_gaps` 说明未解决事项；该字段反映最近一次累计审查，历史审查中的缺口仅作过程背景。最终引用与数值仍按同一规则校验。
+研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据。终稿的 `search_mode` 由首轮研究方向确定；后续渠道切换只影响每轮取证。Reporter 根据实际收束原因与 `outstanding_gaps` 说明未解决事项；该字段反映最近一次累计审查，历史审查中的缺口仅作过程背景。
 
 更改节点输入输出时，同步更新对应 Markdown、类型和 [工作流回归](../tests/AGENTS.md)。不要在提示词里重复工具参数 schema、来源范围约束或代码检查规则；工具契约位于 [工具说明](../src/tools/README.md)。

@@ -184,7 +184,8 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(len(retrieved), 1 + action_cap)
         self.assertEqual(retrieved[0], "accuracy")
         self.assertFalse(evidence)
-        self.assertIn("未收集到可核查证据", content)
+        self.assertIn("未能形成有证据支持的结论", content)
+        self.assertIn("没有可核查证据", content)
         self.assertEqual(stages[-1], "reporter")
 
     def test_background_and_planner_model_failures_fall_back_to_original_query_and_report(self):

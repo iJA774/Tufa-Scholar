@@ -2092,7 +2092,7 @@ def _outstanding_gaps(state, *, fallback=False):
     return _clean_labels(gaps, limit=40)
 
 
-def _reporter_fallback(state, reason, *, incomplete_report=None):
+def _reporter_fallback(state, reason):
     allowed = _allowed_report_papers(state)
     evidence = _visible_report_evidence(state.get("evidence_pool", []), allowed)
     rounds = state.get("rounds", [])
@@ -2113,13 +2113,7 @@ def _reporter_fallback(state, reason, *, incomplete_report=None):
             line.lstrip().startswith("> 局限") for line in checked["content"].splitlines()
         ):
             limitations = checked
-    checked = limitations
-    if not checked and incomplete_report and any(
-        line.lstrip().startswith("> 局限") for line in incomplete_report["content"].splitlines()
-    ):
-        checked = incomplete_report
-    if not checked:
-        checked = {"content": "现有资料不足以形成有证据支持的结论。", "evidence": [], "rejected": []}
+    checked = limitations or {"content": "现有资料不足以形成有证据支持的结论。", "evidence": [], "rejected": []}
     return _publish_report(checked, [f"证据不足：{reason}", *_warning_caveats(state, fallback=True)])
 
 
@@ -2138,8 +2132,8 @@ def _log_report_validation(*, input_evidence_count, final_evidence_count, reject
     )
 
 
-def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, rejected_claim_count=0, incomplete_report=None):
-    result = _reporter_fallback(state, reason, incomplete_report=incomplete_report)
+def _reporter_recovery(state, *, reason, reason_code, input_evidence_count, rejected_claim_count=0):
+    result = _reporter_fallback(state, reason)
     _log_report_validation(
         input_evidence_count=input_evidence_count,
         final_evidence_count=len(result["evidence"]),
@@ -2254,7 +2248,7 @@ def _reporter(state, on_stage):
     try:
         result = _model(state, "literature/reporter", payload, None, node_role="reporter",
                         search_mode=_report_mode(state), available_tools=[])
-        checked = validate_markdown(result, working, allowed_paper_ids=allowed)
+        checked = validate_markdown(result, working, allowed_paper_ids=allowed, citation_only=True)
     except ModelServiceError:
         reason = "报告模型服务不可用，未能形成完整终稿。"
         reason_code = "model_service_failed"
@@ -2264,15 +2258,17 @@ def _reporter(state, on_stage):
         reason_code = "invalid_report_output"
         errors.append(_safe_error("reporter", "invalid_output", reason))
     else:
-        reason = "终稿没有可保留的有效引用。"
-        reason_code = "no_valid_report_citations"
+        reason = "终稿没有可保留的正文。"
+        reason_code = "no_valid_report_body"
 
-    if checked and checked["evidence"]:
+    if checked and checked["has_body"]:
         caveats = _warning_caveats(state)
+        if not working:
+            caveats.append("本次没有可核查证据，相关判断仍待验证。")
         if len(all_evidence) > len(working):
             caveats.append("累计证据超出终稿上下文预算，本报告基于其中部分证据。")
         if checked["rejected"]:
-            caveats.append("部分内容因引用、数值或来源范围校验未通过而省略。")
+            caveats.append("部分内容因引用无效或格式不安全而省略。")
         report = _publish_report(checked, caveats)
         rejected = report["rejected"]
         _log_report_validation(
@@ -2288,7 +2284,6 @@ def _reporter(state, on_stage):
         report = _reporter_recovery(
             state, reason=reason, reason_code=reason_code,
             input_evidence_count=len(working), rejected_claim_count=len(rejected),
-            incomplete_report=checked,
         )
         rejected = rejected + report["rejected"]
         fallback = True

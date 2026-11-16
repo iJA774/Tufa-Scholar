@@ -62,6 +62,17 @@ def unsafe_text(text):
     return bool(_UNSAFE.search(text or ""))
 
 
+def _resolve_citations(citations, evidence_by_id, allowed_paper_ids):
+    if any(not isinstance(item, str) or item not in evidence_by_id for item in citations):
+        return [], "引用不存在"
+    cited = [evidence_by_id[item] for item in citations]
+    if allowed_paper_ids is not None and any(
+        item.get("paper_id") not in allowed_paper_ids for item in cited
+    ):
+        return [], "引用超出收藏夹快照范围"
+    return cited, ""
+
+
 def validate_claim(text, citations, evidence_by_id, allowed_paper_ids=None, *, allow_uncited=False, is_limitation=False):
     """Check citation existence/scope and numeric or cost support for one claim.
 
@@ -80,13 +91,9 @@ def validate_claim(text, citations, evidence_by_id, allowed_paper_ids=None, *, a
         if _COST.search(_COST_GAP.sub("", text)):
             return [], "无引用段落包含成本结论"
         return [], ""
-    if any(not isinstance(item, str) or item not in evidence_by_id for item in citations):
-        return [], "引用不存在"
-    cited = [evidence_by_id[item] for item in citations]
-    if allowed_paper_ids is not None and any(
-        item.get("paper_id") not in allowed_paper_ids for item in cited
-    ):
-        return [], "引用超出收藏夹快照范围"
+    cited, reason = _resolve_citations(citations, evidence_by_id, allowed_paper_ids)
+    if reason:
+        return [], reason
     required = measurements(text)
     supported = set().union(*(measurements(item.get("text", "")) for item in cited))
     if not required.issubset(supported):
@@ -106,12 +113,12 @@ _MARKDOWN_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\
 _PROCESS_GAP = re.compile(r"(?:不足|缺少|缺乏|尚未|未能|无法|不可用|未提供|未覆盖|未确认|未验证|缺口|失败|限制)")
 
 
-def validate_markdown(markdown, evidence, *, allowed_paper_ids=None):
+def validate_markdown(markdown, evidence, *, allowed_paper_ids=None, citation_only=False):
     """Validate cited Markdown blocks while preserving their presentation order.
 
-    A citation belongs to its paragraph, list item or table row. Uncited prose
-    is rejected except explicit process limitations in a ``> 局限：`` block.
-    The markers remain intact for later revalidation and publication.
+    Draft validation checks claim support. Final reports use citation_only to
+    validate explicit references while allowing uncited prose. Both retain
+    valid markers for publication and apply the same Markdown safety checks.
     """
     by_id = {item['id']: item for item in evidence}
     raw = str(markdown or '').replace('\r\n', '\n').replace('\r', '\n').strip()
@@ -120,20 +127,25 @@ def validate_markdown(markdown, evidence, *, allowed_paper_ids=None):
         raw = wrapped.group(1)
     lines = raw.split('\n')
     output, rejected, findings, used = [], [], [], set()
+    has_body = False
 
     def check(block, *, heading=False, limitation=False):
+        nonlocal has_body
         ids = _MARKDOWN_CITATION.findall(block)
         plain = _MARKDOWN_CITATION.sub('', block).strip()
-        substantive = re.sub(r'[\s\-+*#>|.:：()\[\]`\d]+', '', plain)
+        body = re.sub(r'^\d+[.)](?:\s+|$)', '', plain)
+        substantive = re.sub(r'[\s\-+*#>|.:：()\[\]`]+', '', body)
         if ids and not substantive:
             rejected.append('引用缺少正文')
             return False
-        if ('[[' in plain or ']]' in plain or '![' in plain
+        if (unsafe_text(plain) or '[[' in plain or ']]' in plain or '![' in plain
                 or re.search(r'(?i)\b(?:www\.|javascript:|data:)', plain)
                 or re.search(r'(?m)^\s{0,3}\[[^\]]+\]:\s*\S', plain)):
             rejected.append('格式或引用不安全')
             return False
-        if heading and not ids:
+        if citation_only:
+            _, reason = _resolve_citations(ids, by_id, allowed_paper_ids)
+        elif heading and not ids:
             _, reason = validate_claim(plain, [], by_id, allowed_paper_ids, allow_uncited=True)
         else:
             process = limitation and bool(_PROCESS_GAP.search(plain))
@@ -142,6 +154,8 @@ def validate_markdown(markdown, evidence, *, allowed_paper_ids=None):
             rejected.append(reason)
             return False
         used.update(ids)
+        if not heading and substantive:
+            has_body = True
         if ids and not heading and len(findings) < 12:
             text = re.sub(r'^\s*(?:[-+*]|\d+[.)]|>)\s*', '', plain).strip()
             findings.append({'text': text[:1500], 'citations': ids})
@@ -170,7 +184,8 @@ def validate_markdown(markdown, evidence, *, allowed_paper_ids=None):
             header, separator = line, lines[index + 1]
             index += 2
             rows = []
-            header_safe = not unsafe_text(header) and not measurements(header) and not _MARKDOWN_CITATION.search(header) and '![' not in header
+            header_safe = (not unsafe_text(header) and (citation_only or not measurements(header))
+                           and not _MARKDOWN_CITATION.search(header) and '![' not in header)
             while index < len(lines) and '|' in lines[index] and lines[index].strip():
                 row = lines[index]
                 if header_safe and check(row):
@@ -205,6 +220,7 @@ def validate_markdown(markdown, evidence, *, allowed_paper_ids=None):
         'evidence': [item for item in evidence if item['id'] in used],
         'rejected': rejected,
         'findings': findings,
+        'has_body': has_body,
     }
 
 

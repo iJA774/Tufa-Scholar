@@ -70,7 +70,7 @@ class ReporterEvidenceTests(unittest.TestCase):
         state['research']['prefer_primary_evidence'] = True
         self.assertIn('direct', [x['id'] for x in workflow._reporter_evidence(state, pool)])
 
-    def test_collection_scope_and_visible_text_apply_to_validation(self):
+    def test_final_report_checks_citation_ids_and_retains_uncited_analysis(self):
         allowed = evidence('allowed', paper_id=7, text='a' * 1200 + ' Outcome 92%.')
         excluded = evidence('excluded', paper_id=8)
         state = {'research': {'project_id': 1, 'query': 'study', 'source': 'collection', 'paper_ids': [7]},
@@ -79,12 +79,28 @@ class ReporterEvidenceTests(unittest.TestCase):
         captured = {}
         def model(state, prompt, payload, schema, **kwargs):
             captured.update(payload)
-            return '# 结果\n\nOutcome 92%. [[allowed]]'
+            return ('# 结果\n\nOutcome 92%. [[allowed]]\n\n'
+                    '我的判断是，成本可能限制应用。\n\n'
+                    'This is outside the collection. [[excluded]]')
         with patch.object(workflow, '_model', side_effect=model):
             result = workflow._reporter(state, None)
         self.assertEqual([x['id'] for x in captured['evidence']], ['allowed'])
         self.assertEqual(len(captured['evidence'][0]['text']), 1200)
+        self.assertEqual([x['id'] for x in result['final_evidence']], ['allowed'])
+        self.assertIn('Outcome 92%', result['content'])
+        self.assertIn('我的判断是，成本可能限制应用。', result['content'])
+        self.assertNotIn('outside the collection', result['content'])
+        self.assertFalse(result['report_fallback'])
+
+    def test_final_report_with_no_citations_does_not_fall_back(self):
+        state = {'research': {'query': 'study', 'source': 'auto'},
+                 'evidence_pool': [evidence('e1')]}
+        markdown = '# 我的判断\n\n目前最值得比较的是各方法的适用条件。'
+        with patch.object(workflow, '_model', return_value=markdown):
+            result = workflow._reporter(state, None)
+        self.assertEqual(result['content'], markdown)
         self.assertEqual(result['final_evidence'], [])
+        self.assertFalse(result['report_fallback'])
 
 
 if __name__ == '__main__':
