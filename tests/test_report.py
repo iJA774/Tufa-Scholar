@@ -105,6 +105,40 @@ class ReportValidationTests(unittest.TestCase):
 
 
 class ReporterMarkdownTests(unittest.TestCase):
+    def test_numbering_reuses_source_and_preserves_all_locations(self):
+        first = {'id': 'a', 'paper_id': 7, 'title': 'Study', 'version_id': 3, 'page': 4}
+        second = {**first, 'id': 'b', 'page': 6}
+        web = {'id': 'c', 'title': 'Web', 'source_level': 'web_content', 'original_url': 'https://example.org/x'}
+        result = report.numbered_references('One [[c]] Two [[a]] [[b]] [[c]]', [first, second, web])
+        self.assertIn(r'One \[1\] Two \[2\] \[2\] \[1\]', result)
+        self.assertIn('/paper-versions/3/file#page=4', result)
+        self.assertIn('/paper-versions/3/file#page=6', result)
+        self.assertEqual(result.count('## 参考文献'), 1)
+        self.assertEqual(report.numbered_references('No citations', []), 'No citations')
+
+    def test_legacy_conversion_matches_only_known_reference(self):
+        item = {'id': 'a', 'title': 'Study'}
+        old = 'Claim〔' + report.reference(item, markdown=True) + '〕 and 〔author text〕'
+        converted = report.numbered_references(old, [item], legacy=True)
+        self.assertIn(r'Claim\[1\]', converted)
+        self.assertIn('〔author text〕', converted)
+
+    def test_source_title_with_separator_is_not_split_between_locations(self):
+        first = {'id': 'a', 'paper_id': 7, 'title': 'First · Second', 'version_id': 3, 'page': 4}
+        second = {**first, 'id': 'b', 'page': 6}
+        result = report.numbered_references('[[a]] [[b]]', [first, second])
+        self.assertEqual(result.count('First · Second'), 1)
+        self.assertIn('；证据 b · 原文版本 3，第 6 页', result)
+
+    def test_same_pdf_page_keeps_all_evidence_ids_but_one_location(self):
+        first = {'id': 'a', 'paper_id': 7, 'title': 'Study', 'version_id': 3, 'page': 4}
+        second = {**first, 'id': 'b'}
+        result = report.numbered_references('[[a]] [[b]]', [first, second])
+        self.assertIn(' · 证据 a', result)
+        self.assertIn('；证据 b', result)
+        self.assertEqual(result.count('原文版本 3，第 4 页'), 1)
+        self.assertEqual(result.count('/paper-versions/3/file#page=4'), 1)
+
     def test_publication_uses_validated_inline_sources_and_keeps_model_layout(self):
         evidence = [{'id': 'web', 'title': 'Official page', 'source_level': 'web_content',
                      'text': 'Accuracy 92%.', 'original_url': 'https://example.org/report?title=Useful&token=private',

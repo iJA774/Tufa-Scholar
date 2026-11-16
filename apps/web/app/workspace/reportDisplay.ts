@@ -9,6 +9,29 @@ const legacyReasons = new Set([
   "终稿没有可保留的正文。",
 ]);
 
+/** Only generated local PDF paths may pass through the API proxy. */
+export function reportLink(value?: string | null): string | undefined {
+  if (value && /^\/paper-versions\/[1-9]\d*\/file(?:#page=[1-9]\d*)?$/.test(value)) return `/api${value}`;
+  try {
+    const url = new URL(value || "");
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Recognize evidence identifiers only in generated numbered reference entries. */
+export function reportEvidenceIds(content: string): Set<string> {
+  const ids = new Set<string>();
+  const section = content.split(/^## 参考文献\s*$/m).at(-1);
+  if (!section || section === content) return ids;
+  for (const line of section.split(/\r?\n/)) {
+    if (!/^- \\\[\d+\\\] /.test(line)) continue;
+    for (const match of line.matchAll(/(?: · |；)证据 (.*?)(?= · |；|$)/g)) ids.add(match[1]);
+  }
+  return ids;
+}
+
 /** Remove only a known legacy generated preface; never modify the stored report. */
 export function displayReport(content: string, hasFallbackEvent: boolean): string {
   const draft = /^> 终稿未能完成，以下为最近一份通过校验的研究草稿。\r?\n> [^\r\n]+\r?\n(?:\r?\n)?/;

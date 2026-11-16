@@ -313,6 +313,8 @@
 .messageUser .messageLabel { color: #89879a; text-align: right; }
 .messageContent { white-space: pre-wrap; word-break: break-word; }
 .messageMarkdown { white-space: normal; }
+.messageMarkdown .referencesHeading + ul:last-child { list-style: none; padding-left: 0; }
+.messageMarkdown .referencesHeading + ul:last-child > li { margin: .4em 0; }
 .messageMarkdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .messageMarkdown th, .messageMarkdown td { border: 1px solid currentColor; padding: 0.35em 0.55em; }
 .citation { margin-top: 9px; color: #9995aa; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }

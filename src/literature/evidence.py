@@ -55,6 +55,7 @@ def collect_evidence(project_id, source, paper_ids, query, papers, relevance_que
         if source in {'local', 'collection'} and not record:
             continue
         p = record if record else {**incoming, 'id': None}
+        metadata = {key: p[key] for key in ('authors', 'year', 'doi') if p.get(key)}
         if record:
             candidates = []
             terms = query_terms(query)
@@ -80,10 +81,10 @@ def collect_evidence(project_id, source, paper_ids, query, papers, relevance_que
                     break
             for _, version_id, page_num, offset, text in sorted(candidates, key=lambda x: (-x[0], x[2], x[3]))[:6]:
                 suffix = f"s{offset}" if offset else ''
-                found.append({'id': f"p{p['id']}v{version_id}p{page_num}{suffix}", 'paper_id': p['id'], 'title': p['title'], 'source_level': 'full_text', 'version_id': version_id, 'page': page_num, 'text': text})
+                found.append({'id': f"p{p['id']}v{version_id}p{page_num}{suffix}", 'paper_id': p['id'], 'title': p['title'], 'source_level': 'full_text', 'version_id': version_id, 'page': page_num, 'text': text, **metadata})
         if not record and p.get('abstract'):
             if not any(relevance_score(terms, p.get('title', '') + ' ' + p['abstract'][:1200]) for terms in relevance):
                 continue
         if not any(e.get('paper_id') == p.get('id') and (p.get('id') is not None or e['title'] == p['title']) for e in found) and p.get('abstract'):
-            found.append({'id': f"a{len(found)+1}", 'paper_id': p.get('id'), 'title': p['title'], 'source_level': 'abstract', 'version_id': None, 'page': None, 'text': p['abstract'][:1200], 'original_url': p.get('original_url')})
+            found.append({'id': f"a{len(found)+1}", 'paper_id': p.get('id'), 'title': p['title'], 'source_level': 'abstract', 'version_id': None, 'page': None, 'text': p['abstract'][:1200], 'original_url': p.get('original_url'), **metadata})
     return found

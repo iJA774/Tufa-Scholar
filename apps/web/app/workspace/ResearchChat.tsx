@@ -13,7 +13,7 @@ import type { ModelChoice, ResearchDepth, RelevanceFilter } from "./preferences"
 import { webSourceLabel } from "./sourceLabels";
 import HeroEmblem from "./HeroEmblem";
 import ResearchPanel from "./ResearchPanel";
-import { displayReport, safeRunError } from "./reportDisplay";
+import { displayReport, reportEvidenceIds, reportLink, safeRunError } from "./reportDisplay";
 import styles from "./ResearchChat.module.css";
 
 const statusText: Record<string, string> = {
@@ -668,6 +668,7 @@ export default function ResearchChat({
         {loadingConversation && <p className={styles.loadingMessages}>正在读取研究记录…</p>}
         {messages.map(message => {
           const messageRun = message.run_id ? runs.find(item => item.id === message.run_id) || historyRuns[message.run_id] : undefined;
+          const referenceIds = message.metadata?.report_id ? reportEvidenceIds(message.content) : new Set<string>();
           return <article className={`${styles.message} ${message.role === "user" ? styles.messageUser : styles.messageAssistant}`} key={message.id}>
             {message.role !== "user" && <div className={styles.avatar} aria-hidden="true">✧</div>}
             <div className={styles.messageBubble}>
@@ -675,14 +676,16 @@ export default function ResearchChat({
               {message.role === "assistant" && message.run_id && <ResearchActivity items={messageRun?.subtasks} />}
               <div className={`${styles.messageContent} ${message.metadata?.report_id ? styles.messageMarkdown : ""}`}>
                 {message.role === "assistant" && message.metadata?.report_id ? <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
+                  h2: ({ node, children }) => <h2 className={node?.children.length === 1 && node.children[0].type === "text" && node.children[0].value === "参考文献" ? styles.referencesHeading : undefined}>{children}</h2>,
                   a: ({ href, children }) => {
-                    const safeHref = safeSourceUrl(href);
+                    const safeHref = reportLink(href);
                     return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
                   },
                   img: () => null,
                 }}>{displayReport(message.content, message.run_id === noticeRun?.id && !!fallbackEvent)}</ReactMarkdown> : message.content}
               </div>
               {message.metadata?.evidence?.map((citation, index) => {
+                if (citation.id && referenceIds.has(citation.id)) return null;
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
                 return <div className={styles.citation} key={`${citation.id || index}-${index}`}>
                   {href ? <a href={href} target="_blank" rel="noopener noreferrer">{citation.title || `参考文献 ${index + 1}`} ↗</a> : <span>{citation.title || `参考文献 ${index + 1}`}</span>}

@@ -16,7 +16,7 @@ import alertCircleAnimation from "../../../../assets/animations/alert-circle.jso
 import type { Message, Run } from "./types";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import styles from "./ResearchPanel.module.css";
-import { displayReport, safeRunError } from "./reportDisplay";
+import { displayReport, reportLink, safeRunError } from "./reportDisplay";
 
 type Props = {
   run: Run;
@@ -316,8 +316,9 @@ export default function ResearchPanel({ run, report, events, open, status, stage
         {hasReport && report ? <>
           <article className={styles.reportContent}>
             <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
+              h2: ({ node, children }) => <h2 className={node?.children.length === 1 && node.children[0].type === "text" && node.children[0].value === "参考文献" ? styles.referencesHeading : undefined}>{children}</h2>,
               a: ({ href, children }) => {
-                const safeHref = safeSourceUrl(href);
+                const safeHref = reportLink(href);
                 return safeHref ? <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
               },
               img: () => null,
