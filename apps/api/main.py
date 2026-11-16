@@ -130,6 +130,10 @@ class RunInput(BaseModel):
     conversation_id: int | None = None
 
 
+class RegenerateInput(BaseModel):
+    model_name: str | None = Field(default=None, min_length=1, max_length=300)
+
+
 class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
@@ -551,3 +555,21 @@ def retry_run(run_id: int):
     if task['status'] not in ('failed', 'interrupted'):
         raise HTTPException(409, '只有失败或中断的任务可以重新执行')
     return repo.retry_task(run_id)
+
+
+@app.post('/runs/{run_id}/regenerate', status_code=201)
+def regenerate_answer(run_id: int, body: RegenerateInput | None = None):
+    task = repo.get_task(run_id)
+    if not task:
+        raise HTTPException(404, '任务不存在')
+    if task['kind'] != 'chat' or task['status'] not in ('succeeded', 'failed', 'interrupted'):
+        raise HTTPException(409, '只有已结束的问答任务可以重新回答')
+    requested_model = (body.model_name or '').strip() if body else ''
+    model_name = os.environ.get('OPENAI_MODEL') or requested_model or settings.model_config()['model']
+    try:
+        result = repo.regenerate_chat_task(run_id, model_name)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    if result is None:
+        raise HTTPException(409, '任务状态已变化，请刷新后重试')
+    return result

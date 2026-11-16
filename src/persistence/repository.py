@@ -277,6 +277,30 @@ def retry_task(task_id):
         return get_task(cur.lastrowid)
 
 
+def regenerate_chat_task(task_id, model_name):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        task = _task(_one(db, 'SELECT * FROM tasks WHERE id=?', (task_id,)))
+        if not task or task['kind'] != 'chat' or task['status'] not in ('succeeded', 'failed', 'interrupted'):
+            return None
+        if _one(db, "SELECT id FROM tasks WHERE conversation_id=? AND status IN ('pending','running')", (task['conversation_id'],)):
+            raise ValueError('当前对话仍有任务正在处理，请等待完成后重新回答')
+        cur = db.execute('''INSERT INTO tasks
+            (project_id,conversation_id,query,source,status,stage,kind,origin_run_id,
+             collection_id,paper_ids,research_mode,research_depth,prefer_primary_evidence,
+             relevance_filter,model_name,reasoning_effort)
+            VALUES (?,?,?,?,'pending','pending','chat',?,?,?,?,?,?,?,?,?)''',
+            (task['project_id'], task['conversation_id'], task['query'], task['source'],
+             task.get('origin_run_id') or task_id, task.get('collection_id'),
+             json.dumps(task['paper_ids']) if task.get('paper_ids') is not None else None,
+             task.get('research_mode') or 'auto', task.get('research_depth') or 'standard',
+             int(task.get('prefer_primary_evidence', True)), task.get('relevance_filter') or 'standard',
+             model_name, task.get('reasoning_effort')))
+        result = _task(_one(db, 'SELECT * FROM tasks WHERE id=?', (cur.lastrowid,)))
+        db.commit()
+        return result
+
+
 def claim_task():
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -364,7 +388,10 @@ def update_stage(task_id, stage):
 def task_history(task_id):
     with connect_database() as db:
         task = _one(db, 'SELECT * FROM tasks WHERE id=?', (task_id,))
-        rows = _all(db, 'SELECT role,content FROM messages WHERE conversation_id=? AND run_id<=? ORDER BY id DESC LIMIT 40', (task['conversation_id'], task.get('origin_run_id') or task_id))
+        boundary = task.get('origin_run_id') or task_id
+        rows = _all(db, '''SELECT role,content FROM messages WHERE conversation_id=? AND run_id<=?
+            AND (run_id<>? OR role='user') ORDER BY id DESC LIMIT 40''',
+            (task['conversation_id'], boundary, boundary))
         return list(reversed(rows))
 
 

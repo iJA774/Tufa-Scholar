@@ -82,9 +82,14 @@ def main():
         return {'id': 'a1', 'paper_id': paper['id'], 'title': paper['title'],
                 'source_level': 'abstract', 'version_id': None, 'page': None, 'text': paper['abstract']}
 
-    def seed_conversation(project_id, question_text, paper, response, research_mode='auto'):
+    def seed_conversation(project_id, question_text, paper, response, research_mode='auto', degraded=False):
         question = repo.create_question(project_id, None, question_text, 'local', research_mode=research_mode)
         repo.claim_task()
+        if degraded:
+            repo.record_research_event(question['run_id'], 'report.fallback', {
+                'message': '报告模型不存在或无法访问，未能完成终稿。',
+                'suggestion': '请更换模型后重新回答。',
+            })
         evidence = [] if research_mode == 'quick' else [abstract_evidence(paper)]
         citation = ' [a1]' if evidence else ''
         repo.finish_chat_task(question['run_id'], response + citation, evidence)
@@ -93,6 +98,7 @@ def main():
     seed_conversation(project['id'], '历史问题：注意力机制', papers[0], '历史回答：注意力机制用于模型。', 'deep')
     seed_conversation(project['id'], '快速模式历史：注意力机制解释', papers[1], '快速模式直接回答：注意力机制可聚合上下文。', 'quick')
     seed_conversation(other['id'], '跨项目历史：证据支持', other_paper, '历史回答：另一个项目也有独立历史。', 'auto')
+    seed_conversation(project['id'], '报告降级历史：重新回答原问题', papers[0], '已保留此前的研究草稿。', 'deep', degraded=True)
 
     def catalog(url, key, details=False):
         return ([{'id': 'fixture-model', 'reasoning_efforts': ['low', 'medium', 'high'], 'default_effort': 'medium'}]
