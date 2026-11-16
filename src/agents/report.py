@@ -271,7 +271,7 @@ def _safe_markdown_url(value):
     return quote(link, safe=":/@%?&=+$,;!~*'-._")
 
 
-def reference(evidence, *, markdown=False):
+def reference(evidence, *, markdown=False, include_title=True):
     """Render a compact reference line, optionally linking a safe public URL."""
     level = evidence.get("source_level", "")
     title = _safe_title(evidence.get("title", ""))
@@ -285,7 +285,7 @@ def reference(evidence, *, markdown=False):
             # Preserve useful parameters such as article titles, while removing
             # common credential and one-time access parameters.
             url = _safe_markdown_url(evidence.get("original_url", ""))
-        source_title = f"[{title or '来源'}]({url})" if url else (title or "来源")
+        source_title = (f"[{title or '来源'}]({url})" if url else (title or "来源")) if include_title else ""
         identifier = str(evidence.get("id", ""))
         if unsafe_text(identifier):
             identifier = ""
@@ -306,12 +306,78 @@ def reference(evidence, *, markdown=False):
             if retrieved_at and not unsafe_text(str(retrieved_at)):
                 metadata.append(f"获取于 {retrieved_at}")
             suffix = " · ".join(metadata + ([anchor[3:]] if anchor else []))
-            return f"{source_title} · {suffix}" if suffix else source_title
+            return ' · '.join(part for part in (source_title, suffix) if part)
         return f"[{evidence['id']}] {title} · {source_kind} · {provider} · {url} · 获取于 {retrieved_at}{anchor}"
     if evidence.get("version_id"):
         suffix = f"原文版本 {evidence['version_id']}，第 {evidence.get('page', '')} 页"
-        return f"{source_title} · {' · '.join(metadata + [suffix])}" if markdown else f"{source_title} · {suffix}"
+        return ' · '.join(part for part in (source_title, *metadata, suffix) if part) if markdown else f"{source_title} · {suffix}"
     suffix = "论文摘要"
     if url and not markdown:
         suffix += f" · {url}"
-    return f"{source_title} · {' · '.join(metadata + [suffix])}" if markdown else f"{source_title} · {suffix}"
+    return ' · '.join(part for part in (source_title, *metadata, suffix) if part) if markdown else f"{source_title} · {suffix}"
+
+
+def numbered_references(content, evidence, *, legacy=False):
+    """Render validated markers (or exact historical references) by source."""
+    if legacy and '〔' not in content:
+        return content
+    by_id = {str(item['id']): item for item in evidence}
+    if legacy:
+        markers = {}
+        for item in evidence:
+            marker = '〔' + re.sub(r'\s+', ' ', reference(item, markdown=True)).replace('|', r'\|') + '〕'
+            markers.setdefault(marker, []).append(item)
+        pattern = re.compile('|'.join(re.escape(k) for k, v in sorted(markers.items(), key=lambda x: -len(x[0])) if len(v) == 1)) if any(len(v) == 1 for v in markers.values()) else None
+    else:
+        pattern = _MARKDOWN_CITATION
+    groups = {}
+
+    def replace(match):
+        item = markers[match.group()][0] if legacy else by_id.get(match.group(1))
+        if not item:
+            return match.group()
+        paper_id = item.get('paper_id')
+        url = _safe_http_url(item.get('original_url'))
+        if paper_id is not None:
+            key = ('paper', str(paper_id))
+        elif url:
+            parts = urlsplit(url)
+            key = ('url', urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, '')))
+        else:
+            key = ('evidence', str(item['id']))
+        if key not in groups:
+            groups[key] = (len(groups) + 1, [])
+        number, group = groups[key]
+        if item not in group:
+            group.append(item)
+        return r'\[' + str(number) + r'\]'
+
+    body = pattern.sub(replace, content) if pattern else content
+    if not groups:
+        return body
+    lines = []
+    for number, items in groups.values():
+        details = []
+        seen_pages = set()
+        metadata = []
+        for key in ('authors', 'year', 'doi', 'published_at'):
+            value = items[0].get(key)
+            value = ', '.join(str(v) for v in value) if isinstance(value, list) else str(value or '')
+            if value and not unsafe_text(value) and not re.search(r'[\r\n|]', value):
+                metadata.append(re.sub(r'([\\`*_{}\[\]()#!>])', r'\\\1', value))
+        for index, item in enumerate(items):
+            version, page = item.get('version_id'), item.get('page')
+            page_key = (version, page) if isinstance(version, int) and version > 0 and isinstance(page, int) and page > 0 else None
+            if page_key and page_key in seen_pages:
+                identifier = str(item.get('id', ''))
+                detail = f'证据 {identifier}' if identifier and not unsafe_text(identifier) else ''
+            else:
+                detail = reference(item, markdown=True, include_title=index == 0).replace('|', r'\|')
+            detail = re.sub(r'\s+', ' ', detail)
+            if page_key and page_key not in seen_pages:
+                detail += f' · [查看第 {page} 页](/paper-versions/{version}/file#page={page})'
+                seen_pages.add(page_key)
+            if detail and detail not in details:
+                details.append(detail)
+        lines.append(f'- \\[{number}\\] ' + '；'.join(details) + ((' · ' + ' · '.join(metadata)) if metadata else ''))
+    return body.rstrip() + '\n\n## 参考文献\n\n' + '\n'.join(lines)

@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.agents.report import reference, validate_claim, validate_markdown
+from src.agents.report import numbered_references, validate_claim, validate_markdown
 from src.integrations.web_page import WebPageError
 from src.integrations.web_search import WebSearchError
 from src.integrations.model import ModelServiceError, StructuredOutputError, structured, structured_input_units
@@ -2055,19 +2055,9 @@ def _visible_report_evidence(items, allowed_papers):
 
 
 def _publish_report(verified, caveats=()):
-    evidence = {item["id"]: item for item in verified["evidence"]}
-
-    def cite(match):
-        item = evidence.get(match[1])
-        if not item:
-            return ""
-        # An escaped vertical bar does not create a new GFM table cell.
-        source = re.sub(r"\s+", " ", reference(item, markdown=True))
-        return "〔" + source.replace("|", r"\|") + "〕"
-
-    body = _CITATION.sub(cite, verified["content"])
     notes = ["> " + note for note in dict.fromkeys(caveats) if note]
-    return {**verified, "content": "\n\n".join(part for part in [body, *notes] if part)}
+    body = "\n\n".join(part for part in [verified["content"], *notes] if part)
+    return {**verified, "content": numbered_references(body, verified["evidence"])}
 
 
 def _outstanding_gaps(state, *, fallback=False):

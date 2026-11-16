@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, StrictBool
 from pypdf import PdfReader
 
 from src.persistence import repository as repo
+from src.agents.report import numbered_references
 from src.infrastructure import settings
 from src.integrations.model import discover
 from src.persistence.storage import data_directory, initialize_storage
@@ -367,6 +368,10 @@ def conversation_messages(conversation_id: int):
     result = repo.list_messages(conversation_id)
     if result is None:
         raise HTTPException(404, '对话不存在')
+    for message in result:
+        metadata = message.get('metadata') or {}
+        if metadata.get('evidence'):
+            message['content'] = numbered_references(message['content'], metadata['evidence'], legacy=True)
     return result
 
 
@@ -383,14 +388,13 @@ def report_details(report_id: int):
     report = repo.get_report(report_id)
     if report is None:
         raise HTTPException(404, '报告不存在')
+    report['content'] = numbered_references(report['content'], report['evidence'], legacy=True)
     return report
 
 
 @app.get('/reports/{report_id}/markdown')
 def report_markdown(report_id: int):
-    report = repo.get_report(report_id)
-    if report is None:
-        raise HTTPException(404, '报告不存在')
+    report = report_details(report_id)
     return Response(report['content'], media_type='text/markdown; charset=utf-8', headers={'Content-Disposition':f'attachment; filename="report-{report_id}.md"'})
 
 
@@ -499,6 +503,9 @@ def get_run(run_id: int):
     task = repo.get_task(run_id)
     if not task:
         raise HTTPException(404, '任务不存在')
+    result = task.get('result')
+    if isinstance(result, dict) and result.get('evidence') and result.get('content'):
+        result['content'] = numbered_references(result['content'], result['evidence'], legacy=True)
     return task
 
 

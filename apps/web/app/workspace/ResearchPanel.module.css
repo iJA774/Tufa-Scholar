@@ -75,6 +75,8 @@
 .reportContent p { margin: .8em 0; }
 .reportContent ul, .reportContent ol { margin: .65em 0; padding-left: 1.5em; }
 .reportContent li { margin: .3em 0; padding-left: .15em; }
+.reportContent .referencesHeading + ul:last-child { list-style: none; padding-left: 0; }
+.reportContent .referencesHeading + ul:last-child > li { margin: .4em 0; padding-left: 0; }
 .reportContent blockquote { margin: 1em 0; padding-left: 1em; border-left: 2px solid rgba(171, 149, 247, .38); color: #bcbac9; }
 .reportContent a { color: var(--panel-accent); text-decoration: underline; text-decoration-color: rgba(167, 160, 231, .35); text-underline-offset: 2px; }
 .reportContent a:hover { color: var(--panel-accent-hover); }
