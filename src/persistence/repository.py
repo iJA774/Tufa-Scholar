@@ -193,6 +193,17 @@ def existing_version(db, digest):
     return _one(db, 'SELECT id FROM paper_versions WHERE digest=?', (digest,))
 
 
+def link_existing_version(project_id, digest):
+    """Associate an already indexed immutable version with another project."""
+    with connect_database() as db:
+        row = db.execute('SELECT paper_id FROM paper_versions WHERE digest=?', (digest,)).fetchone()
+        if not row:
+            return None
+        db.execute('INSERT OR IGNORE INTO project_papers(project_id,paper_id) VALUES (?,?)', (project_id, row[0]))
+        db.commit()
+        return row[0]
+
+
 def version_file(version_id):
     with connect_database() as db:
         return _one(db, 'SELECT path, filename FROM paper_versions WHERE id=?', (version_id,))
@@ -220,6 +231,10 @@ def _task(row):
         row['paper_ids'] = json.loads(row['paper_ids'])
     if row and 'prefer_primary_evidence' in row:
         row['prefer_primary_evidence'] = bool(row['prefer_primary_evidence'])
+    if row:
+        for key in ('network_search', 'local_literature'):
+            if key in row:
+                row[key] = bool(row[key])
     return row
 
 
@@ -273,6 +288,7 @@ def retry_task(task_id):
     with connect_database() as db:
         cur = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,origin_run_id,collection_id,paper_ids,research_mode,research_depth,prefer_primary_evidence,relevance_filter) VALUES (?,?,?,?,'pending','pending',?,?,?,?,?,?,?,?)", (task['project_id'],task['conversation_id'],task['query'],task['source'],task['kind'],task.get('origin_run_id') or task_id,task.get('collection_id'),json.dumps(task['paper_ids']) if task.get('paper_ids') is not None else None,task.get('research_mode') or 'auto',task.get('research_depth') or 'standard',int(task.get('prefer_primary_evidence', True)),task.get('relevance_filter') or 'standard'))
         db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (task.get('model_name'),task.get('reasoning_effort'),cur.lastrowid))
+        db.execute('UPDATE tasks SET network_search=?,local_literature=? WHERE id=?', (task['network_search'], task['local_literature'], cur.lastrowid))
         db.commit()
         return get_task(cur.lastrowid)
 
@@ -296,6 +312,7 @@ def regenerate_chat_task(task_id, model_name):
              task.get('research_mode') or 'auto', task.get('research_depth') or 'standard',
              int(task.get('prefer_primary_evidence', True)), task.get('relevance_filter') or 'standard',
              model_name, task.get('reasoning_effort')))
+        db.execute('UPDATE tasks SET network_search=?,local_literature=? WHERE id=?', (task['network_search'], task['local_literature'], cur.lastrowid))
         result = _task(_one(db, 'SELECT * FROM tasks WHERE id=?', (cur.lastrowid,)))
         db.commit()
         return result
@@ -335,7 +352,7 @@ def interrupt_running_tasks():
         db.commit()
 
 
-def create_question(project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None, research_mode='auto', research_depth='standard', prefer_primary_evidence=True, relevance_filter='standard'):
+def create_question(project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None, research_mode='auto', research_depth='standard', prefer_primary_evidence=True, relevance_filter='standard', network_search=True, local_literature=True):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
         if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
@@ -351,6 +368,7 @@ def create_question(project_id, conversation_id, question, source, collection_id
             return None
         run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,collection_id,paper_ids,research_mode,research_depth,prefer_primary_evidence,relevance_filter) VALUES (?,?,?,?, 'pending','pending','chat',?,?,?,?,?,?)", (project_id,conversation_id,question,source,collection_id,json.dumps(paper_ids) if paper_ids is not None else None,research_mode,research_depth,int(prefer_primary_evidence),relevance_filter)).lastrowid
         db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (model_name, reasoning_effort, run_id))
+        db.execute('UPDATE tasks SET network_search=?,local_literature=? WHERE id=?', (network_search, local_literature, run_id))
         db.execute("INSERT INTO messages(conversation_id,role,content,run_id) VALUES (?,'user',?,?)", (conversation_id,question,run_id))
         db.commit()
         return {'run_id':run_id,'conversation_id':conversation_id}

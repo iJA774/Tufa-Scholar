@@ -6,7 +6,9 @@
 
 工作区提供平铺历史导航和设置弹窗。提问框的模式菜单提供“自动”“深度研究”和“快速探索”，每次明确提交 `research_mode: auto|deep|quick`。首次默认使用 auto，由 dispatcher 选择流程；已有浏览器偏好会继续生效。deep 强制进入研究流程，quick 强制直接回答并跳过背景调查与检索。“研究偏好”的深度、原始证据优先和相关性过滤随新问题提交，重试沿用原任务模式和偏好。报告格式只保存在浏览器中。
 
-设置按钮和 `/settings` 都在工作区上方打开 `SettingsPanel`。“本地文档”通过浏览器选择目录并预览相对文件名，只有显式点击“一键转换 Markdown”后才上传勾选文件；支持子目录开关、选择、真实状态、取消、有限预览和下载。最近批次 ID 保存在浏览器，已开始的转换关闭设置后继续执行。PDF 可选导入提交时的项目；DOCX/TXT 只转换下载。关于入口在新标签页打开 GitHub。所有业务数据请求通过本机 `/api` 代理，不由浏览器直接访问数据库或携带服务密钥访问云端。
+提问框提供“网络搜索”和“本地文献”按钮，点亮表示启用，按钮的 `aria-pressed` 反映同一状态。提交问题时发送 `network_search` 和 `local_literature`。
+
+设置按钮和 `/settings` 都在工作区上方打开 `SettingsPanel`。“本地文档”的“打开目录”通过本机 API 在资源管理器中打开固定原文目录。“一键转换 Markdown”自动识别文件格式与 TXT 编码，显示实际进度，并支持取消、预览和下载。最近批次 ID 保存在浏览器，关闭设置后转换继续运行。成功转换的 PDF 导入提交时的项目。关于入口在新标签页打开 GitHub。所有业务数据请求通过本机 `/api` 代理。
 
 深度研究使用 DeerFlow 风格的报告与活动面板。桌面聊天列展开为 538px、收起为 768px，面板按视口宽度计算并随两列间距动画展开；窄屏使用居中的可滚动面板。活动内容只呈现本地任务阶段、子任务、发现和真实来源，跟随新增活动滚动；报告使用 Markdown 渲染，并提供下载入口。进行中的深度任务切换历史后自动打开，已完成任务可从聊天重新打开；快速探索不自动显示面板。
 
@@ -18,10 +20,10 @@
 | `app/workspace/page.tsx`、`workspace/WorkspacePage.tsx`、`WorkspacePage.module.css` | 工作区路由、项目范围、单层历史抽屉、设置弹窗及其深色样式 |
 | `workspace/ResearchChat.tsx`、`ResearchChat.module.css` | 当前会话消息、deep/quick 模式、聊天列宽度动画、轮询、重试、证据和下载 |
 | `workspace/ResearchPanel.tsx`、`ResearchPanel.module.css` | DeerFlow 风格报告/活动面板、真实研究活动和 Markdown 报告展示 |
-| `app/settings/SettingsPanel.tsx`、`SettingsPanel.module.css`、`app/settings/page.tsx` | 设置弹窗、直接访问入口、服务配置和本地目录预览 |
+| `app/settings/SettingsPanel.tsx`、`SettingsPanel.module.css`、`app/settings/page.tsx` | 设置弹窗、直接访问入口、服务配置和本地文档 |
 | `workspace/PdfImport.tsx`、`workspace/PaperLibrary.tsx`、`workspace/PaperRow.tsx` | 当前项目 PDF 导入、刷新、列表和原文访问 |
 | `app/settings/WebSearchSettings.tsx`、`RuntimeLogsSettings.tsx` | 网页搜索设置及本地运行日志管理 |
-| `app/settings/LocalDocuments.tsx`、`LocalDocuments.module.css` | 目录预览、显式上传、转换批次轮询、预览与下载 |
+| `app/settings/LocalDocuments.tsx`、`LocalDocuments.module.css` | 打开原文目录、开始转换、批次轮询、预览与下载 |
 | `workspace/api.ts`、`workspace/types.ts`、`workspace/sourceLabels.ts` | 工作区请求辅助、API 数据类型及来源标签 |
 | `workspace/preferences.ts` | 研究模式、研究偏好、Enter 发送、外观选项和模型选择的本地工作区偏好 |
 | `app/hooks/useRunPolling.ts`、`app/hooks/runPolling.ts` | 任务轮询的 React 生命周期适配与独立调度逻辑 |

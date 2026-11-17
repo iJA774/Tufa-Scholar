@@ -58,25 +58,29 @@ pnpm dev:web
 
 在“研究偏好”中可选择轻量、标准或深入的研究档位，以及是否优先使用原始证据和相关性过滤强度。研究档位决定预算、自动思考强度和提前结束条件。手动选择思考强度时优先使用该值。偏好随新提问提交，重试沿用原任务的模式和偏好。报告格式目前只保存在前端，终稿仍按现有工作流生成。
 
+提问框内的“网络搜索”和“本地文献”默认点亮。关闭“网络搜索”会停用网页和 OpenAlex 检索及远程原文读取，模型仍可回答；关闭“本地文献”会停用项目文献库检索。开关状态随每次提问保存，重试和重新回答沿用原任务状态。
+
 从侧边历史打开会话后，可点击原问题下方的“重新回答”，无需重新输入。已完成、报告降级、失败或中断的问题均可重新回答。新任务使用当前的提问模型或服务默认模型，保留原问题、来源范围、收藏夹成员快照和研究偏好；旧回答与报告继续保留。同一会话有待处理或运行中的任务时，需等待其结束。原有“重新执行”仍沿用失败任务保存的模型配置。
 
 深度研究先搜索和筛选背景资料，再规划并收集证据，最后生成报告。右侧“活动”可查看计划、审查、搜索结果与工具操作。支持流式响应的模型会边生成边显示 Markdown 草稿。任务失败或终稿降级时，工作区顶部会显示可关闭的原因和处理建议。降级后保存最近一份通过引用检查的研究草稿或当前证据缺口。快速探索的回答预览显示在聊天区。
 
-点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文档”可选择目录、预览文件名并批量转换 Markdown。“关于”在新标签页打开项目的 GitHub 仓库。
+点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文档”可打开原文目录并批量转换 Markdown。“关于”在新标签页打开项目的 GitHub 仓库。
 
 ### 本地文档转换 Markdown
 
-在“设置 → 本地文档”选择文件夹，按需调整“包含子文件夹”、勾选文件，再点击“一键转换 Markdown”。选择目录本身只预览文件名；点击转换才经本机 `/api` 上传所选内容，不使用绝对目录路径，也不调用模型或云端 OCR。
+在“设置 → 本地文档”点击“打开目录”，Windows 资源管理器会打开 `TUFA_DATA_DIR/documents/originals/`，默认是项目下的 `data/documents/originals/`。将待转换文件放入该目录，再点击“一键转换 Markdown”。转换会扫描子目录，在本机完成，无需调用模型或云端 OCR。
 
-支持 PDF、DOCX、TXT。PDF 尝试保留字号标题、双栏阅读顺序和有边框表格，逐页写入 `<!-- page:N -->`；DOCX 保留标题、段落、列表、表格、粗斜体及安全链接，图片用位置标记代替。TXT 自动识别 UTF-8/BOM、UTF-16 和部分常见编码；不能可靠检测时，请手选 GB18030/GBK、Big5 或 Windows-1252。旧版 DOC 显式跳过；扫描 PDF 不执行 OCR，加密 PDF 需自行合法解密。复杂版式、合并表格、公式和浮动对象仍可能不完整，请核对原文，不保证解析准确率。
+自动识别并转换 PDF、DOCX 和 TXT。PDF 尝试保留字号标题、双栏阅读顺序和有边框表格，逐页写入 `<!-- page:N -->`；DOCX 保留标题、段落、列表、表格、粗斜体及安全链接，图片用位置标记代替。TXT 自动识别 UTF-8/BOM、UTF-16 和部分常见编码，检测失败时可先将原文件另存为 UTF-8。旧版 DOC 请先另存为 DOCX；扫描 PDF 需要先提取文本，加密 PDF 需要先解密。复杂版式、合并表格、公式和浮动对象仍可能不完整，请核对原文。
 
 进度和单文件状态来自服务端，可取消批次、逐个预览与下载，结束后下载保留相对目录结构的 ZIP。同名不同格式采用包含原扩展名的输出名，特殊冲突加稳定哈希；不会覆盖原文件。ZIP 附带转换清单和页码/字符偏移元数据（偏移按下载 Markdown 的 Unicode 字符计数）。预览最多显示 64,000 字符，完整内容通过下载获取。
 
-勾选“转换成功后导入当前项目文献库（仅 PDF）”才导入提交时的项目；通过原始 PDF 哈希关联已有论文和原文版本，新文献按真实原页保存转换后的可检索文本。已存在版本的文本与证据 ID 不改写。Word、TXT 仍是普通本地文档，目前仅转换下载，不伪装成 PDF，也不会进入其他项目或收藏夹。
+转换成功的 PDF 自动加入提交时的项目文献库，通过原文哈希关联已有论文和版本。新文献按真实原页保存可检索文本，已有版本和证据 ID 保留。DOCX 和 TXT 支持转换及下载，项目的本地文献检索目前使用 PDF 文献库。
 
-每批最多 100 文件 / 200 MiB，单文件 20 MiB、PDF 200 页、Markdown 8 MiB；最多 4 个未结束批次、2 个并发上传、1 个 ZIP 打包，独立转换执行器一次只运行一个解析子进程，每文件 45 秒、768 MiB 内存上限。科研单 worker 队列不变。上传期间关闭设置会取消；转换开始后关闭设置继续执行，重新打开可读取最近批次。上传 15 分钟无状态更新即中断，API 关闭/重启会结束遗留转换任务。
+每批最多 100 文件 / 200 MiB，单文件 20 MiB、PDF 200 页、Markdown 8 MiB。批次优先处理待转换文件，超出一批时可再次点击转换。最多 4 个未结束批次、1 个 ZIP 打包，独立转换执行器一次运行一个解析子进程，每文件 45 秒、768 MiB 内存上限。关闭设置后转换继续执行，重新打开可读取最近批次。API 关闭或重启会结束遗留转换任务。
 
-上传副本和结果保存在 `TUFA_DATA_DIR/conversions/<批次 ID>/`，输入副本在结束、取消或恢复时清理；Markdown、元数据和批次状态保留供后续下载，ZIP 临时文件在响应结束后删除。请预留磁盘空间。原始目录不被修改；仅显式导入的 PDF 另存到既有 `originals/`。当前不提供跨批结果缓存或结果自动过期删除。
+设置页生成的 Markdown 保存在 `TUFA_DATA_DIR/documents/conversions/` 下对应的相对目录中，例如 `originals/topic/paper.pdf` 对应 `conversions/topic/paper.pdf.md`。同一相对目录下已有 `paper.pdf.md` 或 `paper.md` 时按已转换跳过。需要重新转换时，可先移走已有的同名 Markdown。
+
+新批次的下载文件和元数据保存在 `documents/conversions/.batches/` 下。临时输入副本在批次结束、取消或恢复时清理。导入文献库的 PDF 快照按内容哈希保存在 `documents/originals/.store/`。历史文献和批次仍可通过原入口读取。
 
 已有文献和通过本机 API 导入的 PDF 按项目保存，新研究沿用当前项目。PDF 按可提取文本取证并保留版本与页码，图片型或加密 PDF 可能无法取证，重复文件按内容摘要去重。
 
@@ -96,6 +100,8 @@ pnpm dev:web
 | `DELETE /conversations/{conversation_id}` | 删除该会话、消息、报告及其任务；若有待处理或正在运行的任务则返回 409 |
 | `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
 | `POST /projects/{project_id}/papers/import` | 上传 PDF |
+| `POST /conversion-batches/open-originals` | 在资源管理器打开本机原文目录 |
+| `POST /conversion-batches/from-originals` | 从固定原文目录创建并启动转换批次，传入当前 `project_id` 时导入转换成功的 PDF |
 | `POST /conversion-batches` | 创建转换清单（相对路径、大小、可选项目和 TXT 编码） |
 | `POST /conversion-batches/{id}/files/{file_id}` | 单文件 multipart 上传；服务端生成物理文件名 |
 | `POST /conversion-batches/{id}/start`、`POST /conversion-batches/{id}/cancel` | 显式开始或取消批次 |
@@ -117,7 +123,7 @@ $body = @{ question = 'Attention Is All You Need'; source = 'local'; research_mo
 Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions' -ContentType 'application/json' -Body $body
 ```
 
-可选任务参数：`research_depth` 为 `light|standard|deep`，默认 `standard`；`prefer_primary_evidence` 为 JSON 布尔值，默认 `true`；`relevance_filter` 为 `relaxed|standard|strict`，默认 `standard`。各档位预算见[架构文档](docs/ARCHITECTURE.md#工作流预算)。
+可选任务参数包括 `research_depth`（`light|standard|deep`，默认 `standard`）、`prefer_primary_evidence`（JSON 布尔值，默认 `true`）和 `relevance_filter`（`relaxed|standard|strict`，默认 `standard`）。`network_search` 和 `local_literature` 均为 JSON 布尔值，默认 `true`。各档位预算见[架构文档](docs/ARCHITECTURE.md#工作流预算)。
 
 ## 验证
 

@@ -9,21 +9,12 @@ type Item = { id: string; path: string; output: string; state: string; format: s
 type Batch = { id: string; root_name: string; state: string; revision: number; project_id?: number; files: Item[]; done: number; total: number; counts: Record<string, number> };
 type Preview = { markdown: string; truncated: boolean; warnings: string[]; mapping: { page: number; anchor: string }[] };
 const storageKey = "tufa-conversion-batch";
+const batchStartedEvent = "tufa-conversion-batch-started";
 const finished = new Set(["completed", "cancelled", "interrupted"]);
 const labels: Record<string, string> = { waiting: "等待上传", uploading: "上传中", uploaded: "等待转换", running: "转换中", succeeded: "成功", partial: "部分转换", failed: "失败", skipped: "跳过", cancelled: "已取消" };
-const supported = (file: File) => /\.(pdf|docx|doc|txt)$/i.test(file.name);
-const relative = (file: File) => file.webkitRelativePath.split("/").slice(1).join("/") || file.name;
-const rootName = (file: File) => file.webkitRelativePath.split("/").slice(0, -1)[0] || "Documents";
-
 export default function LocalDocuments({ projectId }: { projectId?: number }) {
-  const input = useRef<HTMLInputElement>(null);
-  const upload = useRef<{ controller: AbortController; batchId?: string; submitted: boolean } | null>(null);
   const previewAbort = useRef<AbortController | null>(null);
-  const [files, setFiles] = useState<File[]>([]);
-  const [includeChildren, setIncludeChildren] = useState(true);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [importPdf, setImportPdf] = useState(false);
-  const [encoding, setEncoding] = useState("auto");
+  const mounted = useRef(false);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [batch, setBatch] = useState<Batch | null>(null);
   const [busy, setBusy] = useState(false);
@@ -32,22 +23,23 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
   const [previewLoading, setPreviewLoading] = useState("");
   const [pollFailed, setPollFailed] = useState(false);
   const [pollAttempt, setPollAttempt] = useState(0);
-  const eligible = files.filter(file => supported(file) && (includeChildren || !relative(file).includes("/")));
-  const chosen = eligible.filter(file => selected.has(relative(file)));
   const active = busy || Boolean(batch && !finished.has(batch.state));
   const acceptBatch = useCallback((value: Batch) => setBatch(previous => previous?.id === value.id && previous.revision > value.revision ? previous : value), []);
 
   useEffect(() => {
+    mounted.current = true;
     try { setBatchId(localStorage.getItem(storageKey)); } catch { /* Storage may be disabled. */ }
+    const onBatchStarted = (event: Event) => {
+      const created = (event as CustomEvent<Batch>).detail;
+      acceptBatch(created); setBatchId(created.id); setPollAttempt(value => value + 1);
+    };
+    window.addEventListener(batchStartedEvent, onBatchStarted);
     return () => {
-      const current = upload.current;
-      current?.controller.abort();
-      if (current?.batchId && !current.submitted) {
-        void fetch(`/api/conversion-batches/${current.batchId}/cancel`, { method: "POST", keepalive: true }).catch(() => {});
-      }
+      mounted.current = false;
+      window.removeEventListener(batchStartedEvent, onBatchStarted);
       previewAbort.current?.abort();
     };
-  }, []);
+  }, [acceptBatch]);
 
   useEffect(() => {
     if (!batchId) return;
@@ -72,61 +64,30 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [batchId, pollAttempt, acceptBatch]);
 
-  const chooseFolder = (chosenFiles: File[]) => {
-    const sorted = chosenFiles.sort((a, b) => relative(a).localeCompare(relative(b), undefined, { numeric: true }));
-    setFiles(sorted);
-    setSelected(new Set(sorted.filter(file => supported(file) && (includeChildren || !relative(file).includes("/"))).slice(0, 100).map(relative)));
+  const openDirectory = async () => {
     setError("");
+    try { await api("/conversion-batches/open-originals", { method: "POST" }); }
+    catch (cause) { if (mounted.current) setError(messageOf(cause)); }
   };
 
   const convert = async () => {
-    if (!chosen.length || active) return;
-    if (chosen.length > 100) { setError("单批最多 100 个文件，请减少选择。"); return; }
-    if (chosen.reduce((sum, file) => sum + file.size, 0) > 200 * 1024 * 1024) { setError("单批总大小不能超过 200 MiB。"); return; }
-    const current = { controller: new AbortController(), submitted: false, batchId: undefined as string | undefined };
-    upload.current = current;
-    setBusy(true); setError(""); setPreview(null);
+    if (active) return;
+    setBusy(true); setError(""); setPreview(null); setPreviewLoading("");
     previewAbort.current?.abort();
     try {
-      const created = await api<Batch>("/conversion-batches", { ...json({ root_name: rootName(chosen[0]), files: chosen.map(file => ({ path: relative(file), size: file.size })), encoding, project_id: importPdf ? projectId : null }), signal: current.controller.signal });
-      current.batchId = created.id;
+      const created = await api<Batch>("/conversion-batches/from-originals", json({ project_id: projectId ?? null }));
       try { localStorage.setItem(storageKey, created.id); } catch { /* Session still works without storage. */ }
-      acceptBatch(created); setBatchId(created.id);
-      for (const item of created.files) {
-        if (current.controller.signal.aborted) break;
-        if (item.state !== "waiting") continue;
-        const file = chosen.find(value => relative(value).normalize("NFC") === item.path);
-        if (!file) continue;
-        const body = new FormData(); body.append("file", file, file.name);
-        try {
-          await api(`/conversion-batches/${created.id}/files/${item.id}`, { method: "POST", body, signal: current.controller.signal });
-        } catch (cause) {
-          if (current.controller.signal.aborted) throw cause;
-          // Finalization marks missing uploads as failed; continue other files.
-          setError(`有文件上传失败：${messageOf(cause)}`);
-        }
-      }
-      if (current.controller.signal.aborted) return;
-      acceptBatch(await api<Batch>(`/conversion-batches/${created.id}/start`, { method: "POST", signal: current.controller.signal }));
-      current.submitted = true;
-      setPollAttempt(value => value + 1);
-    } catch (cause) {
-      if (!current.controller.signal.aborted) setError(messageOf(cause));
-      if (current.batchId) {
-        try { acceptBatch(await api<Batch>(`/conversion-batches/${current.batchId}/cancel`, { method: "POST" })); } catch { /* Expired or unavailable service; server upload deadline applies. */ }
-      }
-    } finally {
-      if (!current.controller.signal.aborted) setBusy(false);
-      if (upload.current === current) upload.current = null;
-    }
+      window.dispatchEvent(new CustomEvent(batchStartedEvent, { detail: created }));
+    } catch (cause) { if (mounted.current) setError(messageOf(cause)); }
+    finally { if (mounted.current) setBusy(false); }
   };
 
   const cancel = async () => {
-    upload.current?.controller.abort();
-    setBusy(false);
     if (!batchId) return;
-    try { acceptBatch(await api<Batch>(`/conversion-batches/${batchId}/cancel`, { method: "POST" })); }
-    catch (cause) { setError(messageOf(cause)); }
+    try {
+      const result = await api<Batch>(`/conversion-batches/${batchId}/cancel`, { method: "POST" });
+      if (mounted.current) setBatch(previous => previous?.id === result.id && previous.revision <= result.revision ? result : previous);
+    } catch (cause) { if (mounted.current) setError(messageOf(cause)); }
   };
   const showPreview = async (item: Item) => {
     previewAbort.current?.abort();
@@ -142,32 +103,16 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
 
   return <section className={`${panel.card} ${styles.documents}`}>
     <h2>本地文档</h2>
-    <input ref={element => { input.current = element; if (element) element.webkitdirectory = true; }} className={panel.directoryInput} type="file" multiple aria-label="选择本地目录" disabled={active} onChange={event => chooseFolder(Array.from(event.currentTarget.files ?? []))} />
     <div className={styles.toolbar}>
-      <button className={panel.actionButton} type="button" disabled={active} onClick={() => input.current?.click()}>选择文件夹</button>
-      <span>{files.length ? `已选择：${rootName(files[0])} · ${files.length} 个文件` : "尚未选择目录"}</span>
+      <button className={panel.actionButton} type="button" onClick={() => void openDirectory()}>打开目录</button>
     </div>
-    {files.length > 0 && <details><summary>目录文件名（{files.length}）</summary><ul className={panel.fileList} aria-label="目录文件名">{files.slice(0, 200).map(file => <li key={file.webkitRelativePath || file.name}>{file.webkitRelativePath || file.name}</li>)}</ul>{files.length > 200 && <p>仅展示前 200 个文件名。</p>}</details>}
     <div className={styles.conversion}>
       <h3>Markdown 转换</h3>
-      <p>PDF、DOCX、TXT 在本机离线处理。旧版 DOC 请先另存为 DOCX；扫描 PDF 暂无 OCR。</p>
-      <div className={styles.options}>
-        <label><input type="checkbox" checked={includeChildren} disabled={active} onChange={event => { setIncludeChildren(event.target.checked); setSelected(new Set(files.filter(file => supported(file) && (event.target.checked || !relative(file).includes("/"))).slice(0, 100).map(relative))); }} />包含子文件夹</label>
-        <label><input type="checkbox" checked={importPdf && Boolean(projectId)} disabled={active || !projectId} onChange={event => setImportPdf(event.target.checked)} />转换成功后导入当前项目文献库（仅 PDF）</label>
-        <label>TXT 编码<select aria-label="TXT 编码" value={encoding} disabled={active} onChange={event => setEncoding(event.target.value)}><option value="auto">自动识别</option><option value="utf-8-sig">UTF-8 / BOM</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option><option value="big5">Big5</option><option value="cp1252">Windows-1252</option></select></label>
-      </div>
-      {importPdf && <p>导入提交时的当前项目；同一原始 PDF 不重复建论文。DOCX、TXT 仅转换下载，暂不接入论文检索。</p>}
-      <p>已发现 {eligible.length} 个候选：PDF {eligible.filter(file => /\.pdf$/i.test(file.name)).length} · DOCX {eligible.filter(file => /\.docx$/i.test(file.name)).length} · TXT {eligible.filter(file => /\.txt$/i.test(file.name)).length} · DOC {eligible.filter(file => /\.doc$/i.test(file.name)).length}（跳过）</p>
-      {files.length > 0 && !eligible.length && <p role="status">此范围内没有可转换的 PDF、DOCX 或 TXT 文件。</p>}
-      {eligible.length > 0 && <>
-        <label className={styles.selectAll}><input type="checkbox" disabled={active || eligible.length > 100} checked={chosen.length === eligible.length} onChange={event => setSelected(new Set(event.target.checked ? eligible.map(relative) : []))} />全选 · 已选 {chosen.length} 个{eligible.length > 100 ? "（单批最多 100 个，默认选择前 100 个）" : ""}</label>
-        <ul className={styles.selection} aria-label="待转换文档">{eligible.map(file => <li key={relative(file)}><label><input type="checkbox" disabled={active || (!selected.has(relative(file)) && chosen.length >= 100)} checked={selected.has(relative(file))} onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(relative(file)); else next.delete(relative(file)); return next; })} /><span>{relative(file)}</span><small>{(file.size/1024).toFixed(1)} KiB</small></label></li>)}</ul>
-      </>}
+      <p>使用本地文献资源前请先导入文件并转换，旧版 DOC 请先另存为 DOCX</p>
       <div className={styles.toolbar}>
-        <button className={styles.convertButton} type="button" disabled={!chosen.length || active} onClick={() => void convert()}>一键转换 Markdown</button>
-        {active && <button className={panel.actionButton} type="button" onClick={() => void cancel()}>取消批次</button>}
+        <button className={styles.convertButton} type="button" disabled={active} onClick={() => void convert()}>一键转换 Markdown</button>
+        {batch && !finished.has(batch.state) && <button className={panel.actionButton} type="button" onClick={() => void cancel()}>取消批次</button>}
       </div>
-      <p>每批最多 100 个 / 200 MiB，单文件 20 MiB、PDF 200 页、转换限时 45 秒。上传期间关闭设置会取消；开始转换后关闭设置会继续运行。</p>
     </div>
     {error && <p className={styles.error} role="alert">{error}</p>}
     {pollFailed && <button className={panel.actionButton} type="button" onClick={() => { setError(""); setPollAttempt(value => value+1); }}>重新读取状态</button>}

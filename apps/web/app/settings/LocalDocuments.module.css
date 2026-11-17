@@ -3,16 +3,7 @@
 .documents button:disabled { opacity: .45; cursor: not-allowed; }
 .documents a { color: #c5afff; font-size: 12px; text-underline-offset: 3px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.toolbar > span { color: #aaa7b8; font-size: 12px; overflow-wrap: anywhere; }
 .conversion, .results { display: grid; gap: 13px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.09); min-width: 0; }
-.options { display: grid; gap: 11px; }
-.options label, .selectAll { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: #cfcbdf; }
-.documents input[type=checkbox] { accent-color: #af90ef; flex-shrink: 0; }
-.options select { padding: 6px 8px; border: 1px solid #514562; border-radius: 7px; background: #211c2b; color: #ece4ff; }
-.selection { list-style: none; margin: 0; padding: 6px 10px; max-height: 190px; overflow: auto; background: rgba(0,0,0,.16); border: 1px solid rgba(255,255,255,.06); border-radius: 9px; }
-.selection label { display: flex; gap: 9px; align-items: center; padding: 6px 0; color: #cbc6da; font-size: 12px; }
-.selection span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
-.selection small { color: #9590a3; white-space: nowrap; }
 .convertButton { border: 1px solid #a48bde; border-radius: 9px; padding: 11px 17px; background: linear-gradient(135deg,#78609e,#5a417d); color: #fff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: filter .15s; }
 .convertButton:hover:not(:disabled) { filter: brightness(1.15); }
 .documents :focus-visible { outline: 2px solid #ccb2ff; outline-offset: 3px; }

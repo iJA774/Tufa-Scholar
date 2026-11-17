@@ -307,6 +307,8 @@ export default function ResearchChat({
   const [closingNotice, setClosingNotice] = useState(false);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [query, setQuery] = useState("");
+  const [networkSearch, setNetworkSearch] = useState(true);
+  const [localLiterature, setLocalLiterature] = useState(true);
   const [run, setRun] = useState<Run>();
   const [loadedConversationId, setLoadedConversationId] = useState<number>();
   const [researchPanelOpen, setResearchPanelOpen] = useState(false);
@@ -564,6 +566,8 @@ export default function ResearchChat({
           question,
           conversation_id: submittedConversation ?? null,
           research_mode: mode,
+          network_search: networkSearch,
+          local_literature: localLiterature,
           research_depth: researchDepth,
           prefer_primary_evidence: preferPrimaryEvidence,
           relevance_filter: relevanceFilter,
@@ -769,7 +773,22 @@ export default function ResearchChat({
           aria-label="输入你的研究问题"
         />
         <div className={styles.composerToolbar}>
-          <ModePicker mode={mode} disabled={!!busy || !!activeRun} onModeChange={onModeChange} />
+          <div className={styles.composerOptions}>
+            <ModePicker mode={mode} disabled={!!busy || !!activeRun} onModeChange={onModeChange} />
+            <button type="button" className={`${styles.sourceToggle} ${networkSearch ? styles.sourceToggleActive : ""}`} aria-pressed={networkSearch} onClick={() => setNetworkSearch(value => !value)}>
+              <svg className={styles.sourceIcon} viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18M12 3c3 3 4 6 4 9s-1 6-4 9c-3-3-4-6-4-9s1-6 4-9Z" />
+              </svg>
+              <span>网络搜索</span>
+            </button>
+            <button type="button" className={`${styles.sourceToggle} ${localLiterature ? styles.sourceToggleActive : ""}`} aria-pressed={localLiterature} onClick={() => setLocalLiterature(value => !value)}>
+              <svg className={styles.sourceIcon} viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 5.5C7 4.5 10 5 12 7c2-2 5-2.5 8-1.5v13c-3-1-6-.5-8 1.5-2-2-5-2.5-8-1.5v-13ZM12 7v13" />
+              </svg>
+              <span>本地文献</span>
+            </button>
+          </div>
           <div className={styles.composerRight}><span className={styles.shortcut}>{enterToSend ? "ENTER ↵ TO START" : "CTRL + ENTER TO START"}</span>
             <button className={`${styles.sendButton} ${query.trim() && !busy && !activeRun && !projectLoading ? styles.sendButtonReady : ""}`} type="submit" disabled={!query.trim() || !!busy || !!activeRun || projectLoading} aria-label="发送研究问题">
               {busy === "send" ? <span className={styles.spinner} /> : <svg className={styles.sendIcon} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v12" /></svg>}

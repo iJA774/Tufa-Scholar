@@ -33,7 +33,7 @@ class RegenerateApiTests(unittest.TestCase):
         return response.json()
 
     def test_degraded_report_can_be_answered_again_without_losing_history(self):
-        original = self.question()
+        original = self.question(network_search=False, local_literature=False)
         repo.claim_task()
         repo.record_research_event(original['run_id'], 'report.fallback', {'message': 'Model unavailable'})
         old_report = repo.finish_chat_task(original['run_id'], 'Preserved draft', [])
@@ -48,6 +48,8 @@ class RegenerateApiTests(unittest.TestCase):
         self.assertEqual(new['project_id'], self.project)
         self.assertEqual(new['query'], 'Original question')
         self.assertEqual(new['source'], 'local')
+        self.assertFalse(new['network_search'])
+        self.assertFalse(new['local_literature'])
         self.assertEqual((new['research_mode'], new['research_depth'], new['prefer_primary_evidence'], new['relevance_filter']),
                          ('deep', 'light', False, 'strict'))
         self.assertEqual(repo.task_history(new['id']), [{'role': 'user', 'content': 'Original question'}])

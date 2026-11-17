@@ -8,7 +8,7 @@ from src.literature.keywords import query_terms, relevance_terms, relevance_scor
 from src.persistence import repository
 
 
-def collect_evidence(project_id, source, paper_ids, query, papers, relevance_queries=None):
+def collect_evidence(project_id, source, paper_ids, query, papers, relevance_queries=None, *, local_literature=True):
     if source == 'web':
         items = papers
         found = []
@@ -46,7 +46,7 @@ def collect_evidence(project_id, source, paper_ids, query, papers, relevance_que
                 found.append(entry)
         return found
     allowed = list(paper_ids) if source == 'collection' else None
-    records = repository.project_evidence(project_id, allowed) if allowed is not None else repository.project_evidence(project_id)
+    records = (repository.project_evidence(project_id, allowed) if allowed is not None else repository.project_evidence(project_id)) if local_literature else []
     local = {p['id']: p for p in records if allowed is None or p['id'] in allowed}
     found = []
     relevance = [relevance_terms(item) for item in [query, *(relevance_queries or [])]]

@@ -2,6 +2,8 @@
 import json
 import logging
 import multiprocessing
+import os
+from uuid import uuid4
 import shutil
 import threading
 import time
@@ -13,7 +15,15 @@ from src.persistence.storage import data_directory
 
 class ConversionRunner:
     def __init__(self, timeout=45):
-        self.root = data_directory() / 'conversions'
+        documents = data_directory() / 'documents'
+        conversions = documents / 'conversions'
+        for path in (documents, conversions):
+            if path.is_symlink() or os.path.isjunction(path):
+                raise OSError('unsafe document directory')
+        self.root = conversions / '.batches'
+        if self.root.is_symlink() or os.path.isjunction(self.root):
+            raise OSError('unsafe batch directory')
+        self.legacy_root = data_directory() / 'conversions'
         self.root.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
         self.lock = threading.RLock()
@@ -24,7 +34,8 @@ class ConversionRunner:
 
     def directory(self, batch_id):
         # IDs come exclusively from persisted, server-generated manifests.
-        return self.root / batch_id
+        legacy = self.legacy_root / batch_id
+        return legacy if legacy.is_dir() else self.root / batch_id
 
     def start(self):
         for batch in store.active():
@@ -109,6 +120,13 @@ class ConversionRunner:
         batch_id, file_id = batch['id'], item['id']
         directory = self.directory(batch_id)
         source, output = directory / f'{file_id}.input', directory / f'{file_id}.md'
+        if batch.get('local_originals'):
+            canonical = data_directory() / 'documents' / 'conversions' / Path(item['output'])
+            plain = (data_directory() / 'documents' / 'conversions' / Path(item['path'])).with_suffix('.md')
+            if canonical.is_file() or plain.is_file():
+                self._change_item(batch_id, file_id, state='skipped', code='already_converted', message='已有同名 Markdown，已跳过。')
+                source.unlink(missing_ok=True)
+                return
         with self.lock:
             if store.get(batch_id)['state'] != 'running': return
             self._change_item(batch_id, file_id, state='running')
@@ -140,6 +158,20 @@ class ConversionRunner:
                 if not result['ok']:
                     self._change_item(batch_id, file_id, state='skipped' if result.get('skipped') else 'failed', code=result['code'], message=result['message'], elapsed=elapsed)
                     return
+                if batch.get('local_originals'):
+                    destination = data_directory() / 'documents' / 'conversions' / Path(item['output'])
+                    if not destination.resolve().is_relative_to((data_directory() / 'documents' / 'conversions').resolve()):
+                        raise OSError('unsafe output directory')
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = destination.with_name('.' + uuid4().hex + '.tmp')
+                    try:
+                        shutil.copyfile(output, temporary)
+                        try:
+                            os.link(temporary, destination)
+                        except FileExistsError:
+                            pass
+                    finally:
+                        temporary.unlink(missing_ok=True)
                 paper_id, import_error = None, None
                 if batch.get('project_id') and item['format'] == 'pdf':
                     try:
@@ -163,7 +195,10 @@ class ConversionRunner:
 
     def import_pdf(self, project_id, item, source, result):
         if not repo.project_exists(project_id): raise ValueError('project missing')
-        original = data_directory() / 'originals' / f'{result["digest"]}.pdf'
+        original = data_directory() / 'documents' / 'originals' / '.store' / f'{result["digest"]}.pdf'
+        if original.parent.is_symlink() or os.path.isjunction(original.parent):
+            raise OSError('unsafe original storage')
+        original.parent.mkdir(parents=True, exist_ok=True)
         # Exclusive create never overwrites an existing original.
         created = False
         try:

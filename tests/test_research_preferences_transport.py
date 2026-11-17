@@ -29,6 +29,8 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
             'research_depth': 'deep',
             'prefer_primary_evidence': False,
             'relevance_filter': 'strict',
+            'network_search': False,
+            'local_literature': False,
         })
         self.assertEqual(response.status_code, 201)
         run_id = response.json()['run_id']
@@ -38,6 +40,8 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
             'research_depth': 'deep',
             'prefer_primary_evidence': False,
             'relevance_filter': 'strict',
+            'network_search': False,
+            'local_literature': False,
         }
         self.assertEqual({key: task[key] for key in expected}, expected)
         self.assertEqual({key: self.client.get(f'/runs/{run_id}').json()[key] for key in expected}, expected)
@@ -57,11 +61,15 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
         self.assertEqual(task['research_depth'], 'standard')
         self.assertIs(task['prefer_primary_evidence'], True)
         self.assertEqual(task['relevance_filter'], 'standard')
+        self.assertIs(task['network_search'], True)
+        self.assertIs(task['local_literature'], True)
 
         invalid = [
             {'research_depth': '3'},
             {'prefer_primary_evidence': 'false'},
             {'relevance_filter': 'off'},
+            {'network_search': 'false'},
+            {'local_literature': 'false'},
         ]
         for preference in invalid:
             with self.subTest(preference=preference):
@@ -75,6 +83,7 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
         response = self.client.post(f'/projects/{project}/questions', json={
             'question': 'q', 'research_depth': 'light',
             'prefer_primary_evidence': False, 'relevance_filter': 'relaxed',
+            'network_search': False, 'local_literature': False,
         })
         self.assertEqual(response.status_code, 201)
         received = []
@@ -92,6 +101,9 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
             'prefer_primary_evidence': False,
             'relevance_filter': 'relaxed',
         })
+        self.assertFalse(received[0]['network_search'])
+        self.assertFalse(received[0]['local_literature'])
+        self.assertEqual(received[0]['local_papers'], [])
 
 
 if __name__ == '__main__':

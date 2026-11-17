@@ -892,32 +892,8 @@
   opacity: .65;
 }
 
-.directoryInput {
-  display: none;
-}
 
-.fileList {
-  display: grid;
-  max-height: min(48vh, 420px);
-  gap: 3px;
-  overflow: auto;
-  margin: 0;
-  padding: 12px 14px;
-  border: 1px solid rgba(255, 255, 255, .08);
-  border-radius: 9px;
-  background: rgba(4, 4, 10, .28);
-  list-style: none;
-  scrollbar-color: rgba(183, 164, 226, .32) transparent;
-  scrollbar-width: thin;
-}
 
-.fileList li {
-  overflow-wrap: anywhere;
-  color: #c6c2d3;
-  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.65;
-}
 
 .fileEmpty {
   margin: 0;
