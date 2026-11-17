@@ -106,6 +106,8 @@ class ConversionRunner:
                     self.preprocess_item(batch, item)
                 else:
                     self.convert_item(batch, item)
+            if store.get(batch_id).get('kind') == 'combined' and store.get(batch_id)['state'] == 'running' and not self.stopping.is_set():
+                self.classify_converted(batch_id)
             with self.lock:
                 current = store.get(batch_id)
                 if current['state'] != 'cancelled':
@@ -119,6 +121,59 @@ class ConversionRunner:
                     store.update(batch_id, lambda b: store.end(b, 'interrupted', 'storage_error', '转换执行或存储失败，请检查磁盘空间。'))
         finally:
             self.clean_inputs(batch_id)
+
+    def classify_converted(self, batch_id):
+        from src.literature.conversion.models import MAX_OUTPUT, MAX_FILES
+        from src.persistence.document_classifications import get_classification
+        root = data_directory() / 'documents' / 'conversions'
+        from src.persistence.markdown_corpus import is_indexed
+        pending, backfill, known = [], [], []
+        project_id = store.get(batch_id).get('project_id')
+        seen = 0
+        if any(p.is_symlink() or os.path.isjunction(p) for p in (root.parent, root)):
+            raise OSError('unsafe document directory')
+        for current, dirs, files in os.walk(root, followlinks=False):
+            if self.stopping.is_set() or store.get(batch_id)['state'] != 'running': return
+            current_path = Path(current)
+            relative_dir = current_path.relative_to(root)
+            if any(p.is_symlink() or os.path.isjunction(p) for p in [root.parent, root, *[root.joinpath(*relative_dir.parts[:i]) for i in range(1, len(relative_dir.parts) + 1)]]):
+                raise OSError('unsafe document directory')
+            dirs[:] = sorted(d for d in dirs if d != '.batches' and not (Path(current) / d).is_symlink() and not os.path.isjunction(Path(current) / d))
+            for name in sorted(files):
+                seen += 1
+                if seen % 32 == 0 and (self.stopping.is_set() or store.get(batch_id)['state'] != 'running'):
+                    return
+                if any(p.is_symlink() or os.path.isjunction(p) for p in [root.parent, root, *[root.joinpath(*relative_dir.parts[:i]) for i in range(1, len(relative_dir.parts) + 1)]]):
+                    raise OSError('unsafe document directory')
+                path = Path(current) / name
+                if path.suffix.lower() != '.md' or path.is_symlink() or os.path.isjunction(path) or not path.is_file(): continue
+                relative = path.relative_to(root).as_posix()
+                try:
+                    size = path.stat().st_size
+                    previous = get_classification(relative)
+                    unchanged = False
+                    if previous and size <= MAX_OUTPUT:
+                        with path.open('rb') as source:
+                            unchanged = sha256(source.read(MAX_OUTPUT + 1)).hexdigest() == previous['digest']
+                    item = {'id': uuid4().hex, 'path': relative, 'output': relative, 'size': size, 'format': 'md', 'state': 'uploaded', 'code': None, 'message': None}
+                    if not unchanged:
+                        if len(pending) < MAX_FILES: pending.append(item)
+                    elif project_id and not is_indexed(project_id, relative, previous['digest']):
+                        if len(backfill) < MAX_FILES: backfill.append(item)
+                    else:
+                        if len(known) < MAX_FILES: known.append(item)
+                except OSError:
+                    continue
+        items = (pending + backfill + known)[:MAX_FILES]
+        if not items and not store.get(batch_id)['files']:
+            items = [{'id': uuid4().hex, 'path': '', 'output': '', 'size': 0, 'format': 'md', 'state': 'failed', 'code': 'empty', 'message': '没有可处理的文档。'}]
+        with self.lock:
+            if store.get(batch_id)['state'] != 'running': return
+            store.update(batch_id, lambda b: b['files'].extend(items))
+        for item in items:
+            batch = store.get(batch_id)
+            if batch['state'] != 'running' or self.stopping.is_set(): break
+            if item['state'] == 'uploaded': self.preprocess_item(batch, item)
 
     def preprocess_item(self, batch, item):
         from src.agents.preprocesser import classify_markdown
@@ -139,26 +194,55 @@ class ConversionRunner:
                 raw = source.read(MAX_OUTPUT + 1)
             if len(raw) > MAX_OUTPUT: raise ValueError('file too large')
             digest = sha256(raw).hexdigest()
+            markdown = raw.decode('utf-8-sig')
+            if not markdown.strip(): raise ValueError('empty document')
             previous = get_classification_by_digest(digest)
             if previous:
                 classification = {key: previous[key] for key in ('domains', 'tags', 'description')}
                 with self.lock:
                     if store.get(batch_id)['state'] == 'running' and not self.stopping.is_set():
                         upsert_classification(item['path'], digest, classification)
+                        self.index_markdown(batch, item, digest, markdown)
                         self._change_item(batch_id, file_id, state='skipped', code='already_classified',
                                           message='相同内容已有分类，已复用。', classification=classification)
                 return
-            markdown = raw.decode('utf-8-sig')
-            if not markdown.strip(): raise ValueError('empty document')
             result = classify_markdown(markdown, batch['model_name'])
             with self.lock:
                 if store.get(batch_id)['state'] != 'running' or self.stopping.is_set(): return
                 upsert_classification(item['path'], digest, result.model_dump())
+                self.index_markdown(batch, item, digest, markdown)
                 self._change_item(batch_id, file_id, state='succeeded', classification=result.model_dump())
         except Exception:
             with self.lock:
                 if store.get(batch_id)['state'] == 'running':
                     self._change_item(batch_id, file_id, state='failed', code='preprocess_failed', message='文档分析失败，请检查模型设置或文件后重试。')
+
+    def index_markdown(self, batch, item, digest, markdown):
+        if batch.get('kind') != 'combined' or not batch.get('project_id'): return
+        from src.persistence.markdown_corpus import index_document
+        paper_id = None
+        for candidate in store.get(batch['id'])['files']:
+            if candidate.get('format') == 'pdf' and item['path'] in (candidate['output'], str(Path(candidate['path']).with_suffix('.md')).replace('\\', '/')):
+                paper_id = candidate.get('paper_id')
+                break
+        if paper_id is None:
+            rel = Path(item['path'])
+            possible = [Path(str(rel)[:-3]), rel.with_suffix('.pdf')]
+            root = data_directory() / 'documents' / 'originals'
+            for candidate in possible:
+                if candidate.suffix.lower() != '.pdf': continue
+                path = root / candidate
+                try:
+                    if any(part.is_symlink() or os.path.isjunction(part) for part in [root.parent, root, *[root.joinpath(*candidate.parts[:i]) for i in range(1, len(candidate.parts) + 1)]]): continue
+                    if not path.is_file() or not path.resolve().is_relative_to(root.resolve()): continue
+                    with path.open('rb') as source:
+                        source_digest = sha256()
+                        for chunk in iter(lambda: source.read(256 * 1024), b''): source_digest.update(chunk)
+                    paper_id = repo.link_existing_version(batch['project_id'], source_digest.hexdigest())
+                    if paper_id: break
+                except OSError:
+                    continue
+        index_document(batch['project_id'], item['path'], digest, markdown, paper_id=paper_id)
 
     def convert_item(self, batch, item):
         batch_id, file_id = batch['id'], item['id']

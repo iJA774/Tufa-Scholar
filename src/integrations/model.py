@@ -37,6 +37,7 @@ DEFAULT_TEMPLATE_CONTEXT = {
     'research_mode': 'auto',
     'available_tools': [],
     'native_tool_decision': False,
+    'local_capable': False,
 }
 
 # These nodes return bounded decisions or tool choices. Writing stages are left

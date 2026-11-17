@@ -64,17 +64,17 @@ pnpm dev:web
 
 深度研究先搜索和筛选背景资料，再规划并收集证据，最后生成报告。右侧“活动”可查看计划、审查、搜索结果与工具操作。支持流式响应的模型会边生成边显示 Markdown 草稿。任务失败或终稿降级时，工作区顶部会显示可关闭的原因和处理建议。降级后保存最近一份通过引用检查的研究草稿或当前证据缺口。快速探索的回答预览显示在聊天区。
 
-点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文档”可打开原文目录并批量转换 Markdown。“关于”在新标签页打开项目的 GitHub 仓库。
+点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文档”可打开原文目录并运行预处理。“关于”在新标签页打开项目的 GitHub 仓库。
 
 ### 本地文档转换 Markdown
 
-在“设置 → 本地文档”点击“打开目录”，Windows 资源管理器会打开 `TUFA_DATA_DIR/documents/originals/`，默认是项目下的 `data/documents/originals/`。将待转换文件放入该目录，再点击“一键转换 Markdown”。转换会扫描子目录，在本机完成，无需调用模型或云端 OCR。
+在“设置 → 本地文档”点击“打开目录”，Windows 资源管理器会打开 `TUFA_DATA_DIR/documents/originals/`，默认是项目下的 `data/documents/originals/`。将原文放入该目录，在“本地文献预处理”中点击“预处理”。同一批次会先在本机将原文转换为 Markdown，随后分类并为当前项目建立索引。
 
 自动识别并转换 PDF、DOCX 和 TXT。PDF 尝试保留字号标题、双栏阅读顺序和有边框表格，逐页写入 `<!-- page:N -->`；DOCX 保留标题、段落、列表、表格、粗斜体及安全链接，图片用位置标记代替。TXT 自动识别 UTF-8/BOM、UTF-16 和部分常见编码，检测失败时可先将原文件另存为 UTF-8。旧版 DOC 请先另存为 DOCX；扫描 PDF 需要先提取文本，加密 PDF 需要先解密。复杂版式、合并表格、公式和浮动对象仍可能不完整，请核对原文。
 
 进度和单文件状态来自服务端，可取消批次、逐个预览与下载，结束后下载保留相对目录结构的 ZIP。同名不同格式采用包含原扩展名的输出名，特殊冲突加稳定哈希；不会覆盖原文件。ZIP 附带转换清单和页码/字符偏移元数据（偏移按下载 Markdown 的 Unicode 字符计数）。预览最多显示 64,000 字符，完整内容通过下载获取。
 
-转换成功的 PDF 自动加入提交时的项目文献库，通过原文哈希关联已有论文和版本。新文献按真实原页保存可检索文本，已有版本和证据 ID 保留。DOCX 和 TXT 支持转换及下载，项目的本地文献检索目前使用 PDF 文献库。
+转换成功的 PDF 自动加入提交时的项目文献库，通过原文哈希关联已有论文和版本。研究员使用预处理后索引的 PDF、DOCX 和 TXT 的 Markdown 结果。已有 PDF 文件与原页证据仍可从历史报告查看。
 
 每批最多 100 文件 / 200 MiB，单文件 20 MiB、PDF 200 页、Markdown 8 MiB。批次优先处理待转换文件，超出一批时可再次点击转换。最多 4 个未结束批次、1 个 ZIP 打包，独立转换执行器一次运行一个解析子进程，每文件 45 秒、768 MiB 内存上限。关闭设置后转换继续执行，重新打开可读取最近批次。API 关闭或重启会结束遗留转换任务。
 
@@ -82,9 +82,11 @@ pnpm dev:web
 
 新批次的下载文件和元数据保存在 `documents/conversions/.batches/` 下。临时输入副本在批次结束、取消或恢复时清理。导入文献库的 PDF 快照按内容哈希保存在 `documents/originals/.store/`。历史文献和批次仍可通过原入口读取。
 
-在“设置 → 本地文档”点击“分析与分类”，可对 `documents/conversions/` 下的 Markdown 生成一个或多个研究领域、标签和 20 字以内的内容描述。待分类文档的内容会发送给已配置的模型服务。分类保存在 SQLite，原文和 Markdown 保留。每批最多处理 100 份文档，优先处理新增或修改的文档。调用模型前先查数据库，已分类的相同内容直接复用结果。
+预处理也会为已有 Markdown 补做分类和索引。待分类文档发送给已配置的模型服务，模型生成一个或多个研究领域、标签和 20 字以内的内容描述。调用模型前按内容哈希查询 SQLite，已有的分类直接复用。原文和 Markdown 都会保留。
 
 分类默认使用服务的主模型。在“设置 → 通用”填写文档分类模型 ID 可单独覆盖，清空保存可恢复跟随主模型。`TUFA_PREPROCESSER_MODEL` 优先于这一设置。
+
+启用“本地文献”后，研究员先看到当前范围内有哪些研究领域。选定领域后，按页查看文献标题、标签和短描述。正文只在研究员主动调用 Markdown 阅读工具时提供。工具用 SQLite FTS5 选取相关片段，报告记录 Markdown 字符位置。
 
 已有文献和通过本机 API 导入的 PDF 按项目保存，新研究沿用当前项目。PDF 按可提取文本取证并保留版本与页码，图片型或加密 PDF 可能无法取证，重复文件按内容摘要去重。
 
@@ -105,6 +107,7 @@ pnpm dev:web
 | `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
 | `POST /projects/{project_id}/papers/import` | 上传 PDF |
 | `POST /conversion-batches/open-originals` | 在资源管理器打开本机原文目录 |
+| `POST /conversion-batches/prepare` | 转换和分类，并为传入的 `project_id` 建立本地 Markdown 检索索引 |
 | `POST /conversion-batches/from-originals` | 从固定原文目录创建并启动转换批次，传入当前 `project_id` 时导入转换成功的 PDF |
 | `POST /conversion-batches/preprocess` | 发送 JSON `{}` 启动已转换 Markdown 的分析与分类批次 |
 | `POST /conversion-batches` | 创建转换清单（相对路径、大小、可选项目和 TXT 编码） |
@@ -143,6 +146,6 @@ pnpm check:web
 pnpm build:web
 ```
 
-这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游；`verify_conversion` 检查转换、可选导入、检索与原页证据报告。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成，不使用用户材料。浏览器交互和真实供应商需要分别验收。浏览器验收入口见 [前端说明](apps/web/README.md)。
+这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。`verify_conversion` 检查转换、分类、领域披露、FTS5 阅读和 Markdown 字符定位。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成。浏览器验收入口见 [前端说明](apps/web/README.md)。
 
 排查研究请求时，可在 `TUFA_DATA_DIR/logs/worker.log` 按 `run_id` 查询模型调用、工具失败和报告校验。供应商用量缺失时日志显示 `na`。结构化响应诊断位于 `TUFA_DATA_DIR/diagnostics/`，可能包含用户材料。可在仓库根目录用 `uv run --locked python -m scripts.replay_diagnostic <诊断文件路径>` 离线校验当前提示词契约。

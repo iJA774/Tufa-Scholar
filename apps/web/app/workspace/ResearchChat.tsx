@@ -728,7 +728,7 @@ export default function ResearchChat({
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
                 return <div className={styles.citation} key={`${citation.id || index}-${index}`}>
                   {href ? <a href={href} target="_blank" rel="noopener noreferrer">{citation.title || `参考文献 ${index + 1}`} ↗</a> : <span>{citation.title || `参考文献 ${index + 1}`}</span>}
-                  {citation.id && ` [${citation.id}]`}{citation.page && ` · 第 ${citation.page} 页`}{citation.source_level && ["abstract", "web_snippet", "web_content"].includes(citation.source_level) && ` · ${webSourceLabel(citation.source_level)}`}{citation.provider && ` · ${citation.provider}`}{citation.retrieved_at && ` · 检索于 ${new Date(citation.retrieved_at).toLocaleString("zh-CN")}`}
+                  {citation.id && ` [${citation.id}]`}{citation.page && ` · 第 ${citation.page} 页`}{citation.source_level && ["abstract", "web_snippet", "web_content"].includes(citation.source_level) && ` · ${webSourceLabel(citation.source_level)}`}{citation.source_level === "local_markdown" && ` · 本地 Markdown，字符 ${citation.char_start}–${citation.char_end}`}{citation.provider && ` · ${citation.provider}`}{citation.retrieved_at && ` · 检索于 ${new Date(citation.retrieved_at).toLocaleString("zh-CN")}`}
                 </div>;
               })}
               {message.metadata?.report_id && <div className={styles.reportLinks}>

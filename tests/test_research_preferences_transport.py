@@ -103,7 +103,7 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
         })
         self.assertFalse(received[0]['network_search'])
         self.assertFalse(received[0]['local_literature'])
-        self.assertEqual(received[0]['local_papers'], [])
+        self.assertNotIn('local_papers', received[0])
 
 
 if __name__ == '__main__':

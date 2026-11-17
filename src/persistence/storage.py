@@ -42,7 +42,18 @@ def initialize_storage() -> dict:
         CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER REFERENCES conversations(id), query TEXT NOT NULL, source TEXT NOT NULL, research_mode TEXT NOT NULL DEFAULT 'auto', status TEXT NOT NULL, stage TEXT NOT NULL, result TEXT, error TEXT);
         CREATE TABLE IF NOT EXISTS conversion_batches (id TEXT PRIMARY KEY, state TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL);
         """)
+        connection.executescript("""
+        CREATE TABLE IF NOT EXISTS markdown_documents (id TEXT PRIMARY KEY, path TEXT NOT NULL, digest TEXT NOT NULL, title TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS project_markdown (project_id INTEGER NOT NULL REFERENCES projects(id), document_id TEXT NOT NULL REFERENCES markdown_documents(id), paper_id INTEGER, PRIMARY KEY(project_id, document_id));
+        CREATE TABLE IF NOT EXISTS markdown_metadata (document_id TEXT PRIMARY KEY REFERENCES markdown_documents(id), description TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS markdown_domains (document_id TEXT NOT NULL REFERENCES markdown_documents(id), domain TEXT NOT NULL, PRIMARY KEY(document_id,domain));
+        CREATE TABLE IF NOT EXISTS markdown_tags (document_id TEXT NOT NULL REFERENCES markdown_documents(id), tag TEXT NOT NULL, PRIMARY KEY(document_id,tag));
+        CREATE TABLE IF NOT EXISTS markdown_chunks (id INTEGER PRIMARY KEY, document_id TEXT NOT NULL REFERENCES markdown_documents(id), char_start INTEGER NOT NULL, char_end INTEGER NOT NULL, text TEXT NOT NULL);
+        CREATE VIRTUAL TABLE IF NOT EXISTS markdown_fts USING fts5(text);
+        """)
         connection.execute("BEGIN IMMEDIATE")
+        if 'index_format' not in {row[1] for row in connection.execute('PRAGMA table_info(markdown_documents)')}:
+            connection.execute('ALTER TABLE markdown_documents ADD COLUMN index_format INTEGER NOT NULL DEFAULT 0')
         connection.execute("CREATE TABLE IF NOT EXISTS document_classifications (path TEXT PRIMARY KEY, digest TEXT NOT NULL, description TEXT NOT NULL CHECK(length(description) <= 20))")
         connection.execute("CREATE INDEX IF NOT EXISTS document_classifications_digest ON document_classifications(digest, path)")
         connection.execute("CREATE TABLE IF NOT EXISTS document_domains (path TEXT NOT NULL REFERENCES document_classifications(path) ON DELETE CASCADE, domain TEXT NOT NULL, PRIMARY KEY(path, domain))")

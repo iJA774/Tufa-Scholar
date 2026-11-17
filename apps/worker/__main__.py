@@ -15,24 +15,6 @@ from src.infrastructure.diagnostics import diagnostic_scope
 from src.integrations.model import ModelServiceError, StructuredOutputError
 
 
-def _local_papers(project_id, source, paper_ids):
-    papers = repository.list_papers(project_id)
-    if source == 'collection':
-        wanted = set(paper_ids or [])
-        by_id = {paper['id']: paper for paper in papers if paper['id'] in wanted}
-        papers = [by_id[paper_id] for paper_id in paper_ids or [] if paper_id in by_id]
-    else:
-        papers = papers[-40:]
-    filenames = []
-    for paper in papers:
-        versions = paper.get('versions') or []
-        if versions:
-            filename = versions[-1].get('filename')
-            if filename:
-                filenames.append(filename)
-    return list(dict.fromkeys(filenames))
-
-
 def run_once():
     task = repository.claim_task()
     if task is None:
@@ -47,7 +29,6 @@ def run_once():
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode',
                 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
             )}
-            research['local_papers'] = _local_papers(task['project_id'], task['source'], task.get('paper_ids') or []) if task['local_literature'] else []
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
             with diagnostic_scope(run_id=task['id'], project_id=task['project_id']):
                 content, evidence = run(

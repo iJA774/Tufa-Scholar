@@ -9,6 +9,9 @@ from markdown_fixture import plan, review
 
 class ResearchPreferenceTests(unittest.TestCase):
     def setUp(self):
+        domains = patch("src.tools.local_markdown.list_local_domains", return_value=[])
+        domains.start()
+        self.addCleanup(domains.stop)
         self.tmp = tempfile.TemporaryDirectory()
         env = patch.dict(os.environ, {"TUFA_DATA_DIR": self.tmp.name})
         env.start()

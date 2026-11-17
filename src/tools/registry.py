@@ -55,6 +55,8 @@ class ToolRegistry:
         from .search import register_search_tools
         from .read_paper import register_read_paper_tools
         from .read_web_page import register_read_web_page_tools
+        from .local_markdown import register_local_markdown_tools
+        register_local_markdown_tools(self)
         register_search_tools(self)
         register_read_paper_tools(self)
         register_read_web_page_tools(self)
@@ -67,10 +69,14 @@ class ToolRegistry:
     def list_tools(self, context: ToolContext):
         return [{'name': name, 'description': description, 'input_schema': model.model_json_schema()}
                 for name, (description, model, _, sources) in self._tools.items()
-                if context.source in sources and self._allowed(context)]
+                if context.source in sources and self._allowed(name, context)]
 
     @staticmethod
-    def _allowed(context):
+    def _allowed(name, context):
+        if name in {'select_local_domains', 'read_local_markdown'}:
+            return context.local_literature
+        if name == 'collect_evidence':
+            return context.network_search
         if context.source == 'web':
             return context.network_search
         if context.source in {'local', 'collection'}:
@@ -83,7 +89,7 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             raise ToolCallValidationError('工具不存在或不适用于当前范围', 'unknown_tool')
-        if context.source not in tool[3] or not self._allowed(context):
+        if context.source not in tool[3] or not self._allowed(name, context):
             raise ToolCallValidationError('工具不存在或不适用于当前范围', 'disallowed_tool')
         try:
             params = tool[1].model_validate(arguments, strict=True)

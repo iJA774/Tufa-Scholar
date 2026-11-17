@@ -65,18 +65,18 @@ def _collect_evidence(params, context):
             items.append(item)
     else:
         items = [item.model_dump(exclude_unset=True) for item in params.papers]
-        if not context.local_literature:
+        if context.source in {'all', 'openalex'}:
             items = [{**item, 'id': None} for item in items]
     source = context.source
-    if source == 'all' and not context.network_search:
-        source = 'local'
+    if source == 'all':
+        source = 'openalex'
     options = {}
     if params.relevance_queries:
         options['relevance_queries'] = params.relevance_queries
-    if not context.local_literature:
+    if context.source in {'all', 'openalex'}:
         options['local_literature'] = False
     return collect_evidence(context.project_id, source, context.paper_ids, params.query, items, **options)
 
 
 def register_read_paper_tools(registry):
-    registry.register('collect_evidence', '从检索结果中提取带来源定位的证据。', CollectEvidenceInput, _collect_evidence, {'local', 'openalex', 'all', 'collection', 'web'})
+    registry.register('collect_evidence', '从外部论文摘要或网页结果提取带来源定位的证据。', CollectEvidenceInput, _collect_evidence, {'openalex', 'all', 'web'})

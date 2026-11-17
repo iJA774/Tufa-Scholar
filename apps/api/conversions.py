@@ -222,6 +222,19 @@ def preprocess_batch(request: Request, payload: dict):
         raise HTTPException(507, '无法读取本地文档。') from None
 
 
+@router.post('/prepare', status_code=201)
+def prepare_documents(spec: LocalBatchSpec, request: Request):
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/json':
+        raise HTTPException(415, '请使用 JSON 提交预处理请求。')
+    from src.infrastructure.settings import preprocesser_config
+    config = preprocesser_config()
+    if not config['model'] or not config['base_url']:
+        raise HTTPException(422, '请先在通用设置中配置模型服务地址和模型名称。')
+    if spec.project_id is not None and not repo.project_exists(spec.project_id):
+        raise HTTPException(404, '当前项目不存在。')
+    return _convert_originals(spec, request, combined_model=config['model'])
+
+
 @router.post('/open-originals')
 def open_originals():
     directory = data_directory() / 'documents' / 'originals'
@@ -237,6 +250,10 @@ def open_originals():
 
 @router.post('/from-originals', status_code=201)
 def convert_originals(spec: LocalBatchSpec, request: Request):
+    return _convert_originals(spec, request)
+
+
+def _convert_originals(spec: LocalBatchSpec, request: Request, *, combined_model: str | None = None):
     root = data_directory() / 'documents' / 'originals'
     if any(p.is_symlink() or os.path.isjunction(p) for p in (root.parent, root)):
         raise HTTPException(422, '原始论文目录包含不安全的链接。')
@@ -249,7 +266,15 @@ def convert_originals(spec: LocalBatchSpec, request: Request):
             path = Path(parent) / name
             if not path.is_symlink() and not os.path.isjunction(path) and path.is_file() and path.resolve().is_relative_to(root.resolve()): paths.append(path)
     paths.sort(key=lambda p: p.relative_to(root).as_posix().casefold())
-    if not paths: raise HTTPException(422, '原始论文目录为空。')
+    if not paths:
+        if not combined_model: raise HTTPException(422, '原始论文目录为空。')
+        batch = {'id': uuid4().hex, 'revision': 0, 'root_name': 'originals', 'kind': 'combined', 'model_name': combined_model, 'project_id': spec.project_id, 'state': 'queued', 'created': time.time(), 'files': []}
+        try:
+            store.create(batch)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        request.app.state.conversions.wakeup.set()
+        return store.public(batch)
     try:
         conversions = data_directory() / 'documents' / 'conversions'
         work, rest = [], []
@@ -278,6 +303,9 @@ def convert_originals(spec: LocalBatchSpec, request: Request):
         runner = request.app.state.conversions
         def mark_local(b):
             b['local_originals'] = True
+            if combined_model:
+                b['kind'] = 'combined'
+                b['model_name'] = combined_model
             for item in b['files']:
                 item['output'] = item['path'] + '.md'
         batch = store.update(batch['id'], mark_local)
@@ -427,7 +455,7 @@ def archive(batch_id: str, request: Request):
     batch = batch_for(batch_id)
     if batch.get('kind') == 'preprocess': raise HTTPException(409, '分析批次不提供转换文件。')
     if batch['state'] not in store.TERMINAL: raise HTTPException(409, '请等待批次结束后下载 ZIP。')
-    ready = [f for f in batch['files'] if f['state'] in ('succeeded', 'partial')]
+    ready = [f for f in batch['files'] if f['state'] in ('succeeded', 'partial') and f['format'] != 'md']
     if not ready: raise HTTPException(409, '此批次没有可下载的结果。')
     runner = request.app.state.conversions
     if not runner.downloads.acquire(blocking=False): raise HTTPException(409, '正在生成其他 ZIP，请稍后重试。')

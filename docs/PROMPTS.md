@@ -16,7 +16,7 @@
 
 提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息。每次请求都注入带时区的北京时间 `CURRENT_TIME`。分流、背景调查和文档分类使用由代码 schema 生成的 `OUTPUT_SCHEMA`，researcher act 使用原生 Function Calling，其余研究生成阶段使用 Markdown 文本。问题、历史、检索材料和本地文档只作为 user JSON 数据发送。
 
-各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录；候选只在背景筛选或 researcher 当前来源字段按需发送。planner 和 reporter 使用精简 background。Planner 的 `local_papers` 是用户数据，只出现在 JSON 输入中。researcher 的 act 阶段仅提供当前轮的目标、计划、候选和证据预览及近期工具反馈；达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID，不授予工具权限。reporter 汇总各轮可复用的草稿内容、审查和累计证据；超过[证据额度](ARCHITECTURE.md#工作流预算)时保留各轮补查材料并提供 `evidence_omitted_count`。Reporter 只能引用可见证据，草稿只保留引用可核对的结论，不附候选池。
+各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录。planner 和 reporter 使用精简 background。researcher 的 act 阶段接收当前轮目标、计划、候选、证据预览及近期工具反馈。Jinja2 根据研究方向、本地来源开关和当前阶段选择指引。本地研究的领域名称通过 `local_domains` 传入，领域选择后通过工具反馈逐页披露文献元数据。达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID。reporter 汇总各轮草稿、审查和累计证据。超过[证据额度](ARCHITECTURE.md#工作流预算)时保留各轮补查材料并提供 `evidence_omitted_count`。
 
 | 结构 | 字段 |
 |---|---|

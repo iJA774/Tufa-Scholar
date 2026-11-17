@@ -15,8 +15,30 @@ class SourceGatingWorkflowTests(unittest.TestCase):
              patch('src.tools.search.search_web', side_effect=AssertionError('network called')):
             result = literature._background_investigator({'research': research}, None)
         self.assertEqual(result['background']['source'], 'paper')
-        search.assert_called_once()
-        self.assertEqual(search.call_args.args[2], 'local')
+        search.assert_not_called()
+
+    def test_local_disclosure_precedes_read_and_evidence_retains_offsets(self):
+        research = {'project_id': 1, 'query': 'question', 'source': 'local'}
+        state = {'research': research}
+        document = {'document_id': 'doc-1', 'title': 'Title', 'domains': ['Area']}
+        evidence = {'id': 'e1', 'document_id': 'doc-1', 'paper_id': 3,
+                    'title': 'Title', 'text': 'Relevant', 'source_level': 'local_markdown',
+                    'char_start': 10, 'char_end': 18}
+        with patch('src.tools.local_markdown.list_local_domains', return_value=['Area']), \
+             patch.object(literature.registry, 'invoke', side_effect=[
+                 {'documents': [document], 'next_offset': 1}, [evidence]]):
+            with self.assertRaises(literature.ToolCallValidationError):
+                literature._invoke_tool(state, 'paper', 'read_local_markdown',
+                                        {'document_id': 'doc-1', 'query': 'question'})
+            with self.assertRaises(literature.ToolCallValidationError):
+                literature._invoke_tool(state, 'paper', 'select_local_domains', {'domains': ['Other']})
+            patch_result, disclosed = literature._invoke_tool(state, 'paper', 'select_local_domains', {'domains': ['Area']})
+            self.assertEqual(disclosed['next_offset'], 1)
+            state.update(patch_result)
+            patch_result, read = literature._invoke_tool(state, 'paper', 'read_local_markdown',
+                                                        {'document_id': 'doc-1', 'query': 'question', 'offset': 10})
+            self.assertEqual(read[0]['char_start'], 10)
+            self.assertEqual(literature._evidence_views(patch_result['evidence_pool'])[0]['document_id'], 'doc-1')
 
     def test_disabled_local_uses_remote_papers_and_honors_collection_scope(self):
         research = {'project_id': 1, 'query': 'question', 'source': 'auto',

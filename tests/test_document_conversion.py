@@ -167,6 +167,52 @@ class ConversionApiTest(unittest.TestCase):
             time.sleep(.1)
         self.fail('batch did not reach terminal state')
 
+    def test_prepare_converts_then_classifies_and_reuses(self):
+        from src.agents.preprocesser import Classification
+        root = Path(self.tmp.name) / 'documents' / 'originals'
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'notes.txt').write_text('A research document.', encoding='utf-8')
+        result = Classification(domains=['物理'], tags=['测试'], description='研究材料')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            self.assertNotEqual(self.client.post('/conversion-batches/prepare', content='{}', headers={'Content-Type': 'text/plain'}).status_code, 201)
+            response = self.client.post('/conversion-batches/prepare', json={})
+            self.assertEqual(response.status_code, 201, response.text)
+            batch = self.finish(response.json())
+            self.assertEqual(batch['state'], 'completed')
+            self.assertEqual([i['format'] for i in batch['files']], ['txt', 'md'])
+            self.assertEqual(batch['files'][1]['classification']['domains'], ['物理'])
+            self.assertEqual(self.client.get(f"/conversion-batches/{batch['id']}/files/{batch['files'][0]['id']}/markdown").status_code, 200)
+            again = self.finish(self.client.post('/conversion-batches/prepare', json={}).json())
+            self.assertEqual(again['files'][-1]['code'], 'already_classified')
+            self.assertEqual(classify.call_count, 1)
+
+    def test_prepare_pdf_reuse_links_project_and_collection(self):
+        from src.agents.preprocesser import Classification
+        from src.literature.markdown_corpus import select_domains, read_markdown
+        from src.tools.registry import ToolContext
+        a = self.client.post('/projects', json={'name': 'A'}).json()['id']
+        b = self.client.post('/projects', json={'name': 'B'}).json()['id']
+        c = self.client.post('/projects', json={'name': 'C'}).json()['id']
+        root = Path(self.tmp.name) / 'documents' / 'originals'
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'paper.pdf').write_bytes(pdf_fixture())
+        result = Classification(domains=['物理'], tags=['测试'], description='研究材料')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            first = self.finish(self.client.post('/conversion-batches/prepare', json={'project_id': a}).json())
+            paper_id = first['files'][0]['paper_id']
+            self.assertIsNotNone(paper_id)
+            second = self.finish(self.client.post('/conversion-batches/prepare', json={'project_id': b}).json())
+            self.assertEqual(second['files'][0]['paper_id'], paper_id)
+            self.assertEqual(second['files'][-1]['code'], 'already_classified')
+            self.assertEqual(classify.call_count, 1)
+            docs = select_domains(ToolContext(b, 'collection', (paper_id,)), ['物理'], 0)['documents']
+            self.assertEqual(len(docs), 1)
+            fragments = read_markdown(ToolContext(b, 'collection', (paper_id,)), docs[0]['document_id'], 'Traceable', 0)
+            self.assertTrue(fragments)
+            self.assertEqual(fragments[0]['paper_id'], paper_id)
+            self.assertEqual(select_domains(ToolContext(c, 'local'), ['物理'], 0)['documents'], [])
+            self.assertEqual(select_domains(ToolContext(b, 'collection', (paper_id + 1000,)), ['物理'], 0)['documents'], [])
+
     def test_preprocess_incremental_and_retry(self):
         from src.agents.preprocesser import Classification
         from src.persistence.document_classifications import get_classification
@@ -421,11 +467,11 @@ class ConversionApiTest(unittest.TestCase):
         papers = repo.local_search(a,'Traceable')
         self.assertEqual(len(papers),1)
         self.assertEqual(repo.local_search(b,'Traceable'),[])
-        from src.tools.registry import ToolContext, ToolRegistry
-        evidence = ToolRegistry().invoke('collect_evidence',{'query':'Traceable','papers':papers},context=ToolContext(a,'local'))
+        from src.literature.evidence import collect_evidence
+        evidence = collect_evidence(a, 'local', (), 'Traceable', papers)
         self.assertEqual({item['page'] for item in evidence},{1,2})
         self.assertTrue(all(item['paper_id']==papers[0]['id'] for item in evidence))
-        restricted = ToolRegistry().invoke('collect_evidence',{'query':'Traceable','papers':papers},context=ToolContext(b,'local'))
+        restricted = collect_evidence(b, 'local', (), 'Traceable', papers)
         self.assertEqual(restricted,[])
         paper_id = papers[0]['id']
         with connect_database() as db:

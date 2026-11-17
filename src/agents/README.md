@@ -41,7 +41,7 @@ supervisor 按节点顺序调度 researcher 和 analyst，再回到 planner。re
 
 模型调用位于 `src/integrations/model.py`。Jinja2 仅渲染受信的 system 模板，使用 `StrictUndefined`，每次 HTTP 请求注入当前北京时间。分流、背景调查和文档分类使用 Pydantic `OUTPUT_SCHEMA`，researcher act 使用原生 Function Calling。Planner、Analyst、Researcher 初稿和 Reporter 输出 Markdown，Planner 与 Analyst 另附独立的调度控制块。问题、历史、网页、论文、候选、初稿、审查意见和本地文件名均作为 user JSON 数据发送。更多规则见 [提示词说明](../../docs/PROMPTS.md) 与 [模板维护规则](../prompts/AGENTS.md)。
 
-模型请求按阶段裁剪。背景筛选接收检索候选摘要；planner 和 reporter 接收筛选摘要、缺口及候选 ID，不接收重复的候选正文。researcher act 每轮仅接收当前来源的短候选预览、证据预览、少量最近工具反馈和筛选候选 ID；结束时单独调用 draft 并传入所需证据，以保持证据引用校验能力。各阶段候选及证据条数、文本和上下文预算见[架构预算表](../../docs/ARCHITECTURE.md#工作流预算)。连续两次搜索失败或网页正文连续两次读取失败会提前结束当轮检索；同一轮会跳过此前读取失败的相同候选与字符区间，保留已有证据并继续生成初稿和报告。成功的后续工具调用会重置连续失败计数，分页偏移变化仍可读取。planner 可看到项目文献文件名清单以判断现有范围，但文件名不代表已读取原文。工具目录由代码按节点和来源过滤；图层将候选 ID 映射为 registry 的真实参数，不能由模型构造项目范围或网页 URL。
+模型请求按阶段裁剪。背景筛选接收外部候选摘要，planner 和 reporter 接收筛选摘要、缺口及候选 ID。researcher act 接收短候选和证据预览以及最近的工具反馈，本地模式还会提供项目范围内的研究领域。模型选择领域后查看按页披露的文献元数据，再主动选择 Markdown 阅读。结束时单独调用 draft 并传入所需证据。各阶段的候选、证据和上下文限制见[架构预算表](../../docs/ARCHITECTURE.md#工作流预算)。连续失败会提前结束当轮检索，保留已有证据。工具目录由代码按节点和来源过滤，图层校验候选 ID、已披露的文档 ID 和网页 URL。
 
 ## 候选与证据
 
