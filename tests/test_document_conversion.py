@@ -158,13 +158,95 @@ class ConversionApiTest(unittest.TestCase):
         return batch
 
     def finish(self,batch):
-        self.client.post(f'/conversion-batches/{batch["id"]}/start')
+        if batch.get('kind') != 'preprocess':
+            self.client.post(f'/conversion-batches/{batch["id"]}/start')
         deadline = time.monotonic()+65
         while time.monotonic() < deadline:
             value = self.client.get(f'/conversion-batches/{batch["id"]}').json()
             if value['state'] in store.TERMINAL: return value
             time.sleep(.1)
         self.fail('batch did not reach terminal state')
+
+    def test_preprocess_incremental_and_retry(self):
+        from src.agents.preprocesser import Classification
+        from src.persistence.document_classifications import get_classification
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'nested').mkdir()
+        doc = root / 'nested' / 'paper.md'
+        doc.write_text('original markdown', encoding='utf-8')
+        result = Classification(domains=['物理', '材料'], tags=['测试'], description='研究材料')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            response = self.client.post('/conversion-batches/preprocess', json={})
+            self.assertEqual(response.status_code, 201, response.text)
+            batch = self.finish(response.json())
+            self.assertEqual(batch['kind'], 'preprocess')
+            self.assertEqual(batch['files'][0]['classification']['domains'], ['物理', '材料'])
+            self.assertEqual(get_classification('nested/paper.md')['description'], '研究材料')
+            again = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(again['counts']['skipped'], 1)
+            self.assertEqual(classify.call_count, 1)
+            doc.write_text('changed', encoding='utf-8')
+            classify.side_effect = RuntimeError('secret upstream content')
+            failed = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(failed['counts']['failed'], 1)
+            self.assertNotIn('secret', str(failed))
+            classify.side_effect = None
+            retried = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(retried['counts']['succeeded'], 1)
+            self.assertEqual(doc.read_text(encoding='utf-8'), 'changed')
+
+    def test_preprocess_requires_json_and_nonempty_document(self):
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'empty.md').write_text('\ufeff  \n', encoding='utf-8')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown') as classify:
+            self.assertNotEqual(self.client.post('/conversion-batches/preprocess', content='{}', headers={'Content-Type': 'text/plain'}).status_code, 201)
+            self.assertNotEqual(self.client.post('/conversion-batches/preprocess', content='{}').status_code, 201)
+            self.assertFalse(store.active())
+            batch = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(batch['counts']['failed'], 1)
+            classify.assert_not_called()
+
+    def test_preprocess_reuses_duplicate_content_across_paths(self):
+        from src.agents.preprocesser import Classification
+        from src.persistence.document_classifications import get_classification
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'a.md').write_text('same document', encoding='utf-8')
+        (root / 'b.md').write_text('same document', encoding='utf-8')
+        result = Classification(domains=['物理'], tags=['测试'], description='研究')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            batch = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(batch['counts']['succeeded'], 1)
+            self.assertEqual(batch['counts']['skipped'], 1)
+            self.assertEqual(classify.call_count, 1)
+            self.assertEqual(get_classification('a.md')['domains'], ['物理'])
+            self.assertEqual(get_classification('b.md')['domains'], ['物理'])
+            (root / 'c.md').write_text('same document', encoding='utf-8')
+            again = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(again['counts']['skipped'], 3)
+            self.assertEqual(classify.call_count, 1)
+            self.assertEqual(get_classification('c.md')['tags'], ['测试'])
+
+    def test_preprocess_prioritizes_new_after_many_indexed(self):
+        from src.agents.preprocesser import Classification
+        from src.persistence.document_classifications import upsert_classification
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        result = Classification(domains=['物理'], tags=['测试'], description='研究')
+        for i in range(101):
+            name = f'{i:03}.md'
+            (root / name).write_text('old', encoding='utf-8')
+            upsert_classification(name, sha256(b'old').hexdigest(), result.model_dump())
+        (root / 'new.md').write_text('new', encoding='utf-8')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            response = self.client.post('/conversion-batches/preprocess', json={})
+            self.assertEqual(response.status_code, 201, response.text)
+            batch = self.finish(response.json())
+            self.assertEqual(batch['total'], 100)
+            self.assertEqual(batch['counts']['succeeded'], 1)
+            self.assertEqual(classify.call_count, 1)
+            self.assertTrue(any(item['path'] == 'new.md' and item['state'] == 'succeeded' for item in batch['files']))
+            self.assertTrue(any(item.get('classification') for item in batch['files'] if item['state'] == 'skipped'))
+            self.assertEqual(self.client.post(f"/conversion-batches/{batch['id']}/start").status_code, 409)
+            self.assertEqual(self.client.get(f"/conversion-batches/{batch['id']}/zip").status_code, 409)
 
     def test_local_originals_conversion_and_existing_markdown(self):
         root = Path(self.tmp.name) / 'documents'

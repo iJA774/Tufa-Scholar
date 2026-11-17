@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 PROMPT_DIR = Path(__file__).resolve().parents[1] / 'prompts'
 PROMPT_IDS = frozenset({
     'runtime/dispatcher',
+    'literature/preprocesser',
     'literature/background_investigator',
     'literature/planner',
     'literature/researcher',

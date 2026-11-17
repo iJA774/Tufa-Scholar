@@ -98,6 +98,7 @@ class SettingsInput(BaseModel):
     clear_openai_api_key: bool = False
     openai_base_url: str | None = None
     openai_model: str | None = None
+    preprocesser_model: str | None = Field(default=None, max_length=300)
 
 
 class ModelDiscoveryInput(BaseModel):

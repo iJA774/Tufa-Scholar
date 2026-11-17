@@ -53,7 +53,6 @@ const stageText: Record<string, string> = {
   supervisor: "统筹研究步骤",
   researcher: "搜索与整理证据",
   analyst: "分析研究证据",
-  coder: "",
   reporter: "整理最终报告",
 };
 
@@ -200,7 +199,7 @@ function ModePicker({ mode, disabled, onModeChange }: { mode: ResearchMode; disa
   </div>;
 }
 
-const deepResearchNodes = new Set(["background_investigator", "planner", "supervisor", "researcher", "analyst", "coder", "reporter"]);
+const deepResearchNodes = new Set(["background_investigator", "planner", "supervisor", "researcher", "analyst", "reporter"]);
 
 function isDeepResearchRun(run?: Run, events: RunEvent[] = []) {
   if (!run) return false;

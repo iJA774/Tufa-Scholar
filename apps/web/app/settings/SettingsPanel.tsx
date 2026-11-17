@@ -2,7 +2,7 @@
 
 import { type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
-import { api } from "../workspace/api";
+import { api, messageOf } from "../workspace/api";
 import { DEFAULT_PREFERENCES, type ReportFormat, type WorkspacePreferences } from "../workspace/preferences";
 import WebSearchSettings from "./WebSearchSettings";
 import RuntimeLogsSettings from "./RuntimeLogsSettings";
@@ -404,6 +404,8 @@ export default function SettingsPanel({
               <ModelControls value={preferences.modelChoice} onChange={value => updatePreference("modelChoice", value)} disabled={false} />
             </section>
 
+            <PreprocesserSettings />
+
             <section className={styles.resetSection}>
               <p>恢复界面偏好默认值。API、URL 和模型选择会保留。</p>
               <button className={styles.resetButton} type="button" onClick={resetPreferences}>重置所有设置</button>
@@ -650,5 +652,41 @@ function ApiSettings() {
         <button className={styles.actionButton} type="button" disabled={busy || !settings} onClick={() => void save()}>{busy ? "保存中…" : "保存服务设置"}</button>
       </div>
     </div>}
+  </section>;
+}
+
+
+type PreprocesserConfig = { preprocesser: { model: string | null; model_source: "default" | "local" | "environment" }; model: { model: string | null } };
+function PreprocesserSettings() {
+  const saveController = useRef<AbortController | null>(null);
+  const [config, setConfig] = useState<PreprocesserConfig>();
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    api<PreprocesserConfig>("/settings", { signal: controller.signal }).then(data => {
+      setConfig(data); setDraft(data.preprocesser.model_source === "local" ? data.preprocesser.model || "" : "");
+    }).catch(cause => { if (!controller.signal.aborted) setNotice(messageOf(cause)); });
+    return () => { controller.abort(); saveController.current?.abort(); };
+  }, []);
+  const save = async () => {
+    const controller = new AbortController(); saveController.current = controller;
+    setBusy(true); setNotice("");
+    try {
+      const data = await api<PreprocesserConfig>("/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preprocesser_model: draft.trim() }), signal: controller.signal });
+      setConfig(data); setDraft(data.preprocesser.model_source === "local" ? data.preprocesser.model || "" : ""); setNotice("已保存");
+    } catch (cause) { if (!controller.signal.aborted) setNotice(messageOf(cause)); } finally { if (!controller.signal.aborted) setBusy(false); }
+  };
+  return <section className={styles.card}>
+    <h2>文档分析模型</h2>
+    {!config && !notice && <p role="status">正在读取配置…</p>}
+    {config && <div className={styles.formGrid}>
+      <label htmlFor="preprocesser-model">模型 ID</label>
+      <input id="preprocesser-model" maxLength={300} value={config.preprocesser.model_source === "environment" ? config.preprocesser.model || "" : draft} placeholder={config.model.model || "默认主模型"} disabled={busy || config.preprocesser.model_source === "environment"} onChange={event => setDraft(event.target.value)} />
+      <small>{config.preprocesser.model_source === "environment" ? "由环境变量锁定" : "留空使用主模型"}</small>
+      <button className={styles.actionButton} type="button" disabled={busy || config.preprocesser.model_source === "environment"} onClick={() => void save()}>保存分析模型</button>
+    </div>}
+    {notice && <p role="status">{notice}</p>}
   </section>;
 }

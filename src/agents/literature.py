@@ -255,7 +255,6 @@ class State(TypedDict, total=False):
     warnings: list
     needs_research: bool
     content: str
-    coder_status: str
     background_decision: dict
     last_completed: str
     next_node: str
@@ -1553,8 +1552,6 @@ def _supervisor(state, on_stage):
     if completed == "researcher":
         target = "analyst"
     elif completed == "analyst":
-        target = "coder"
-    elif completed == "coder":
         target = "planner"
     elif completed == "planner":
         target = "researcher"
@@ -2047,13 +2044,6 @@ def _analyst(state, on_stage, on_subtask):
     return {"current_review": review, "current_findings": current_findings, "rounds": rounds, "errors": state.get("errors", []), "last_completed": "analyst"}
 
 
-def _coder(state, on_stage):
-    _emit(on_stage, "coder")
-    # This node reserves a deterministic role in the pipeline. Data safety and
-    # citation validation are performed by code at ingestion and report time.
-    return {"coder_status": "placeholder", "last_completed": "coder"}
-
-
 def _allowed_report_papers(state):
     if state["research"]["source"] == "collection":
         return set(state["research"].get("paper_ids") or [])
@@ -2404,8 +2394,6 @@ def _node_completion_data(node, state, patch):
         data["message"] = _safe_event_text(gaps[0], 240) if gaps else ("已覆盖主要要求。" if review.get("sufficient") else "仍需补充证据。")
         if review.get("review"):
             data["body"] = review["review"][:8_000]
-    elif node == "coder":
-        data["message"] = "本轮无需代码执行。"
     elif node == "reporter":
         evidence = patch.get("final_evidence", state.get("final_evidence", []))
         if patch.get("report_fallback"):
@@ -2430,7 +2418,6 @@ def _graph(on_stage, on_subtask):
     graph.add_node("supervisor", lambda state: _run_node_with_events(state, "supervisor", lambda current: _supervisor(current, on_stage)))
     graph.add_node("researcher", lambda state: _run_node_with_events(state, "researcher", lambda current: _researcher(current, on_stage)))
     graph.add_node("analyst", lambda state: _run_node_with_events(state, "analyst", lambda current: _analyst(current, on_stage, on_subtask)))
-    graph.add_node("coder", lambda state: _run_node_with_events(state, "coder", lambda current: _coder(current, on_stage)))
     graph.add_node("reporter", lambda state: _run_node_with_events(state, "reporter", lambda current: _reporter(current, on_stage)))
     graph.add_edge(START, "dispatcher")
     graph.add_conditional_edges(
@@ -2447,11 +2434,10 @@ def _graph(on_stage, on_subtask):
     graph.add_conditional_edges(
         "supervisor",
         lambda state: state["next_node"],
-        {"researcher": "researcher", "analyst": "analyst", "coder": "coder", "planner": "planner"},
+        {"researcher": "researcher", "analyst": "analyst", "planner": "planner"},
     )
     graph.add_edge("researcher", "supervisor")
     graph.add_edge("analyst", "supervisor")
-    graph.add_edge("coder", "supervisor")
     graph.add_edge("reporter", END)
     return graph.compile()
 

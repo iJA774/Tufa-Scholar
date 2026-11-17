@@ -43,6 +43,12 @@ def initialize_storage() -> dict:
         CREATE TABLE IF NOT EXISTS conversion_batches (id TEXT PRIMARY KEY, state TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL);
         """)
         connection.execute("BEGIN IMMEDIATE")
+        connection.execute("CREATE TABLE IF NOT EXISTS document_classifications (path TEXT PRIMARY KEY, digest TEXT NOT NULL, description TEXT NOT NULL CHECK(length(description) <= 20))")
+        connection.execute("CREATE INDEX IF NOT EXISTS document_classifications_digest ON document_classifications(digest, path)")
+        connection.execute("CREATE TABLE IF NOT EXISTS document_domains (path TEXT NOT NULL REFERENCES document_classifications(path) ON DELETE CASCADE, domain TEXT NOT NULL, PRIMARY KEY(path, domain))")
+        connection.execute("CREATE INDEX IF NOT EXISTS document_domains_reverse ON document_domains(domain, path)")
+        connection.execute("CREATE TABLE IF NOT EXISTS document_tags (path TEXT NOT NULL REFERENCES document_classifications(path) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY(path, tag))")
+        connection.execute("CREATE INDEX IF NOT EXISTS document_tags_reverse ON document_tags(tag, path)")
         if 'pinned' not in {row[1] for row in connection.execute('PRAGMA table_info(conversations)')}:
             connection.execute('ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0')
         if 'pages_indexed' not in {row[1] for row in connection.execute('PRAGMA table_info(paper_versions)')}:

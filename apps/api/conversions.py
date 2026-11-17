@@ -150,6 +150,78 @@ class LocalBatchSpec(BaseModel):
     project_id: int | None = Field(default=None, gt=0)
 
 
+@router.post('/preprocess', status_code=201)
+def preprocess_batch(request: Request, payload: dict):
+    from src.infrastructure.settings import preprocesser_config
+    from src.literature.conversion.models import MAX_OUTPUT
+    from src.persistence.document_classifications import get_classification
+
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/json' or payload:
+        raise HTTPException(415, '请使用空 JSON 对象提交分析请求。')
+    runner = request.app.state.conversions
+    root = data_directory() / 'documents' / 'conversions'
+    config = preprocesser_config()
+    model = config['model']
+    if not model or not config['base_url']:
+        raise HTTPException(422, '请先在通用设置中配置模型服务地址和模型名称。')
+    work, unchanged = [], []
+    seen, scanned_bytes = 0, 0
+    try:
+        for component in (root.parent, root):
+            if component.is_symlink() or os.path.isjunction(component):
+                raise OSError('unsafe document directory')
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if d != '.batches' and not (Path(current) / d).is_symlink() and not os.path.isjunction(Path(current) / d))
+            for name in sorted(files):
+                path = Path(current) / name
+                if path.suffix.lower() != '.md' or path.is_symlink() or os.path.isjunction(path) or not path.is_file():
+                    continue
+                seen += 1
+                if seen > 10000:
+                    raise HTTPException(413, '文档数量超过扫描限制。')
+                relative = path.relative_to(root).as_posix()
+                try:
+                    safe_path(relative)
+                    # Recheck each ancestor before opening a candidate.
+                    for part in [root, *[root.joinpath(*Path(relative).parts[:i]) for i in range(1, len(Path(relative).parts) + 1)]]:
+                        if part.is_symlink() or os.path.isjunction(part): raise OSError('unsafe path')
+                    if not path.resolve().is_relative_to(root.resolve()): raise OSError('unsafe path')
+                    size = path.stat().st_size
+                    item = {'id': uuid4().hex, 'path': relative, 'output': relative,
+                            'size': size, 'format': 'md', 'state': 'uploaded', 'code': None, 'message': None}
+                    previous = get_classification(relative)
+                    if previous and size <= MAX_OUTPUT:
+                        scanned_bytes += size
+                        if scanned_bytes > 2 * 1024 * 1024 * 1024:
+                            raise HTTPException(413, '文档总量超过扫描限制。')
+                        with path.open('rb') as source:
+                            raw = source.read(MAX_OUTPUT + 1)
+                        if sha256(raw).hexdigest() == previous['digest']:
+                            item.update(state='skipped', code='already_classified', message='内容未变化，已跳过。',
+                                        classification={key: previous[key] for key in ('domains', 'tags', 'description')})
+                            if len(unchanged) < MAX_FILES: unchanged.append(item)
+                            continue
+                    if len(work) < MAX_FILES: work.append(item)
+                except (OSError, ValueError, HTTPException) as exc:
+                    if isinstance(exc, HTTPException) and exc.status_code == 413: raise
+                    if len(work) < MAX_FILES:
+                        work.append({'id': uuid4().hex, 'path': relative, 'output': relative, 'size': 0,
+                                     'format': 'md', 'state': 'failed', 'code': 'read_failed', 'message': '无法读取文件。'})
+        if not seen:
+            raise HTTPException(422, '转换目录中没有 Markdown 文档。')
+        items = (work + unchanged)[:MAX_FILES]
+        batch = {'id': uuid4().hex, 'revision': 0, 'root_name': 'Markdown', 'kind': 'preprocess',
+                 'model_name': model, 'state': 'queued', 'created': time.time(), 'files': items}
+        with runner.lock:
+            store.create(batch)
+        runner.wakeup.set()
+        return store.public(batch)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except OSError:
+        raise HTTPException(507, '无法读取本地文档。') from None
+
+
 @router.post('/open-originals')
 def open_originals():
     directory = data_directory() / 'documents' / 'originals'
@@ -255,7 +327,7 @@ def upload_file(batch_id: str, file_id: str, request: Request, file: UploadFile 
     with runner.lock:
         batch = batch_for(batch_id)
         item = item_for(batch, file_id)
-        if batch['state'] != 'uploading' or item['state'] != 'waiting':
+        if batch.get('kind') == 'preprocess' or batch['state'] != 'uploading' or item['state'] != 'waiting':
             raise HTTPException(409, '此文件不再等待上传。')
         runner._change_item(batch_id, file_id, state='uploading')
     temp = runner.directory(batch_id) / f'{file_id}.upload'
@@ -292,6 +364,7 @@ def start_batch(batch_id: str, request: Request):
     runner = request.app.state.conversions
     with runner.lock:
         batch = batch_for(batch_id)
+        if batch.get('kind') == 'preprocess': raise HTTPException(409, '分析批次无需上传或启动。')
         if batch['state'] != 'uploading': return store.public(batch)
         def start(b):
             b['state'] = 'queued'
@@ -324,6 +397,7 @@ def cancel_batch(batch_id: str, request: Request):
 
 def artifact(request, batch_id, file_id):
     batch = batch_for(batch_id)
+    if batch.get('kind') == 'preprocess': raise HTTPException(409, '分析批次不提供转换文件。')
     item = item_for(batch, file_id)
     if item['state'] not in ('succeeded', 'partial'): raise HTTPException(409, '此文件尚无可用 Markdown。')
     path = request.app.state.conversions.directory(batch_id) / f'{file_id}.md'
@@ -351,6 +425,7 @@ def markdown(batch_id: str, file_id: str, request: Request):
 @router.get('/{batch_id}/zip')
 def archive(batch_id: str, request: Request):
     batch = batch_for(batch_id)
+    if batch.get('kind') == 'preprocess': raise HTTPException(409, '分析批次不提供转换文件。')
     if batch['state'] not in store.TERMINAL: raise HTTPException(409, '请等待批次结束后下载 ZIP。')
     ready = [f for f in batch['files'] if f['state'] in ('succeeded', 'partial')]
     if not ready: raise HTTPException(409, '此批次没有可下载的结果。')

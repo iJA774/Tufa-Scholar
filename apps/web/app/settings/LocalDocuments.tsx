@@ -5,8 +5,8 @@ import { api, json, messageOf } from "../workspace/api";
 import panel from "./SettingsPanel.module.css";
 import styles from "./LocalDocuments.module.css";
 
-type Item = { id: string; path: string; output: string; state: string; format: string; message?: string; warnings?: string[]; import_error?: string; paper_id?: number; elapsed?: number };
-type Batch = { id: string; root_name: string; state: string; revision: number; project_id?: number; files: Item[]; done: number; total: number; counts: Record<string, number> };
+type Item = { id: string; path: string; output: string; state: string; format: string; message?: string; warnings?: string[]; import_error?: string; paper_id?: number; elapsed?: number; classification?: { domains: string[]; tags: string[]; description: string } };
+type Batch = { kind?: string; id: string; root_name: string; state: string; revision: number; project_id?: number; files: Item[]; done: number; total: number; counts: Record<string, number> };
 type Preview = { markdown: string; truncated: boolean; warnings: string[]; mapping: { page: number; anchor: string }[] };
 const storageKey = "tufa-conversion-batch";
 const batchStartedEvent = "tufa-conversion-batch-started";
@@ -56,7 +56,7 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
         if (!finished.has(value.state)) timer = setTimeout(poll, 900);
       } catch (cause) {
         if (controller.signal.aborted) return;
-        if (++failures >= 3) { setPollFailed(true); setError(`暂时无法读取转换状态：${messageOf(cause)}`); }
+        if (++failures >= 3) { setPollFailed(true); setError(`暂时无法读取批次状态：${messageOf(cause)}`); }
         else timer = setTimeout(poll, 1500);
       }
     };
@@ -70,12 +70,12 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
     catch (cause) { if (mounted.current) setError(messageOf(cause)); }
   };
 
-  const convert = async () => {
+  const convert = async (preprocess = false) => {
     if (active) return;
     setBusy(true); setError(""); setPreview(null); setPreviewLoading("");
     previewAbort.current?.abort();
     try {
-      const created = await api<Batch>("/conversion-batches/from-originals", json({ project_id: projectId ?? null }));
+      const created = await api<Batch>(preprocess ? "/conversion-batches/preprocess" : "/conversion-batches/from-originals", preprocess ? json({}) : json({ project_id: projectId ?? null }));
       try { localStorage.setItem(storageKey, created.id); } catch { /* Session still works without storage. */ }
       window.dispatchEvent(new CustomEvent(batchStartedEvent, { detail: created }));
     } catch (cause) { if (mounted.current) setError(messageOf(cause)); }
@@ -109,27 +109,30 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
     <div className={styles.conversion}>
       <h3>Markdown 转换</h3>
       <p>使用本地文献资源前请先导入文件并转换，旧版 DOC 请先另存为 DOCX</p>
+      <p>分析与分类会将 Markdown 内容发送至配置的模型。</p>
       <div className={styles.toolbar}>
         <button className={styles.convertButton} type="button" disabled={active} onClick={() => void convert()}>一键转换 Markdown</button>
+        <button className={panel.actionButton} type="button" disabled={active} onClick={() => void convert(true)}>分析与分类</button>
         {batch && !finished.has(batch.state) && <button className={panel.actionButton} type="button" onClick={() => void cancel()}>取消批次</button>}
       </div>
     </div>
     {error && <p className={styles.error} role="alert">{error}</p>}
     {pollFailed && <button className={panel.actionButton} type="button" onClick={() => { setError(""); setPollAttempt(value => value+1); }}>重新读取状态</button>}
     {batch && <div className={styles.results}>
-      <h3>{batch.root_name} · {({ uploading: "上传中", queued: "等待转换", running: "转换中", completed: "已结束", cancelled: "已取消", interrupted: "已中断" } as Record<string, string>)[batch.state]}</h3>
-      <div role="status" aria-live="polite">转换进度：{batch.done} / {batch.total}{batch.project_id ? ` · 导入项目 #${batch.project_id}` : ""}</div>
-      <progress aria-label="文档转换进度" value={batch.done} max={batch.total} />
-      <p>成功 {batch.counts.succeeded || 0} · 部分转换 {batch.counts.partial || 0} · 失败 {batch.counts.failed || 0} · 跳过 {batch.counts.skipped || 0} · 取消 {batch.counts.cancelled || 0}</p>
-      <ul className={styles.resultList} aria-label="转换结果">{batch.files.map(item => <li key={item.id} data-state={item.state}>
-        <div className={styles.resultTitle}><span>{item.path}</span><strong>{labels[item.state] || item.state}</strong></div>
+      <h3>{batch.root_name} · {batch.kind === "preprocess" && !finished.has(batch.state) ? "分析中" : ({ uploading: "上传中", queued: "等待转换", running: "转换中", completed: "已结束", cancelled: "已取消", interrupted: "已中断" } as Record<string, string>)[batch.state]}</h3>
+      <div role="status" aria-live="polite">{batch.kind === "preprocess" ? "分析进度" : "转换进度"}：{batch.done} / {batch.total}{batch.project_id ? ` · 导入项目 #${batch.project_id}` : ""}</div>
+      <progress aria-label={batch.kind === "preprocess" ? "文档分析进度" : "文档转换进度"} value={batch.done} max={batch.total} />
+      <p>成功 {batch.counts.succeeded || 0}{batch.kind !== "preprocess" && ` · 部分转换 ${batch.counts.partial || 0}`} · 失败 {batch.counts.failed || 0} · 跳过 {batch.counts.skipped || 0} · 取消 {batch.counts.cancelled || 0}</p>
+      <ul className={styles.resultList} aria-label={batch.kind === "preprocess" ? "分析结果" : "转换结果"}>{batch.files.map(item => <li key={item.id} data-state={item.state}>
+        <div className={styles.resultTitle}><span>{item.path}</span><strong>{batch.kind === "preprocess" && item.state === "running" ? "分析中" : batch.kind === "preprocess" && ["waiting", "uploaded"].includes(item.state) ? "等待分析" : labels[item.state] || item.state}</strong></div>
+        {item.classification && <p>领域：{item.classification.domains.join("、")} · 标签：{item.classification.tags.join("、")}<br />{item.classification.description}</p>}
         {item.message && <p>{item.message}</p>}
         {item.import_error && <p className={styles.error}>{item.import_error}</p>}
         {item.paper_id && <p>已导入当前批次项目 · 文献 #{item.paper_id}</p>}
         {item.warnings && <details><summary>解析局限{item.elapsed ? ` · ${item.elapsed} 秒` : ""}</summary>{item.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>}
-        {["succeeded", "partial"].includes(item.state) && <div className={styles.toolbar}><button className={panel.actionButton} type="button" onClick={() => void showPreview(item)} disabled={previewLoading === item.id}>{previewLoading === item.id ? "读取中…" : "预览 Markdown"}</button><a href={`/api/conversion-batches/${batch.id}/files/${item.id}/markdown`} download>下载 Markdown</a></div>}
+        {batch.kind !== "preprocess" && ["succeeded", "partial"].includes(item.state) && <div className={styles.toolbar}><button className={panel.actionButton} type="button" onClick={() => void showPreview(item)} disabled={previewLoading === item.id}>{previewLoading === item.id ? "读取中…" : "预览 Markdown"}</button><a href={`/api/conversion-batches/${batch.id}/files/${item.id}/markdown`} download>下载 Markdown</a></div>}
       </li>)}</ul>
-      {ready && finished.has(batch.state) && <a className={styles.downloadZip} href={`/api/conversion-batches/${batch.id}/zip`} download>下载 Markdown ZIP</a>}
+      {batch.kind !== "preprocess" && ready && finished.has(batch.state) && <a className={styles.downloadZip} href={`/api/conversion-batches/${batch.id}/zip`} download>下载 Markdown ZIP</a>}
       {preview && <div className={styles.preview}><div className={styles.resultTitle}><h3>{preview.name}</h3><button className={panel.actionButton} type="button" onClick={() => setPreview(null)}>关闭预览</button></div>{preview.result.truncated && <p>预览仅显示前 64,000 字符，请下载完整 Markdown。</p>}<pre tabIndex={0} aria-label="Markdown 内容">{preview.result.markdown}</pre></div>}
     </div>}
   </section>;

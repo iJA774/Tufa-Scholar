@@ -52,7 +52,6 @@ const nodeLabels: Record<string, string> = {
   supervisor: "研究调度",
   researcher: "搜索与证据整理",
   analyst: "证据分析",
-  coder: "研究检查",
   reporter: "报告整理",
 };
 
@@ -176,7 +175,7 @@ function ActivityIcon({ event, complete, failed, playing }: { event: RunEvent; c
   if (tool.startsWith("search_") || node === "background_investigator" || node === "researcher") {
     return <ActivityLottie animationData={searchAnimation} mode={mode} />;
   }
-  if (["planner", "supervisor", "coder"].includes(node)) {
+  if (["planner", "supervisor"].includes(node)) {
     return <ActivityLottie animationData={gearLoadingAnimation} mode={mode} segment={gearAnimationSegment} />;
   }
   if (node === "reporter") {

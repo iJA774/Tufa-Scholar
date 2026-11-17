@@ -1,5 +1,6 @@
 """One bounded offline converter, separate from the single research worker."""
 import json
+from hashlib import sha256
 import logging
 import multiprocessing
 import os
@@ -101,7 +102,10 @@ class ConversionRunner:
                 batch = store.get(batch_id)
                 if batch['state'] == 'cancelled' or self.stopping.is_set(): break
                 if item['state'] != 'uploaded': continue
-                self.convert_item(batch, item)
+                if batch.get('kind') == 'preprocess':
+                    self.preprocess_item(batch, item)
+                else:
+                    self.convert_item(batch, item)
             with self.lock:
                 current = store.get(batch_id)
                 if current['state'] != 'cancelled':
@@ -115,6 +119,46 @@ class ConversionRunner:
                     store.update(batch_id, lambda b: store.end(b, 'interrupted', 'storage_error', '转换执行或存储失败，请检查磁盘空间。'))
         finally:
             self.clean_inputs(batch_id)
+
+    def preprocess_item(self, batch, item):
+        from src.agents.preprocesser import classify_markdown
+        from src.persistence.document_classifications import get_classification_by_digest, upsert_classification
+        from src.literature.conversion.models import MAX_OUTPUT
+
+        batch_id, file_id = batch['id'], item['id']
+        with self.lock:
+            if store.get(batch_id)['state'] != 'running': return
+            self._change_item(batch_id, file_id, state='running')
+        try:
+            root = data_directory() / 'documents' / 'conversions'
+            path = root / Path(item['path'])
+            for part in [root.parent, root, *[root.joinpath(*Path(item['path']).parts[:i]) for i in range(1, len(Path(item['path']).parts) + 1)]]:
+                if part.is_symlink() or os.path.isjunction(part): raise OSError('unsafe path')
+            if not path.resolve().is_relative_to(root.resolve()): raise OSError('unsafe path')
+            with path.open('rb') as source:
+                raw = source.read(MAX_OUTPUT + 1)
+            if len(raw) > MAX_OUTPUT: raise ValueError('file too large')
+            digest = sha256(raw).hexdigest()
+            previous = get_classification_by_digest(digest)
+            if previous:
+                classification = {key: previous[key] for key in ('domains', 'tags', 'description')}
+                with self.lock:
+                    if store.get(batch_id)['state'] == 'running' and not self.stopping.is_set():
+                        upsert_classification(item['path'], digest, classification)
+                        self._change_item(batch_id, file_id, state='skipped', code='already_classified',
+                                          message='相同内容已有分类，已复用。', classification=classification)
+                return
+            markdown = raw.decode('utf-8-sig')
+            if not markdown.strip(): raise ValueError('empty document')
+            result = classify_markdown(markdown, batch['model_name'])
+            with self.lock:
+                if store.get(batch_id)['state'] != 'running' or self.stopping.is_set(): return
+                upsert_classification(item['path'], digest, result.model_dump())
+                self._change_item(batch_id, file_id, state='succeeded', classification=result.model_dump())
+        except Exception:
+            with self.lock:
+                if store.get(batch_id)['state'] == 'running':
+                    self._change_item(batch_id, file_id, state='failed', code='preprocess_failed', message='文档分析失败，请检查模型设置或文件后重试。')
 
     def convert_item(self, batch, item):
         batch_id, file_id = batch['id'], item['id']
