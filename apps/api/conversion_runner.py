@@ -31,6 +31,8 @@ class ConversionRunner:
         self.stopping = threading.Event()
         self.wakeup = threading.Event()
         self.thread = None
+        self.active_batch_id = None
+        self.inflight_uploads = 0
         self.downloads = threading.BoundedSemaphore(1)
 
     def directory(self, batch_id):
@@ -94,10 +96,14 @@ class ConversionRunner:
         return store.update(batch_id, change)
 
     def convert_batch(self, batch_id):
+        claimed = False
         try:
             with self.lock:
-                if store.get(batch_id)['state'] != 'queued': return
+                queued = store.get(batch_id)
+                if not queued or queued['state'] != 'queued': return
                 store.update(batch_id, lambda b: b.update(state='running'))
+                self.active_batch_id = batch_id
+                claimed = True
             for item in store.get(batch_id)['files']:
                 batch = store.get(batch_id)
                 if batch['state'] == 'cancelled' or self.stopping.is_set(): break
@@ -120,7 +126,12 @@ class ConversionRunner:
                 if store.get(batch_id)['state'] not in store.TERMINAL:
                     store.update(batch_id, lambda b: store.end(b, 'interrupted', 'storage_error', '转换执行或存储失败，请检查磁盘空间。'))
         finally:
-            self.clean_inputs(batch_id)
+            if claimed:
+                with self.lock:
+                    try:
+                        self.clean_inputs(batch_id)
+                    finally:
+                        self.active_batch_id = None
 
     def classify_converted(self, batch_id):
         from src.literature.conversion.models import MAX_OUTPUT, MAX_FILES
@@ -177,6 +188,7 @@ class ConversionRunner:
 
     def preprocess_item(self, batch, item):
         from src.agents.preprocesser import classify_markdown
+        from src.integrations.model import ModelServiceError, StructuredOutputError
         from src.persistence.document_classifications import get_classification_by_digest, upsert_classification
         from src.literature.conversion.models import MAX_OUTPUT
 
@@ -184,6 +196,10 @@ class ConversionRunner:
         with self.lock:
             if store.get(batch_id)['state'] != 'running': return
             self._change_item(batch_id, file_id, state='running')
+        log = logging.getLogger('tufa.api')
+        started = time.monotonic()
+        stage = 'read'
+        log.info('preprocess_item started batch_id=%s file_id=%s', batch_id, file_id)
         try:
             root = data_directory() / 'documents' / 'conversions'
             path = root / Path(item['path'])
@@ -196,26 +212,47 @@ class ConversionRunner:
             digest = sha256(raw).hexdigest()
             markdown = raw.decode('utf-8-sig')
             if not markdown.strip(): raise ValueError('empty document')
+            stage = 'lookup'
             previous = get_classification_by_digest(digest)
             if previous:
                 classification = {key: previous[key] for key in ('domains', 'tags', 'description')}
                 with self.lock:
                     if store.get(batch_id)['state'] == 'running' and not self.stopping.is_set():
+                        stage = 'index'
                         upsert_classification(item['path'], digest, classification)
                         self.index_markdown(batch, item, digest, markdown)
                         self._change_item(batch_id, file_id, state='skipped', code='already_classified',
                                           message='相同内容已有分类，已复用。', classification=classification)
+                        log.info('preprocess_item reused batch_id=%s file_id=%s elapsed_ms=%.1f',
+                                 batch_id, file_id, (time.monotonic() - started) * 1000)
                 return
+            stage = 'classify'
             result = classify_markdown(markdown, batch['model_name'])
             with self.lock:
                 if store.get(batch_id)['state'] != 'running' or self.stopping.is_set(): return
-                upsert_classification(item['path'], digest, result.model_dump())
+                stage = 'index'
+                classification = result.model_dump()
+                upsert_classification(item['path'], digest, classification)
                 self.index_markdown(batch, item, digest, markdown)
-                self._change_item(batch_id, file_id, state='succeeded', classification=result.model_dump())
-        except Exception:
+                self._change_item(batch_id, file_id, state='succeeded', classification=classification)
+            log.info('preprocess_item completed batch_id=%s file_id=%s elapsed_ms=%.1f',
+                     batch_id, file_id, (time.monotonic() - started) * 1000)
+        except Exception as exc:
+            code, message = {
+                'read': ('preprocess_read_failed', '无法读取 Markdown，或文件为空、编码无效、超过大小限制。'),
+                'lookup': ('preprocess_lookup_failed', '无法查询已有分类，请检查本机数据库。'),
+                'classify': ('preprocess_failed', '文档分析失败，请检查分类模型设置后重试。'),
+                'index': ('preprocess_index_failed', '分类结果或索引写入失败，请检查本机数据库后重试。'),
+            }[stage]
+            if isinstance(exc, StructuredOutputError):
+                code, message = 'preprocess_invalid_output', '分类模型仍未返回有效的研究领域、标签和短描述，请重试或更换分类模型。'
+            elif isinstance(exc, ModelServiceError):
+                code, message = 'preprocess_model_service', '分类模型服务请求失败，请检查模型配置或服务状态后重试。'
+            log.warning('preprocess_item failed batch_id=%s file_id=%s stage=%s code=%s error_type=%s elapsed_ms=%.1f',
+                        batch_id, file_id, stage, code, type(exc).__name__, (time.monotonic() - started) * 1000)
             with self.lock:
                 if store.get(batch_id)['state'] == 'running':
-                    self._change_item(batch_id, file_id, state='failed', code='preprocess_failed', message='文档分析失败，请检查模型设置或文件后重试。')
+                    self._change_item(batch_id, file_id, state='failed', code=code, message=message)
 
     def index_markdown(self, batch, item, digest, markdown):
         if batch.get('kind') != 'combined' or not batch.get('project_id'): return

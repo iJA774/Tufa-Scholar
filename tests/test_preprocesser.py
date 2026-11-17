@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 from pydantic import ValidationError
 from src.agents.preprocesser import Classification, classify_markdown
+from src.integrations.model import StructuredOutputError
 from src.infrastructure import settings
 from src.persistence.storage import initialize_storage
 from src.persistence.document_classifications import get_classification, get_classification_by_digest, upsert_classification
@@ -42,10 +43,33 @@ class PreprocesserTests(unittest.TestCase):
 
     def test_classifier_limits_and_request(self):
         def fake(prompt, payload, schema, **kwargs):
-            self.assertEqual(len(payload['markdown']), 30000)
+            self.assertEqual(len(payload['markdown']), 12000)
             self.assertEqual(kwargs['model_options']['reasoning_effort'], 'none')
             return schema(domains=[' A ', 'A'], tags=['标签'], description='短')
         with patch('src.agents.preprocesser.structured', fake):
             self.assertEqual(classify_markdown('x' * 40000, 'model').domains, ['A'])
         with self.assertRaises(ValidationError):
             Classification(domains=['A'], tags=['B'], description='字' * 21)
+
+    def test_shorter_retry_uses_representative_sections(self):
+        document = ('Title\n' + 'x' * 14000 + '\nAbstract\nabstract content\n'
+                    + 'a' * 14000 + '\nIntroduction\nintroduction content\n'
+                    + 'i' * 14000 + '\nConclusion\nconclusion content\n' + 'r' * 14000)
+        samples = []
+        def fake(prompt, payload, schema, **kwargs):
+            samples.append(payload['markdown'])
+            if len(samples) == 1:
+                raise StructuredOutputError('invalid', category='invalid')
+            return schema(domains=['A', 'B'], tags=['C', 'D'], description='短')
+        with patch('src.agents.preprocesser.structured', fake):
+            self.assertEqual(classify_markdown(document, 'model').domains, ['A', 'B'])
+        self.assertLessEqual(len(samples[1]), 4000)
+        self.assertLess(len(samples[1]), len(samples[0]))
+        for section in ('abstract content', 'introduction content', 'conclusion content'):
+            self.assertIn(section, samples[1])
+
+    def test_invalid_short_response_is_not_retried_again(self):
+        with patch('src.agents.preprocesser.structured', side_effect=StructuredOutputError('invalid', category='invalid')) as call:
+            with self.assertRaises(StructuredOutputError):
+                classify_markdown('short', 'model')
+            self.assertEqual(call.call_count, 1)

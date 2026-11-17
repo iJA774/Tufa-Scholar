@@ -84,6 +84,10 @@ pnpm dev:web
 
 预处理也会为已有 Markdown 补做分类和索引。待分类文档发送给已配置的模型服务，模型生成一个或多个研究领域、标签和 20 字以内的内容描述。调用模型前按内容哈希查询 SQLite，已有的分类直接复用。原文和 Markdown 都会保留。
 
+分类失败时，批次会显示具体失败阶段。重新点击“预处理”可使用已有 Markdown 继续分类，无需重新转换。运行日志可按批次 ID 和文件 ID 查询分类结果与错误类型。
+
+“清除已保存的文档”会清空所有项目的本地 Markdown、转换批次及下载文件、预处理分类和全文索引。原始文件、PDF 原文快照、文献库和历史报告保留。确认前请等待转换、分类或下载结束。清除后可从原文重新预处理。
+
 分类默认使用服务的主模型。在“设置 → 通用”填写文档分类模型 ID 可单独覆盖，清空保存可恢复跟随主模型。`TUFA_PREPROCESSER_MODEL` 优先于这一设置。
 
 启用“本地文献”后，研究员先看到当前范围内有哪些研究领域。选定领域后，按页查看文献标题、标签和短描述。正文只在研究员主动调用 Markdown 阅读工具时提供。工具用 SQLite FTS5 选取相关片段，报告记录 Markdown 字符位置。
@@ -108,6 +112,7 @@ pnpm dev:web
 | `POST /projects/{project_id}/papers/import` | 上传 PDF |
 | `POST /conversion-batches/open-originals` | 在资源管理器打开本机原文目录 |
 | `POST /conversion-batches/prepare` | 转换和分类，并为传入的 `project_id` 建立本地 Markdown 检索索引 |
+| `POST /conversion-batches/clear` | 发送 JSON `{"confirm": true}` 清除已保存的预处理产物和记录 |
 | `POST /conversion-batches/from-originals` | 从固定原文目录创建并启动转换批次，传入当前 `project_id` 时导入转换成功的 PDF |
 | `POST /conversion-batches/preprocess` | 发送 JSON `{}` 启动已转换 Markdown 的分析与分类批次 |
 | `POST /conversion-batches` | 创建转换清单（相对路径、大小、可选项目和 TXT 编码） |

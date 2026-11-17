@@ -19,6 +19,7 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
   const [batch, setBatch] = useState<Batch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ name: string; result: Preview } | null>(null);
   const [previewLoading, setPreviewLoading] = useState("");
   const [pollFailed, setPollFailed] = useState(false);
@@ -82,6 +83,21 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
     finally { if (mounted.current) setBusy(false); }
   };
 
+  const clear = async () => {
+    if (active || !window.confirm("清除所有项目中转换生成的 Markdown、批次和本地文档分类及索引？原始文件和 PDF 文献库会保留。")) return;
+    setBusy(true); setError(""); setNotice("");
+    previewAbort.current?.abort();
+    try {
+      const result = await api<{ files: number; cleanup_pending: boolean }>("/conversion-batches/clear", json({ confirm: true }));
+      try { localStorage.removeItem(storageKey); } catch { /* Storage may be disabled. */ }
+      if (mounted.current) {
+        setBatchId(null); setBatch(null); setPreview(null); setPreviewLoading(""); setPollFailed(false);
+        setNotice(result.cleanup_pending ? "清理记录已完成，部分临时文件尚待删除。" : `清理完成，移除了 ${result.files} 个转换文件。`);
+      }
+    } catch (cause) { if (mounted.current) setError(messageOf(cause)); }
+    finally { if (mounted.current) setBusy(false); }
+  };
+
   const cancel = async () => {
     if (!batchId) return;
     try {
@@ -112,9 +128,11 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
       <p>分析与分类会将 Markdown 内容发送至配置的模型。</p>
       <div className={styles.toolbar}>
         <button className={styles.convertButton} type="button" disabled={active} onClick={() => void convert()}>预处理</button>
+        <button className={panel.actionButton} type="button" disabled={active} onClick={() => void clear()}>清除已保存的文档</button>
         {batch && !finished.has(batch.state) && <button className={panel.actionButton} type="button" onClick={() => void cancel()}>取消批次</button>}
       </div>
     </div>
+    {notice && <p role="status">{notice}</p>}
     {error && <p className={styles.error} role="alert">{error}</p>}
     {pollFailed && <button className={panel.actionButton} type="button" onClick={() => { setError(""); setPollAttempt(value => value+1); }}>重新读取状态</button>}
     {batch && <div className={styles.results}>

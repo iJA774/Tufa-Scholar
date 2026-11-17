@@ -213,6 +213,26 @@ class ConversionApiTest(unittest.TestCase):
             self.assertEqual(select_domains(ToolContext(c, 'local'), ['物理'], 0)['documents'], [])
             self.assertEqual(select_domains(ToolContext(b, 'collection', (paper_id + 1000,)), ['物理'], 0)['documents'], [])
 
+    def test_preprocess_logs_schema_failure_without_document_or_provider_text(self):
+        from src.integrations.model import StructuredOutputError
+
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'private-filename.md').write_text('private document text', encoding='utf-8')
+        model = {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}
+        failure = StructuredOutputError('private provider response')
+        with patch.dict(os.environ, model), patch('src.agents.preprocesser.classify_markdown', side_effect=failure):
+            with self.assertLogs('tufa.api', level='INFO') as captured:
+                created = self.client.post('/conversion-batches/preprocess', json={}).json()
+                result = self.finish(created)
+        item = result['files'][0]
+        self.assertEqual(item['state'], 'failed')
+        self.assertEqual(item['code'], 'preprocess_invalid_output')
+        line = next(line for line in captured.output if 'preprocess_item failed' in line)
+        self.assertIn(f"batch_id={result['id']} file_id={item['id']}", line)
+        self.assertIn('stage=classify code=preprocess_invalid_output', line)
+        for private in ('private-filename', 'private document text', 'private provider response'):
+            self.assertNotIn(private, line)
+
     def test_preprocess_incremental_and_retry(self):
         from src.agents.preprocesser import Classification
         from src.persistence.document_classifications import get_classification

@@ -58,3 +58,21 @@ def public(batch):
     result['done'] = sum(result['counts'].values())
     result['total'] = len(batch['files'])
     return result
+
+
+def clear_derived(db):
+    """Clear conversion metadata in the caller's transaction, preserving PDF evidence."""
+    if db.execute("SELECT 1 FROM conversion_batches WHERE state NOT IN ('completed','cancelled','interrupted') LIMIT 1").fetchone():
+        raise ValueError('请先结束正在进行的转换或预处理。')
+    if db.execute("SELECT 1 FROM tasks WHERE status='running' AND kind='chat' AND local_literature=1 AND research_mode != 'quick' AND source IN ('auto','all','local','collection') LIMIT 1").fetchone():
+        raise ValueError('本地文献研究正在进行，请结束后再清理。')
+    counts = {
+        'batches': db.execute('SELECT count(*) FROM conversion_batches').fetchone()[0],
+        'documents': db.execute('SELECT count(*) FROM markdown_documents').fetchone()[0],
+        'classifications': db.execute('SELECT count(*) FROM document_classifications').fetchone()[0],
+    }
+    for table in ('markdown_fts', 'markdown_chunks', 'project_markdown', 'markdown_domains',
+                  'markdown_tags', 'markdown_metadata', 'markdown_documents', 'document_domains',
+                  'document_tags', 'document_classifications', 'conversion_batches'):
+        db.execute(f'DELETE FROM {table}')
+    return counts
