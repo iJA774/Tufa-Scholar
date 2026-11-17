@@ -8,7 +8,8 @@
 flowchart TD
     S([开始]) --> D[dispatcher]
     D -- 无需深研 --> E([结束并直接返回答案])
-    D -- 需要深研或 collection --> B[background_investigator]
+    D -- 进入研究且网络搜索开启 --> B[background_investigator]
+    D -- 进入研究且网络搜索关闭 --> P[planner]
     B --> P[planner]
     P -- 选择报告或研究用尽轮次 --> R[reporter]
     P -- 继续研究 --> U[supervisor]
@@ -22,7 +23,7 @@ flowchart TD
 
 dispatcher 判断是否需要深度研究。简单请求由 dispatcher 直接回答并结束；collection 由代码强制进入研究流程，模型故障也按有限研究路径继续。其他来源遵守提交时的范围约束。
 
-background_investigator 根据问题和可用来源选择背景方向，提出查询并实际筛选返回的候选，总结背景与缺口。搜索结果为空或失败时如实报告，不伪造候选或背景。planner 首轮规划必须启动研究；每次 researcher/analyst 往返后，planner 可沿原方向补查、切换到允许的 web 或 paper 来源，或交给 reporter。研究轮数、查询及工具动作额度见[架构预算表](../../docs/ARCHITECTURE.md#工作流预算)；搜索失败时可在剩余额度内用改写查询重试。
+网络搜索开启时，background_investigator 根据问题和可用来源选择背景方向，提出查询并筛选候选，总结背景与缺口。关闭网络搜索时，研究从 planner 开始。planner 首轮规划必须启动研究；每次 researcher/analyst 往返后，planner 可沿原方向补查、切换到允许的 web 或 paper 来源，或交给 reporter。研究轮数、查询及工具动作额度见[架构预算表](../../docs/ARCHITECTURE.md#工作流预算)。
 
 supervisor 按节点顺序调度 researcher 和 analyst，再回到 planner。reporter 汇总原问题、背景、研究初稿、审查和累计证据，自由组织 Markdown。终稿不可用时重新校验并交付最近一份有可用引用的草稿，并标明失败原因。没有合格草稿时说明证据不足及当前缺口。dispatcher 直接回答后结束工作流。
 

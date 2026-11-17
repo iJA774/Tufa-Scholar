@@ -2450,6 +2450,14 @@ def _run_node_with_events(state, node, callback):
     return patch
 
 
+def _after_dispatch(state):
+    if not state.get("needs_research"):
+        return END
+    if not state["research"].get("network_search", True):
+        return "planner"
+    return "background_investigator"
+
+
 def _graph(on_stage, on_subtask):
     graph = StateGraph(State)
     graph.add_node("dispatcher", lambda state: _dispatch(state, on_stage))
@@ -2462,8 +2470,8 @@ def _graph(on_stage, on_subtask):
     graph.add_edge(START, "dispatcher")
     graph.add_conditional_edges(
         "dispatcher",
-        lambda state: "background_investigator" if state.get("needs_research") else END,
-        {"background_investigator": "background_investigator", END: END},
+        _after_dispatch,
+        {"background_investigator": "background_investigator", "planner": "planner", END: END},
     )
     graph.add_edge("background_investigator", "planner")
     graph.add_conditional_edges(

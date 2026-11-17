@@ -103,7 +103,7 @@ def main():
             pending = call('POST', f'/projects/{project}/questions', json={
                 'question': 'accuracy', 'source': 'local', 'model_name': 'fixture-selected',
                 'research_mode': 'deep',
-                'research_depth': 'light', 'prefer_primary_evidence': False,
+                'research_depth': 'light', 'prefer_primary_evidence': False, 'network_search': False,
                 'relevance_filter': 'relaxed',
             })
             failed = wait(pending['run_id'])
@@ -114,6 +114,7 @@ def main():
                 'research_depth': 'light',
                 'prefer_primary_evidence': False,
                 'relevance_filter': 'relaxed',
+                'network_search': False,
             }
             assert {key: failed_detail[key] for key in preferences} == preferences, failed_detail
 
@@ -147,7 +148,10 @@ def main():
             assert completed['stage'] == 'completed'
             retry_stages = stages(retry['id'])
             assert retry_stages[-1:] == ['reporter'], retry_stages
-            assert 'background_investigator' in retry_stages, retry_stages
+            assert retry_stages[:2] == ['dispatcher', 'planner'] and 'background_investigator' not in retry_stages, retry_stages
+            activity = client.get(f"/runs/{retry['id']}/events")
+            activity.raise_for_status()
+            assert 'background_investigator' not in activity.text
             worker_log = (Path(temporary.name) / 'logs' / 'worker.log').read_text(encoding='utf-8', errors='replace')
             usage_events = [line for line in worker_log.splitlines()
                             if f'run_id={retry["id"]} ' in line and 'model_call completed ' in line]
@@ -169,7 +173,8 @@ def main():
                 for line in item['messages'][0]['content'].splitlines()
                 if '运行节点标识：' in line
             ]
-            assert retry_roles and retry_roles[0] == 'background_investigator' and 'dispatcher' not in retry_roles, retry_roles
+            assert retry_roles and retry_roles[0] == 'planner', retry_roles
+            assert 'background_investigator' not in retry_roles and 'dispatcher' not in retry_roles, retry_roles
             local_requests = [json.loads(item['messages'][1]['content']) for item in retry_model_requests]
             actions = [item for item in local_requests if item.get('phase') == 'act']
             first_action = actions[0]
