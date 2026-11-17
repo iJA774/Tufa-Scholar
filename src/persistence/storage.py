@@ -40,6 +40,7 @@ def initialize_storage() -> dict:
         CREATE TABLE IF NOT EXISTS paper_versions (id INTEGER PRIMARY KEY, paper_id INTEGER NOT NULL REFERENCES papers(id), filename TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, path TEXT NOT NULL, text TEXT NOT NULL, text_status TEXT NOT NULL);
         CREATE VIRTUAL TABLE IF NOT EXISTS paper_fts USING fts5(title, abstract, full_text);
         CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), conversation_id INTEGER REFERENCES conversations(id), query TEXT NOT NULL, source TEXT NOT NULL, research_mode TEXT NOT NULL DEFAULT 'auto', status TEXT NOT NULL, stage TEXT NOT NULL, result TEXT, error TEXT);
+        CREATE TABLE IF NOT EXISTS conversion_batches (id TEXT PRIMARY KEY, state TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL);
         """)
         connection.execute("BEGIN IMMEDIATE")
         if 'pinned' not in {row[1] for row in connection.execute('PRAGMA table_info(conversations)')}:

@@ -1,0 +1,272 @@
+"""Explicit browser uploads and artifact delivery for offline conversion."""
+import json
+import re
+import time
+import threading
+import unicodedata
+from hashlib import sha256
+from pathlib import PurePosixPath
+from uuid import uuid4
+from zipfile import ZipFile, ZIP_DEFLATED
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
+from src.literature.conversion.models import MAX_FILE, MAX_FILES, MAX_BATCH
+from src.persistence import conversions as store, repository as repo
+
+router = APIRouter(prefix='/conversion-batches', tags=['local-conversion'])
+FORM_LIMIT = MAX_FILE + 64*1024
+
+
+class ConversionBodyLimit:
+    """Bound chunked bodies before multipart spooling, only on the new endpoints."""
+    def __init__(self, app):
+        self.app = app
+        self.upload_slots = threading.BoundedSemaphore(2)
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http' or scope['method'] != 'POST' or not scope['path'].startswith('/conversion-batches'):
+            return await self.app(scope, receive, send)
+        limit = FORM_LIMIT if '/files/' in scope['path'] else 128*1024
+        headers = dict(scope.get('headers', []))
+        try:
+            length = int(headers.get(b'content-length', b'0'))
+        except ValueError:
+            length = limit+1
+        if length > limit:
+            from starlette.responses import JSONResponse
+            return await JSONResponse({'detail': '上传请求超过大小限制。'}, 413)(scope, receive, send)
+        used = 0
+        async def bounded_receive():
+            nonlocal used
+            message = await receive()
+            used += len(message.get('body', b''))
+            if used > limit: raise HTTPException(413, '上传请求超过大小限制。')
+            return message
+        is_upload = '/files/' in scope['path']
+        if is_upload and not self.upload_slots.acquire(blocking=False):
+            from starlette.responses import JSONResponse
+            return await JSONResponse({'detail': '同时最多上传两个文件，请稍后重试。'}, 429)(scope, receive, send)
+        try:
+            await self.app(scope, bounded_receive, send)
+        finally:
+            if is_upload: self.upload_slots.release()
+
+
+class FileSpec(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    size: int = Field(ge=0)
+
+
+class BatchSpec(BaseModel):
+    root_name: str = Field(min_length=1, max_length=100)
+    files: list[FileSpec] = Field(min_length=1, max_length=MAX_FILES)
+    encoding: str = 'auto'
+    project_id: int | None = Field(default=None, gt=0)
+
+
+def safe_path(value):
+    value = unicodedata.normalize('NFC', value)
+    parts = value.split('/')
+    if len(parts) > 20 or any(not part or part in ('.', '..') or len(part) > 180
+        or part[-1:] in (' ', '.') or re.search(r'[\x00-\x1f\x7f\\:<>"|?*]', part)
+        or any(unicodedata.category(c) in ('Cc', 'Cf', 'Cs') for c in part)
+        or re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', part, re.I) for part in parts):
+        raise HTTPException(422, '文件名或相对目录不安全；请重命名后重试。')
+    return value
+
+
+def batch_for(batch_id):
+    batch = store.get(batch_id)
+    if not batch: raise HTTPException(404, '转换批次不存在。')
+    return batch
+
+
+def item_for(batch, file_id):
+    item = next((f for f in batch['files'] if f['id'] == file_id), None)
+    if not item: raise HTTPException(404, '转换文件不存在。')
+    return item
+
+
+@router.post('', status_code=201)
+def create_batch(spec: BatchSpec, request: Request):
+    if spec.encoding not in ('auto', 'utf-8-sig', 'utf-16', 'gb18030', 'big5', 'cp1252'):
+        raise HTTPException(422, '不支持此编码。')
+    if spec.project_id is not None and not repo.project_exists(spec.project_id):
+        raise HTTPException(404, '当前项目不存在。')
+    root = safe_path(spec.root_name)
+    if '/' in root: raise HTTPException(422, '目录名称无效。')
+    if sum(f.size for f in spec.files) > MAX_BATCH:
+        raise HTTPException(413, '单批总文件大小超过 200 MiB。')
+    paths = [safe_path(f.path) for f in spec.files]
+    if len({p.casefold() for p in paths}) != len(paths):
+        raise HTTPException(422, '批次中有重复路径。')
+    stems = [str(PurePosixPath(p).with_suffix('.md')) for p in paths]
+    candidates = {path: stem if sum(s.casefold() == stem.casefold() for s in stems) == 1 else path + '.md'
+                  for path, stem in zip(paths, stems)}
+    outputs, names = {}, set()
+    for path in sorted(paths, key=lambda p: (p.casefold(), p)):
+        output = candidates[path]
+        if output.casefold() in names or sum(c.casefold() == output.casefold() for c in candidates.values()) > 1:
+            output = path + '-' + sha256(path.encode()).hexdigest() + '.md'
+        while output.casefold() in names:
+            output += '.md'
+        names.add(output.casefold())
+        outputs[path] = output
+    items = []
+    for path, spec_file, stem in zip(paths, spec.files, stems):
+        ext = PurePosixPath(path).suffix.lower()
+        output = outputs[path]
+        state, code, message = 'waiting', None, None
+        if ext not in ('.pdf', '.docx', '.txt', '.doc'):
+            state, code, message = 'skipped', 'unsupported_format', '不支持此格式。'
+        elif ext == '.doc':
+            state, code, message = 'skipped', 'legacy_word', '旧版 .doc 暂不支持，请另存为 .docx。'
+        elif not spec_file.size:
+            state, code, message = 'failed', 'empty_file', '文件为空。'
+        elif spec_file.size > MAX_FILE:
+            state, code, message = 'failed', 'file_limit', '文件超过 20 MiB 限制。'
+        items.append({'id': uuid4().hex, 'path': path, 'size': spec_file.size, 'format': ext[1:],
+            'output': output, 'state': state, 'code': code, 'message': message})
+    batch = {'id': uuid4().hex, 'revision': 0, 'root_name': root, 'state': 'uploading', 'created': time.time(),
+             'encoding': spec.encoding, 'project_id': spec.project_id, 'files': items}
+    runner = request.app.state.conversions
+    with runner.lock:
+        try:
+            runner.directory(batch['id']).mkdir()
+            store.create(batch)
+        except ValueError as exc:
+            runner.directory(batch['id']).rmdir()
+            raise HTTPException(409, str(exc)) from None
+        except OSError:
+            raise HTTPException(507, '磁盘空间不足或无法创建转换目录。') from None
+    return store.public(batch)
+
+
+@router.post('/{batch_id}/files/{file_id}')
+def upload_file(batch_id: str, file_id: str, request: Request, file: UploadFile = File(...)):
+    runner = request.app.state.conversions
+    with runner.lock:
+        batch = batch_for(batch_id)
+        item = item_for(batch, file_id)
+        if batch['state'] != 'uploading' or item['state'] != 'waiting':
+            raise HTTPException(409, '此文件不再等待上传。')
+        runner._change_item(batch_id, file_id, state='uploading')
+    temp = runner.directory(batch_id) / f'{file_id}.upload'
+    try:
+        size, digest = 0, sha256()
+        with temp.open('xb') as target:
+            while content := file.file.read(256*1024):
+                size += len(content)
+                if size > min(MAX_FILE, item['size']): raise HTTPException(413, '实际文件大小超出声明或限制。')
+                digest.update(content)
+                target.write(content)
+        if size != item['size']: raise HTTPException(422, '文件上传不完整。')
+        with runner.lock:
+            latest = batch_for(batch_id)
+            if latest['state'] != 'uploading' or item_for(latest, file_id)['state'] != 'uploading':
+                raise HTTPException(409, '批次已取消或已提交。')
+            temp.replace(temp.with_suffix('.input'))
+            runner._change_item(batch_id, file_id, state='uploaded', digest=digest.hexdigest())
+        return {'state': 'uploaded'}
+    except BaseException as exc:
+        temp.unlink(missing_ok=True)
+        with runner.lock:
+            current = store.get(batch_id)
+            if current and current['state'] == 'uploading':
+                runner._change_item(batch_id, file_id, state='failed', code='upload_failed', message='上传中断或文件写入失败，请重新选择文件重试。')
+        if isinstance(exc, OSError): raise HTTPException(507, '磁盘空间不足或文件写入失败。') from None
+        raise
+    finally:
+        file.file.close()
+
+
+@router.post('/{batch_id}/start')
+def start_batch(batch_id: str, request: Request):
+    runner = request.app.state.conversions
+    with runner.lock:
+        batch = batch_for(batch_id)
+        if batch['state'] != 'uploading': return store.public(batch)
+        def start(b):
+            b['state'] = 'queued'
+            for item in b['files']:
+                if item['state'] in ('waiting', 'uploading'):
+                    item.update(state='failed', code='upload_missing', message='文件未完整上传。')
+        batch = store.update(batch_id, start)
+    runner.wakeup.set()
+    return store.public(batch)
+
+
+@router.get('/{batch_id}')
+def get_batch(batch_id: str): return store.public(batch_for(batch_id))
+
+
+@router.post('/{batch_id}/cancel')
+def cancel_batch(batch_id: str, request: Request):
+    runner = request.app.state.conversions
+    with runner.lock:
+        batch = batch_for(batch_id)
+        was_running = batch['state'] == 'running'
+        if batch['state'] not in store.TERMINAL:
+            batch = store.update(batch_id, lambda b: store.end(b, 'cancelled', 'user_cancelled', '用户已取消。'))
+        if not was_running:
+            runner.clean_inputs(batch_id, uploads=False)
+        # The runner owns active inputs; uploads clean their own temporary file.
+    runner.wakeup.set()
+    return store.public(batch)
+
+
+def artifact(request, batch_id, file_id):
+    batch = batch_for(batch_id)
+    item = item_for(batch, file_id)
+    if item['state'] not in ('succeeded', 'partial'): raise HTTPException(409, '此文件尚无可用 Markdown。')
+    path = request.app.state.conversions.directory(batch_id) / f'{file_id}.md'
+    if not path.is_file(): raise HTTPException(410, '转换结果已不存在，请重新转换。')
+    return batch, item, path
+
+
+@router.get('/{batch_id}/files/{file_id}/preview')
+def preview(batch_id: str, file_id: str, request: Request):
+    batch, item, path = artifact(request, batch_id, file_id)
+    # One bounded preview, no all-batch content in frontend memory.
+    with path.open(encoding='utf-8') as source:
+        text = source.read(64001)
+    metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+    return {'markdown': text[:64000], 'truncated': len(text) > 64000,
+            'mapping': metadata.get('mapping', []), 'warnings': metadata.get('warnings', [])}
+
+
+@router.get('/{batch_id}/files/{file_id}/markdown')
+def markdown(batch_id: str, file_id: str, request: Request):
+    _, item, path = artifact(request, batch_id, file_id)
+    return FileResponse(path, media_type='text/markdown; charset=utf-8', filename=PurePosixPath(item['output']).name)
+
+
+@router.get('/{batch_id}/zip')
+def archive(batch_id: str, request: Request):
+    batch = batch_for(batch_id)
+    if batch['state'] not in store.TERMINAL: raise HTTPException(409, '请等待批次结束后下载 ZIP。')
+    ready = [f for f in batch['files'] if f['state'] in ('succeeded', 'partial')]
+    if not ready: raise HTTPException(409, '此批次没有可下载的结果。')
+    runner = request.app.state.conversions
+    if not runner.downloads.acquire(blocking=False): raise HTTPException(409, '正在生成其他 ZIP，请稍后重试。')
+    directory = runner.directory(batch_id)
+    output = directory / f'{uuid4().hex}.zip'
+    try:
+        with ZipFile(output, 'x', compression=ZIP_DEFLATED) as zipped:
+            for item in ready:
+                _, _, path = artifact(request, batch_id, item['id'])
+                base = batch['root_name'] + '-Markdown/' + item['output']
+                zipped.write(path, base)
+                metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+                # Include positioning and limitations, never duplicate the extracted original text.
+                metadata.pop('pages', None)
+                zipped.writestr(base + '.metadata.json', json.dumps(metadata, ensure_ascii=False, indent=2))
+            zipped.writestr(batch['root_name']+'-Markdown/conversion-manifest.json', json.dumps(store.public(batch), ensure_ascii=False, indent=2))
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
+    finally:
+        runner.downloads.release()
+    return FileResponse(output, media_type='application/zip', filename=batch['root_name']+'-Markdown.zip', background=BackgroundTask(output.unlink, missing_ok=True))

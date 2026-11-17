@@ -25,19 +25,26 @@ from src.infrastructure import settings
 from src.integrations.model import discover
 from src.persistence.storage import data_directory, initialize_storage
 from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack, clear_application_logs
+from apps.api.conversions import router as conversion_router, ConversionBodyLimit
+from apps.api.conversion_runner import ConversionRunner
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize_storage()
     configure_logging('api')
+    app.state.conversions = ConversionRunner()
+    app.state.conversions.start()
     try:
         yield
     finally:
+        app.state.conversions.close()
         close_logging()
 
 
 app = FastAPI(title='Tufa Scholar', lifespan=lifespan)
+app.add_middleware(ConversionBodyLimit)
+app.include_router(conversion_router)
 
 
 @app.middleware('http')
