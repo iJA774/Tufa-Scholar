@@ -62,7 +62,21 @@ pnpm dev:web
 
 深度研究先搜索和筛选背景资料，再规划并收集证据，最后生成报告。右侧“活动”可查看计划、审查、搜索结果与工具操作。支持流式响应的模型会边生成边显示 Markdown 草稿。任务失败或终稿降级时，工作区顶部会显示可关闭的原因和处理建议。降级后保存最近一份通过引用检查的研究草稿或当前证据缺口。快速探索的回答预览显示在聊天区。
 
-点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文件”可打开浏览器的目录选择器，预览选中目录及子目录中的文件名。“关于”在新标签页打开项目的 GitHub 仓库。
+点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文档”可选择目录、预览文件名并批量转换 Markdown。“关于”在新标签页打开项目的 GitHub 仓库。
+
+### 本地文档转换 Markdown
+
+在“设置 → 本地文档”选择文件夹，按需调整“包含子文件夹”、勾选文件，再点击“一键转换 Markdown”。选择目录本身只预览文件名；点击转换才经本机 `/api` 上传所选内容，不使用绝对目录路径，也不调用模型或云端 OCR。
+
+支持 PDF、DOCX、TXT。PDF 尝试保留字号标题、双栏阅读顺序和有边框表格，逐页写入 `<!-- page:N -->`；DOCX 保留标题、段落、列表、表格、粗斜体及安全链接，图片用位置标记代替。TXT 自动识别 UTF-8/BOM、UTF-16 和部分常见编码；不能可靠检测时，请手选 GB18030/GBK、Big5 或 Windows-1252。旧版 DOC 显式跳过；扫描 PDF 不执行 OCR，加密 PDF 需自行合法解密。复杂版式、合并表格、公式和浮动对象仍可能不完整，请核对原文，不保证解析准确率。
+
+进度和单文件状态来自服务端，可取消批次、逐个预览与下载，结束后下载保留相对目录结构的 ZIP。同名不同格式采用包含原扩展名的输出名，特殊冲突加稳定哈希；不会覆盖原文件。ZIP 附带转换清单和页码/字符偏移元数据（偏移按下载 Markdown 的 Unicode 字符计数）。预览最多显示 64,000 字符，完整内容通过下载获取。
+
+勾选“转换成功后导入当前项目文献库（仅 PDF）”才导入提交时的项目；通过原始 PDF 哈希关联已有论文和原文版本，新文献按真实原页保存转换后的可检索文本。已存在版本的文本与证据 ID 不改写。Word、TXT 仍是普通本地文档，目前仅转换下载，不伪装成 PDF，也不会进入其他项目或收藏夹。
+
+每批最多 100 文件 / 200 MiB，单文件 20 MiB、PDF 200 页、Markdown 8 MiB；最多 4 个未结束批次、2 个并发上传、1 个 ZIP 打包，独立转换执行器一次只运行一个解析子进程，每文件 45 秒、768 MiB 内存上限。科研单 worker 队列不变。上传期间关闭设置会取消；转换开始后关闭设置继续执行，重新打开可读取最近批次。上传 15 分钟无状态更新即中断，API 关闭/重启会结束遗留转换任务。
+
+上传副本和结果保存在 `TUFA_DATA_DIR/conversions/<批次 ID>/`，输入副本在结束、取消或恢复时清理；Markdown、元数据和批次状态保留供后续下载，ZIP 临时文件在响应结束后删除。请预留磁盘空间。原始目录不被修改；仅显式导入的 PDF 另存到既有 `originals/`。当前不提供跨批结果缓存或结果自动过期删除。
 
 已有文献和通过本机 API 导入的 PDF 按项目保存，新研究沿用当前项目。PDF 按可提取文本取证并保留版本与页码，图片型或加密 PDF 可能无法取证，重复文件按内容摘要去重。
 
@@ -82,6 +96,12 @@ pnpm dev:web
 | `DELETE /conversations/{conversation_id}` | 删除该会话、消息、报告及其任务；若有待处理或正在运行的任务则返回 409 |
 | `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
 | `POST /projects/{project_id}/papers/import` | 上传 PDF |
+| `POST /conversion-batches` | 创建转换清单（相对路径、大小、可选项目和 TXT 编码） |
+| `POST /conversion-batches/{id}/files/{file_id}` | 单文件 multipart 上传；服务端生成物理文件名 |
+| `POST /conversion-batches/{id}/start`、`POST /conversion-batches/{id}/cancel` | 显式开始或取消批次 |
+| `GET /conversion-batches/{id}` | 实际单文件状态、数量、错误码和耗时 |
+| `GET /conversion-batches/{id}/files/{file_id}/preview`、`.../markdown` | 有限文本预览或单个 Markdown 下载 |
+| `GET /conversion-batches/{id}/zip` | 已结束批次打包下载，含定位元数据与清单 |
 | `GET /projects/{project_id}/web-search?q=...` | 独立网页搜索 |
 | `POST /projects/{project_id}/questions` | 提交科研问题 |
 | `GET /runs/{run_id}`、`POST /runs/{run_id}/retry` | 查询或重试任务 |
@@ -107,10 +127,11 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions'
 uv run --locked python -m unittest discover -s tests -q
 uv run --locked python -m scripts.verify_chat
 uv run --locked python -m scripts.verify_web_search
+uv run --locked python -m scripts.verify_conversion
 pnpm check:web
 pnpm build:web
 ```
 
-两条 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。浏览器交互和真实供应商需要分别验收。浏览器验收入口见 [前端说明](apps/web/README.md)。
+这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游；`verify_conversion` 检查转换、可选导入、检索与原页证据报告。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成，不使用用户材料。浏览器交互和真实供应商需要分别验收。浏览器验收入口见 [前端说明](apps/web/README.md)。
 
 排查研究请求时，可在 `TUFA_DATA_DIR/logs/worker.log` 按 `run_id` 查询模型调用、工具失败和报告校验。供应商用量缺失时日志显示 `na`。结构化响应诊断位于 `TUFA_DATA_DIR/diagnostics/`，可能包含用户材料。可在仓库根目录用 `uv run --locked python -m scripts.replay_diagnostic <诊断文件路径>` 离线校验当前提示词契约。

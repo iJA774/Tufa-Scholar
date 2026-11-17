@@ -1,14 +1,16 @@
 "use client";
 
-import { type ChangeEvent, type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import ModelControls from "../ModelControls";
 import { api } from "../workspace/api";
 import { DEFAULT_PREFERENCES, type ReportFormat, type WorkspacePreferences } from "../workspace/preferences";
 import WebSearchSettings from "./WebSearchSettings";
 import RuntimeLogsSettings from "./RuntimeLogsSettings";
+import LocalDocuments from "./LocalDocuments";
 import styles from "./SettingsPanel.module.css";
 
 type SettingsPanelProps = {
+  projectId?: number;
   onClose: () => void;
   preferences: WorkspacePreferences;
   onPreferencesChange: (next: WorkspacePreferences) => void;
@@ -22,7 +24,7 @@ const tabs: { id: PanelTab; label: string }[] = [
   { id: "appearance", label: "外观" },
   { id: "services", label: "服务与模型" },
   { id: "search", label: "网页搜索" },
-  { id: "files", label: "本地文件" },
+  { id: "files", label: "本地文档" },
 ];
 
 const relevanceOptions = [
@@ -228,6 +230,7 @@ function SettingsHelp({ label, children }: { label: string; children: ReactNode 
 }
 
 export default function SettingsPanel({
+  projectId,
   onClose,
   preferences,
   onPreferencesChange,
@@ -236,7 +239,6 @@ export default function SettingsPanel({
   const dialog = useRef<HTMLDialogElement>(null);
   const tabButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const previousFocus = useRef<HTMLElement | null>(null);
-  const directoryInput = useRef<HTMLInputElement>(null);
   const closeTimer = useRef<number | null>(null);
   const closeRequested = useRef(false);
   const closeFinished = useRef(false);
@@ -244,7 +246,6 @@ export default function SettingsPanel({
   const [closing, setClosing] = useState(false);
   const [activeTab, setActiveTab] = useState<PanelTab>("general");
   const [notice, setNotice] = useState("");
-  const [fileNames, setFileNames] = useState<string[]>([]);
 
   useEffect(() => {
     const element = dialog.current;
@@ -292,13 +293,6 @@ export default function SettingsPanel({
   const selectTab = (tab: PanelTab) => {
     setActiveTab(tab);
     setNotice("");
-  };
-
-  const chooseDirectory = (event: ChangeEvent<HTMLInputElement>) => {
-    const names = Array.from(event.currentTarget.files ?? [])
-      .map(file => file.webkitRelativePath || file.name)
-      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
-    setFileNames(names);
   };
 
   const updatePreference = <K extends keyof WorkspacePreferences>(key: K, value: WorkspacePreferences[K]) => {
@@ -490,28 +484,7 @@ export default function SettingsPanel({
 
           {activeTab === "search" && <WebSearchSettings />}
 
-          {activeTab === "files" && <section className={styles.card}>
-            <h2>本地文件</h2>
-            <input
-              ref={element => {
-                directoryInput.current = element;
-                if (element) element.webkitdirectory = true;
-              }}
-              className={styles.directoryInput}
-              type="file"
-              multiple
-              aria-label="选择本地目录"
-              onChange={chooseDirectory}
-            />
-            <button className={styles.actionButton} type="button" onClick={() => directoryInput.current?.click()}>
-              打开目录
-            </button>
-            {fileNames.length > 0
-              ? <ul className={styles.fileList} aria-label="目录文件名">
-                {fileNames.map(name => <li key={name}>{name}</li>)}
-              </ul>
-              : <p className={styles.fileEmpty} role="status">尚未选择目录。</p>}
-          </section>}
+          <div hidden={activeTab !== "files"}><LocalDocuments projectId={projectId} /></div>
           </main>
         </div>
         <footer className={`${styles.footer} ${activeTab === "research" ? styles.footerResearch : ""}`}>
