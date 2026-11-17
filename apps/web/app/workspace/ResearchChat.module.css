@@ -128,10 +128,8 @@
 .composer textarea:disabled { opacity: .72; }
 .composer textarea::placeholder { color: #787688; }
 .composerToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px 14px; }
-.composerOptions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.sourceToggle { border: 1px solid rgba(177, 159, 248, .12); border-radius: 9px; padding: 8px 10px; background: transparent; color: #777386; font: inherit; cursor: pointer; }
-.sourceToggleActive { border-color: rgba(177, 159, 248, .3); background: rgba(114, 95, 190, .16); color: #d7cefa; }
-.sourceToggle:focus-visible { outline: 2px solid #b19ff8; outline-offset: 2px; }
+.composerOptions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.sourceIcon { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 .modePicker {
   position: relative;
@@ -141,25 +139,30 @@
 
 .modePickerOpen { z-index: 50; }
 
-.modeTrigger {
+.modeTrigger, .sourceToggle {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 8px 11px;
   border: 1px solid rgba(177, 159, 248, .16);
   border-radius: 9px;
-  background: rgba(114, 95, 190, .095);
-  color: #c3b9ea;
   cursor: pointer;
   font: inherit;
   font-size: 12px;
+  line-height: 15px;
+  white-space: nowrap;
   transition: background .2s, border-color .2s, box-shadow .2s, color .2s, transform .2s;
 }
 
+.modeTrigger { background: rgba(114, 95, 190, .095); color: #c3b9ea; }
+.sourceToggle { border-color: rgba(177, 159, 248, .12); background: transparent; color: #777386; }
+.sourceToggleActive { border-color: rgba(177, 159, 248, .3); background: rgba(114, 95, 190, .16); color: #d7cefa; }
+.sourceToggle:hover:not(:disabled) { border-color: rgba(177, 159, 248, .25); background: rgba(114, 95, 190, .08); color: #aaa1bf; }
+.sourceToggleActive:hover:not(:disabled) { border-color: rgba(177, 159, 248, .45); background: rgba(121, 102, 208, .22); color: #eee9ff; }
 .modeTrigger:hover:not(:disabled) { background: rgba(121, 102, 208, .17); color: #e7e0ff; }
-.modeTrigger:focus-visible { outline: 2px solid #c7b9ff; outline-offset: 3px; border-color: rgba(177, 159, 248, .55); box-shadow: 0 0 0 2px rgba(146, 161, 255, .12); }
-.modeTrigger:disabled { cursor: not-allowed; opacity: .65; }
-.modeTrigger:active:not(:disabled) { transform: scale(.985); }
+.modeTrigger:focus-visible, .sourceToggle:focus-visible { outline: 2px solid #c7b9ff; outline-offset: 3px; border-color: rgba(177, 159, 248, .55); box-shadow: 0 0 0 2px rgba(146, 161, 255, .12); }
+.modeTrigger:disabled, .sourceToggle:disabled { cursor: not-allowed; opacity: .65; }
+.modeTrigger:active:not(:disabled), .sourceToggle:active:not(:disabled) { transform: scale(.985); }
 .modeTrigger > span { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .modeMenu {
@@ -434,7 +437,7 @@
 @media (prefers-reduced-motion: reduce) {
   .emblemStar, .emblemCore, .progressMarkerActive, .progressPanel { animation: none !important; }
   .emblemFlow, .emblemParticles { display: none; }
-  .modeMenu, .modeMenu .modeOption, .modeChevron, .modeTrigger, .modeCheck { transition: none !important; }
+  .modeMenu, .modeMenu .modeOption, .modeChevron, .modeTrigger, .sourceToggle, .modeCheck { transition: none !important; }
 }
 
 .researchNotice { position: fixed; z-index: 100; top: 18px; left: 50%; width: min(720px, calc(100vw - 32px)); transform: translateX(-50%); display: flex; justify-content: space-between; gap: 20px; padding: 16px 18px; border: 1px solid #68597d; border-radius: 12px; background: #25212e; color: #eee8f6; box-shadow: 0 12px 40px #0008; font-size: 13px; line-height: 1.5; pointer-events: none; animation: noticeFadeIn 200ms cubic-bezier(.33,1,.68,1) both, noticeMoveIn 250ms cubic-bezier(.4,0,0,1) both; }
