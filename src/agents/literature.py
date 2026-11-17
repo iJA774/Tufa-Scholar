@@ -356,7 +356,11 @@ def _tool_context(research, mode):
         tool_source = "all"
     else:
         tool_source = "all"
-    return ToolContext(research["project_id"], tool_source, tuple(research.get("paper_ids") or ()))
+    return ToolContext(
+        research["project_id"], tool_source, tuple(research.get("paper_ids") or ()),
+        network_search=research.get("network_search", True),
+        local_literature=research.get("local_literature", True),
+    )
 
 
 def _catalog_for_mode(research, mode):
@@ -372,6 +376,17 @@ def _search_catalog(research, modes=None):
                 catalogs.append(item)
                 seen.add(item["name"])
     return catalogs
+
+
+def _available_modes(research):
+    modes = _source_modes(research["source"])
+    available = [mode for mode in modes if any(
+        item["name"] in {"search_papers", "search_web"}
+        for item in _catalog_for_mode(research, mode)
+    )]
+    # Keep a valid workflow mode even when every source is disabled; its
+    # empty tool catalog lets the model report the evidence gap.
+    return available or modes
 
 
 def _model_template_context(state, search_mode, node_role, available_tools):
@@ -1272,9 +1287,11 @@ def _background_investigator(state, on_stage):
     if state.get("background"):
         return {}
     research = state["research"]
+    allowed_modes = _available_modes(research)
     preferred = _preferred_mode(research["source"])
-    allowed_modes = _source_modes(research["source"])
-    query_tools = _search_catalog(research, _source_modes(research["source"]) if research["source"] == "auto" else [preferred])
+    if preferred not in allowed_modes:
+        preferred = allowed_modes[0]
+    query_tools = _search_catalog(research, allowed_modes if research["source"] == "auto" else [preferred])
     try:
         query_plan = _model(
             state,
@@ -1305,8 +1322,10 @@ def _background_investigator(state, on_stage):
     errors = list(state.get("errors", []))
     warnings = list(state.get("warnings", []))
     context = _tool_context(research, mode)
-    for query in queries[:_budget(state)["background_searches"]]:
-        tool_name = "search_web" if mode == "web" else "search_papers"
+    search_name = "search_web" if mode == "web" else "search_papers"
+    available_names = {item["name"] for item in registry.list_tools(context)}
+    for query in queries[:_budget(state)["background_searches"]] if search_name in available_names else []:
+        tool_name = search_name
         arguments = {"query": query, "limit": MAX_BACKGROUND_WEB_RESULTS} if mode == "web" else {"query": query}
         call_id = _tool_event_start(state, "background_investigator", mode, tool_name, arguments)
         try:
@@ -1409,7 +1428,7 @@ def _planner_stop(state, reason, rationale):
 def _planner(state, on_stage):
     _emit(on_stage, "planner")
     rounds = state.get("rounds", [])
-    allowed = _source_modes(state["research"]["source"])
+    allowed = _available_modes(state["research"])
     budget = _budget(state)
     if rounds and (
         state.get("research_context_limit_reached")
@@ -1443,7 +1462,7 @@ def _planner(state, on_stage):
     payload = _payload(
         state,
         round_count=len(rounds),
-        local_papers=state["research"].get("local_papers", []),
+        local_papers=state["research"].get("local_papers", []) if state["research"].get("local_literature", True) else [],
         core_requirements=core_requirements,
         current_plan=state.get("current_plan", []),
         current_draft=state.get("current_draft", ""),
@@ -1546,7 +1565,7 @@ def _supervisor(state, on_stage):
         next_round = len(rounds) + 1
         if state.get("prepared_round", 0) != next_round:
             mode = plan.get("source")
-            allowed = _source_modes(state["research"]["source"])
+            allowed = _available_modes(state["research"])
             if mode not in allowed:
                 mode = state.get("background", {}).get("source", allowed[0])
             update.update({
@@ -1625,7 +1644,7 @@ def _log_research_stop(reason, *, failed_reads, tool_actions, consecutive_failur
 def _researcher(state, on_stage):
     _emit(on_stage, "researcher")
     mode = state.get("current_source", "paper")
-    allowed_modes = _source_modes(state["research"]["source"])
+    allowed_modes = _available_modes(state["research"])
     if mode not in allowed_modes:
         mode = allowed_modes[0]
     state = {**state, "candidate_pools": {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}, "tool_results": [], "errors": list(state.get("errors", []))}
@@ -1661,7 +1680,8 @@ def _researcher(state, on_stage):
         for item in tools
     ]
     while (
-        action_count < round_action_limit
+        native_tools
+        and action_count < round_action_limit
         and actions_used < budget["actions"]
         and not state.get("research_context_limit_reached")
     ):

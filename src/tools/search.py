@@ -27,7 +27,10 @@ class SearchWebInput(SearchPapersInput):
 
 def _search_papers(params, context):
     if context.source != 'collection':
-        return retrieve(context.project_id, params.query, context.source)
+        source = context.source
+        if source == 'all':
+            source = 'all' if context.network_search and context.local_literature else ('local' if context.local_literature else 'openalex')
+        return retrieve(context.project_id, params.query, source)
     return retrieve_collection(context.project_id, params.query, context.paper_ids)
 
 

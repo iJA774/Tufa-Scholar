@@ -8,6 +8,26 @@ from src.tools.registry import ToolCallValidationError
 
 
 class ResearchToolsTests(unittest.TestCase):
+    def test_disabled_sources_are_enforced_at_execution(self):
+        registry = ToolRegistry()
+        with self.assertRaises(ToolCallValidationError):
+            registry.invoke('search_web', {'query': 'q'}, context=ToolContext(1, 'web', network_search=False))
+        with self.assertRaises(ToolCallValidationError):
+            registry.invoke('search_papers', {'query': 'q'}, context=ToolContext(1, 'collection', local_literature=False))
+        with patch('src.tools.search.retrieve', return_value={}) as retrieve:
+            registry.invoke('search_papers', {'query': 'q'}, context=ToolContext(1, 'all', network_search=False))
+            retrieve.assert_called_once_with(1, 'q', 'local')
+        with patch('src.tools.search.retrieve', return_value={}) as retrieve:
+            registry.invoke('search_papers', {'query': 'q'}, context=ToolContext(1, 'all', local_literature=False))
+            retrieve.assert_called_once_with(1, 'q', 'openalex')
+        with patch('src.tools.read_paper.collect_evidence', return_value=[]) as collect:
+            registry.invoke('collect_evidence', {'query': 'q', 'papers': [{'title': 'x', 'id': 2}]}, context=ToolContext(1, 'all', local_literature=False))
+            self.assertIsNone(collect.call_args.args[4][0]['id'])
+            self.assertFalse(collect.call_args.kwargs['local_literature'])
+        with patch('src.literature.evidence.repository.project_evidence') as local:
+            registry.invoke('collect_evidence', {'query': 'q', 'papers': [{'title': 'q', 'abstract': 'q', 'id': 2}]}, context=ToolContext(1, 'all', local_literature=False))
+            local.assert_not_called()
+
     def setUp(self):
         self.registry = ToolRegistry()
         self.local = ToolContext(1, 'local')

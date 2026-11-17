@@ -45,9 +45,9 @@ def run_once():
             from src.agents.literature import run
             research = {key: task.get(key) for key in (
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode',
-                'research_depth', 'prefer_primary_evidence', 'relevance_filter'
+                'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
             )}
-            research['local_papers'] = _local_papers(task['project_id'], task['source'], task.get('paper_ids') or [])
+            research['local_papers'] = _local_papers(task['project_id'], task['source'], task.get('paper_ids') or []) if task['local_literature'] else []
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
             with diagnostic_scope(run_id=task['id'], project_id=task['project_id']):
                 content, evidence = run(

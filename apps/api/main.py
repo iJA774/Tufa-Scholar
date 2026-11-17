@@ -149,6 +149,8 @@ class QuestionInput(BaseModel):
     research_mode: Literal['auto', 'deep', 'quick'] = 'auto'
     research_depth: Literal['light', 'standard', 'deep'] = 'standard'
     prefer_primary_evidence: StrictBool = True
+    network_search: StrictBool = True
+    local_literature: StrictBool = True
     relevance_filter: Literal['relaxed', 'standard', 'strict'] = 'standard'
     conversation_id: int | None = None
     collection_id: int | None = None
@@ -317,7 +319,9 @@ async def import_paper(project_id: int, file: UploadFile = File(...), title: str
     from src.persistence.storage import connect_database
     with connect_database() as db:
         duplicate = bool(repo.existing_version(db, digest))
-    path = data_directory() / 'originals' / f'{digest}.pdf'
+    path = data_directory() / 'documents' / 'originals' / '.store' / f'{digest}.pdf'
+    if any(p.is_symlink() or os.path.isjunction(p) for p in (path.parent.parent.parent, path.parent.parent, path.parent)):
+        raise HTTPException(422, '原文存储目录包含不安全的链接。')
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_bytes(content)
@@ -368,6 +372,7 @@ def ask_question(project_id: int, body: QuestionInput):
         research_depth=body.research_depth,
         prefer_primary_evidence=body.prefer_primary_evidence,
         relevance_filter=body.relevance_filter,
+        network_search=body.network_search, local_literature=body.local_literature,
     )
     if result is None:
         raise HTTPException(404, '项目或对话不存在')

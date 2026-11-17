@@ -40,6 +40,8 @@ class ToolContext:
     project_id: int
     source: Literal['local', 'openalex', 'all', 'collection', 'web']
     paper_ids: tuple[int, ...] = ()
+    network_search: bool = True
+    local_literature: bool = True
 
     def __post_init__(self):
         if self.source not in {'local', 'openalex', 'all', 'collection', 'web'}:
@@ -65,13 +67,23 @@ class ToolRegistry:
     def list_tools(self, context: ToolContext):
         return [{'name': name, 'description': description, 'input_schema': model.model_json_schema()}
                 for name, (description, model, _, sources) in self._tools.items()
-                if context.source in sources]
+                if context.source in sources and self._allowed(context)]
+
+    @staticmethod
+    def _allowed(context):
+        if context.source == 'web':
+            return context.network_search
+        if context.source in {'local', 'collection'}:
+            return context.local_literature
+        if context.source == 'openalex':
+            return context.network_search
+        return context.network_search or context.local_literature
 
     def invoke(self, name, arguments, *, context: ToolContext):
         tool = self._tools.get(name)
         if tool is None:
             raise ToolCallValidationError('工具不存在或不适用于当前范围', 'unknown_tool')
-        if context.source not in tool[3]:
+        if context.source not in tool[3] or not self._allowed(context):
             raise ToolCallValidationError('工具不存在或不适用于当前范围', 'disallowed_tool')
         try:
             params = tool[1].model_validate(arguments, strict=True)

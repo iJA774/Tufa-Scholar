@@ -166,6 +166,40 @@ class ConversionApiTest(unittest.TestCase):
             time.sleep(.1)
         self.fail('batch did not reach terminal state')
 
+    def test_local_originals_conversion_and_existing_markdown(self):
+        root = Path(self.tmp.name) / 'documents'
+        (root / 'originals' / 'nested').mkdir(parents=True)
+        (root / 'originals' / 'nested' / 'paper.txt').write_text('hello', encoding='utf-8')
+        response = self.client.post('/conversion-batches/from-originals', json={})
+        self.assertEqual(response.status_code, 201, response.text)
+        value = self.finish(response.json())
+        self.assertEqual(value['counts']['succeeded'], 1)
+        result = root / 'conversions' / 'nested' / 'paper.txt.md'
+        self.assertIn('hello', result.read_text(encoding='utf-8'))
+        response = self.client.post('/conversion-batches/from-originals', json={})
+        self.assertEqual(response.status_code, 201, response.text)
+        value = self.finish(response.json())
+        self.assertEqual(value['counts']['skipped'], 1)
+        self.assertEqual(value['files'][0]['code'], 'already_converted')
+        self.assertIn('hello', result.read_text(encoding='utf-8'))
+
+    def test_many_existing_outputs_do_not_block_new_work(self):
+        root = Path(self.tmp.name) / 'documents'
+        originals = root / 'originals'
+        conversions = root / 'conversions'
+        originals.mkdir(parents=True)
+        conversions.mkdir(parents=True, exist_ok=True)
+        for n in range(105):
+            (originals / f'old{n:03}.txt').write_text('old', encoding='utf-8')
+            (conversions / f'old{n:03}.txt.md').write_text('done', encoding='utf-8')
+        (originals / 'new.txt').write_text('new content', encoding='utf-8')
+        response = self.client.post('/conversion-batches/from-originals', json={})
+        self.assertEqual(response.status_code, 201, response.text)
+        value = self.finish(response.json())
+        self.assertEqual(value['counts']['succeeded'], 1)
+        self.assertEqual(value['counts']['skipped'], 99)
+        self.assertIn('new content', (conversions / 'new.txt.md').read_text(encoding='utf-8'))
+
     def test_mixed_batch_download_zip_and_source_protection(self):
         batch = self.batch([('Paper.txt',b'Plain source'),('Paper.docx',docx_fixture()),('Deep/Study.pdf',pdf_fixture()),('bad.pdf',b'%PDF- broken'),('old.doc',b'legacy')])
         value = self.finish(batch)
@@ -185,7 +219,7 @@ class ConversionApiTest(unittest.TestCase):
             self.assertIn('Research-Markdown/Paper.txt.md',zipped.namelist())
             self.assertIn('Research-Markdown/Paper.docx.md',zipped.namelist())
             self.assertNotIn('bad.md',zipped.namelist())
-        directory = Path(self.tmp.name)/'conversions'/value['id']
+        directory = Path(self.tmp.name)/'documents'/'conversions'/'.batches'/value['id']
         self.assertFalse(list(directory.glob('*.input')))
         self.assertFalse(list(directory.glob('*.zip')))
         self.assertNotIn(str(Path(self.tmp.name)),json.dumps(value))
@@ -220,7 +254,7 @@ class ConversionApiTest(unittest.TestCase):
         value = self.finish(batch)
         self.assertEqual(value['counts']['failed'],1)
         self.assertEqual(value['counts']['succeeded'],1)
-        directory = Path(self.tmp.name)/'conversions'/batch['id']
+        directory = Path(self.tmp.name)/'documents'/'conversions'/'.batches'/batch['id']
         self.assertFalse(list(directory.glob('*.upload')))
         self.assertFalse(list(directory.glob('*.input')))
 
@@ -267,7 +301,7 @@ class ConversionApiTest(unittest.TestCase):
             self.assertLess(time.monotonic()-started,1)
             value = self.client.post(f'/conversion-batches/{batch["id"]}/cancel').json()
             self.assertEqual(value['files'][0]['state'],'cancelled')
-            directory = Path(self.tmp.name)/'conversions'/batch['id']
+            directory = Path(self.tmp.name)/'documents'/'conversions'/'.batches'/batch['id']
             deadline = time.monotonic()+5
             while list(directory.glob('*.input')) and time.monotonic()<deadline: time.sleep(.05)
             self.assertFalse(list(directory.glob('*.input')))
@@ -320,7 +354,7 @@ class ConversionApiTest(unittest.TestCase):
         with connect_database() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM paper_versions').fetchone()[0],1)
             self.assertEqual(db.execute('SELECT * FROM paper_pages ORDER BY page').fetchall(),before)
-        original = Path(self.tmp.name)/'originals'/f'{sha256(data).hexdigest()}.pdf'
+        original = Path(self.tmp.name)/'documents'/'originals'/'.store'/f'{sha256(data).hexdigest()}.pdf'
         self.assertEqual(original.read_bytes(),data)
 
 

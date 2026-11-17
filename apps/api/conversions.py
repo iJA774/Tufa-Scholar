@@ -1,11 +1,12 @@
 """Explicit browser uploads and artifact delivery for offline conversion."""
 import json
+import os
 import re
 import time
 import threading
 import unicodedata
 from hashlib import sha256
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 from zipfile import ZipFile, ZIP_DEFLATED
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from src.literature.conversion.models import MAX_FILE, MAX_FILES, MAX_BATCH
 from src.persistence import conversions as store, repository as repo
+from src.persistence.storage import data_directory
 
 router = APIRouter(prefix='/conversion-batches', tags=['local-conversion'])
 FORM_LIMIT = MAX_FILE + 64*1024
@@ -142,6 +144,109 @@ def create_batch(spec: BatchSpec, request: Request):
         except OSError:
             raise HTTPException(507, '磁盘空间不足或无法创建转换目录。') from None
     return store.public(batch)
+
+
+class LocalBatchSpec(BaseModel):
+    project_id: int | None = Field(default=None, gt=0)
+
+
+@router.post('/open-originals')
+def open_originals():
+    directory = data_directory() / 'documents' / 'originals'
+    try:
+        if any(p.is_symlink() or os.path.isjunction(p) for p in (directory.parent, directory)):
+            raise OSError('unsafe document directory')
+        directory.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(directory.resolve()))
+    except (OSError, AttributeError):
+        raise HTTPException(500, '无法打开本地论文目录。') from None
+    return {'opened': True}
+
+
+@router.post('/from-originals', status_code=201)
+def convert_originals(spec: LocalBatchSpec, request: Request):
+    root = data_directory() / 'documents' / 'originals'
+    if any(p.is_symlink() or os.path.isjunction(p) for p in (root.parent, root)):
+        raise HTTPException(422, '原始论文目录包含不安全的链接。')
+    root.mkdir(parents=True, exist_ok=True)
+    # Do not follow directory links or import files outside the fixed directory.
+    paths = []
+    for parent, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [d for d in dirs if not (Path(parent) / d).is_symlink() and not os.path.isjunction(Path(parent) / d) and not (Path(parent) == root and d == '.store')]
+        for name in files:
+            path = Path(parent) / name
+            if not path.is_symlink() and not os.path.isjunction(path) and path.is_file() and path.resolve().is_relative_to(root.resolve()): paths.append(path)
+    paths.sort(key=lambda p: p.relative_to(root).as_posix().casefold())
+    if not paths: raise HTTPException(422, '原始论文目录为空。')
+    try:
+        conversions = data_directory() / 'documents' / 'conversions'
+        work, rest = [], []
+        for path in paths:
+            relative = path.relative_to(root)
+            output = conversions / (relative.as_posix() + '.md')
+            plain = (conversions / relative).with_suffix('.md')
+            already = ((output.is_file() and not output.is_symlink()) or
+                       (plain.is_file() and not plain.is_symlink()))
+            eligible = path.suffix.lower() in ('.pdf', '.docx', '.txt') and not already
+            (work if eligible else rest).append(path)
+        # Select new work first. Each click can advance the next bounded batch;
+        # previously converted entries fill any remaining manifest capacity.
+        selected, total = [], 0
+        for path in work + rest:
+            size = path.stat().st_size
+            if len(selected) >= MAX_FILES: break
+            if total + size > MAX_BATCH: continue
+            selected.append(path)
+            total += size
+        if not selected:
+            raise HTTPException(413, '没有可处理的文件：文件超过单批大小限制。')
+        paths = selected
+        files = [FileSpec(path=p.relative_to(root).as_posix(), size=p.stat().st_size) for p in paths]
+        batch = create_batch(BatchSpec(root_name='originals', files=files, project_id=spec.project_id), request)
+        runner = request.app.state.conversions
+        def mark_local(b):
+            b['local_originals'] = True
+            for item in b['files']:
+                item['output'] = item['path'] + '.md'
+        batch = store.update(batch['id'], mark_local)
+        for path, item in zip(paths, batch['files']):
+            if item['state'] != 'waiting': continue
+            output_path = data_directory() / 'documents' / 'conversions' / Path(item['output'])
+            plain_path = (data_directory() / 'documents' / 'conversions' / Path(item['path'])).with_suffix('.md')
+            if not output_path.resolve().is_relative_to((data_directory() / 'documents' / 'conversions').resolve()):
+                runner._change_item(batch['id'], item['id'], state='failed', code='unsafe_output', message='输出目录包含不安全的链接。')
+                continue
+            if (output_path.is_file() and not output_path.is_symlink()) or (plain_path.is_file() and not plain_path.is_symlink()):
+                paper_id = None
+                if spec.project_id and item['format'] == 'pdf' and item['size'] <= MAX_FILE:
+                    try:
+                        digest = sha256()
+                        with path.open('rb') as source:
+                            for chunk in iter(lambda: source.read(256 * 1024), b''):
+                                digest.update(chunk)
+                        paper_id = repo.link_existing_version(spec.project_id, digest.hexdigest())
+                    except OSError:
+                        pass
+                runner._change_item(batch['id'], item['id'], state='skipped', code='already_converted', message='已有同名 Markdown，已跳过。', paper_id=paper_id)
+                continue
+            target = runner.directory(batch['id']) / (item['id'] + '.input')
+            try:
+                digest = sha256()
+                size = 0
+                with path.open('rb') as source, target.open('xb') as out:
+                    while chunk := source.read(256 * 1024):
+                        size += len(chunk)
+                        if size > item['size'] or size > MAX_FILE: raise ValueError('file changed')
+                        digest.update(chunk)
+                        out.write(chunk)
+                if size != item['size']: raise ValueError('file changed')
+                runner._change_item(batch['id'], item['id'], state='uploaded', digest=digest.hexdigest())
+            except (OSError, ValueError):
+                target.unlink(missing_ok=True)
+                runner._change_item(batch['id'], item['id'], state='failed', code='read_failed', message='无法读取文件或文件已改变。')
+        return start_batch(batch['id'], request)
+    except OSError:
+        raise HTTPException(507, '无法读取或保存本地文件。') from None
 
 
 @router.post('/{batch_id}/files/{file_id}')

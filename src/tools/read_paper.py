@@ -65,9 +65,17 @@ def _collect_evidence(params, context):
             items.append(item)
     else:
         items = [item.model_dump(exclude_unset=True) for item in params.papers]
+        if not context.local_literature:
+            items = [{**item, 'id': None} for item in items]
+    source = context.source
+    if source == 'all' and not context.network_search:
+        source = 'local'
+    options = {}
     if params.relevance_queries:
-        return collect_evidence(context.project_id, context.source, context.paper_ids, params.query, items, relevance_queries=params.relevance_queries)
-    return collect_evidence(context.project_id, context.source, context.paper_ids, params.query, items)
+        options['relevance_queries'] = params.relevance_queries
+    if not context.local_literature:
+        options['local_literature'] = False
+    return collect_evidence(context.project_id, source, context.paper_ids, params.query, items, **options)
 
 
 def register_read_paper_tools(registry):
