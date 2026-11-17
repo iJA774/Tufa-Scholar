@@ -292,6 +292,12 @@ def reference(evidence, *, markdown=False, include_title=True):
         metadata = [f"证据 {identifier}"] if identifier else []
     else:
         source_title = f"[{evidence['id']}] {title}"
+    if level == "local_markdown":
+        start, end = evidence.get("char_start"), evidence.get("char_end")
+        suffix = "本地 Markdown"
+        if type(start) is int and type(end) is int and 0 <= start < end:
+            suffix += f" 字符区间 {start}–{end}（从 0 开始）"
+        return ' · '.join(part for part in (source_title, *metadata, suffix) if part) if markdown else f"{source_title} · {suffix}"
     if level in ("web_snippet", "web_content"):
         source_kind = {"web_snippet": "搜索摘要", "web_content": "网页文本"}.get(level, level)
         anchor = ""
@@ -336,9 +342,12 @@ def numbered_references(content, evidence, *, legacy=False):
         item = markers[match.group()][0] if legacy else by_id.get(match.group(1))
         if not item:
             return match.group()
+        document_id = item.get('document_id')
         paper_id = item.get('paper_id')
         url = _safe_http_url(item.get('original_url'))
-        if paper_id is not None:
+        if item.get('source_level') == 'local_markdown' and document_id:
+            key = ('markdown', document_id)
+        elif paper_id is not None:
             key = ('paper', str(paper_id))
         elif url:
             parts = urlsplit(url)

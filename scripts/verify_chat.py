@@ -49,7 +49,7 @@ def main():
         base = f'http://127.0.0.1:{port}'
         env = os.environ.copy()
         for key in (
-            'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENALEX_API_KEY',
+            'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENALEX_API_KEY', 'TUFA_PREPROCESSER_MODEL',
             'SEARCH_API', 'SEARX_HOST', 'TAVILY_API_KEY', 'INFOQUEST_API_KEY',
             'BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY',
         ):
@@ -103,7 +103,7 @@ def main():
             pending = call('POST', f'/projects/{project}/questions', json={
                 'question': 'accuracy', 'source': 'local', 'model_name': 'fixture-selected',
                 'research_mode': 'deep',
-                'research_depth': 'light', 'prefer_primary_evidence': False,
+                'research_depth': 'light', 'prefer_primary_evidence': False, 'network_search': False,
                 'relevance_filter': 'relaxed',
             })
             failed = wait(pending['run_id'])
@@ -114,6 +114,7 @@ def main():
                 'research_depth': 'light',
                 'prefer_primary_evidence': False,
                 'relevance_filter': 'relaxed',
+                'network_search': False,
             }
             assert {key: failed_detail[key] for key in preferences} == preferences, failed_detail
 
@@ -121,6 +122,17 @@ def main():
                 'openai_base_url': f'http://127.0.0.1:{fixture.server_port}/v1',
                 'openai_model': 'fixture-default',
             })
+            originals = Path(temporary.name) / 'documents' / 'originals'
+            originals.mkdir(parents=True, exist_ok=True)
+            (originals / 'accuracy-fixture.pdf').write_bytes(pdf)
+            batch = call('POST', '/conversion-batches/prepare', json={'project_id': project})
+            for _ in range(150):
+                batch = call('GET', f"/conversion-batches/{batch['id']}")
+                if batch['state'] in {'completed', 'cancelled', 'interrupted'}:
+                    break
+                time.sleep(0.2)
+            assert batch['state'] == 'completed', batch
+            model_requests_before_retry = len(fixture.model_requests)
             retry = call('POST', f"/runs/{pending['run_id']}/retry")
             assert retry['research_mode'] == 'deep', retry
             assert {key: retry[key] for key in preferences} == preferences, retry
@@ -130,12 +142,16 @@ def main():
             assert {key: completed[key] for key in preferences} == preferences, completed
             result = completed['result']
             assert '92%' in result['content']
-            assert result['evidence'] and result['evidence'][0]['page'] == 1
-            assert result['evidence'][0]['version_id'] == imported['versions'][0]['id']
+            cited = result['evidence'][0]
+            assert cited['source_level'] == 'local_markdown' and cited['char_end'] > cited['char_start'], cited
+            assert cited['paper_id'] == imported['id'], cited
             assert completed['stage'] == 'completed'
             retry_stages = stages(retry['id'])
             assert retry_stages[-1:] == ['reporter'], retry_stages
-            assert 'background_investigator' in retry_stages, retry_stages
+            assert retry_stages[:2] == ['dispatcher', 'planner'] and 'background_investigator' not in retry_stages, retry_stages
+            activity = client.get(f"/runs/{retry['id']}/events")
+            activity.raise_for_status()
+            assert 'background_investigator' not in activity.text
             worker_log = (Path(temporary.name) / 'logs' / 'worker.log').read_text(encoding='utf-8', errors='replace')
             usage_events = [line for line in worker_log.splitlines()
                             if f'run_id={retry["id"]} ' in line and 'model_call completed ' in line]
@@ -157,16 +173,24 @@ def main():
                 for line in item['messages'][0]['content'].splitlines()
                 if '运行节点标识：' in line
             ]
-            assert retry_roles and retry_roles[0] == 'background_investigator' and 'dispatcher' not in retry_roles, retry_roles
-            planner_requests = [
-                item for item in fixture.model_requests
-                if '运行节点标识：planner' in item['messages'][0]['content']
-            ]
-            assert planner_requests
-            assert any('accuracy-fixture.pdf' in json.loads(item['messages'][1]['content']).get('local_papers', [])
-                       for item in planner_requests)
-            assert all('accuracy-fixture.pdf' not in item['messages'][0]['content'] for item in planner_requests)
-            assert all(item['model'] == 'fixture-selected' for item in fixture.model_requests)
+            assert retry_roles and retry_roles[0] == 'planner', retry_roles
+            assert 'background_investigator' not in retry_roles and 'dispatcher' not in retry_roles, retry_roles
+            local_requests = [json.loads(item['messages'][1]['content']) for item in retry_model_requests]
+            actions = [item for item in local_requests if item.get('phase') == 'act']
+            first_action = actions[0]
+            assert first_action['local_domains'] == ['模型评估']
+            assert not first_action['evidence'] and not first_action['tool_results']
+            dossier = next(result for result in actions[1]['tool_results'] if result['tool'] == 'select_local_domains')
+            assert dossier['documents'][0]['title'] and dossier['documents'][0]['tags']
+            assert all('text' not in document and 'content' not in document for document in dossier['documents'])
+            assert not actions[1]['evidence']
+            local_tools = [request['tools'] for request in retry_model_requests if request.get('tools')]
+            assert local_tools and all(
+                {tool['function']['name'] for tool in tools} == {'select_local_domains', 'read_local_markdown'}
+                for tools in local_tools
+            )
+            assert all('local_papers' not in item for item in local_requests)
+            assert all(item['model'] == 'fixture-selected' for item in fixture.model_requests[model_requests_before_retry:])
             assert client.get(imported['versions'][0]['file_url']).content == pdf
             report_id = result['report_id']
             assert '92%' in client.get(f'/reports/{report_id}/markdown').text
@@ -218,7 +242,7 @@ def main():
             messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
             assert [message['role'] for message in messages] == ['user', 'assistant', 'assistant']
             assert client.get(f'/reports/{report_id}/markdown').status_code == 200
-            print('Simulated model: API/worker, retry and regeneration, direct answer, PDF evidence, report and empty collection passed.')
+            print('Simulated model: API/worker, retry and regeneration, direct answer, Markdown evidence, report and empty collection passed.')
             print('Cloud model and real-provider quality were not exercised.')
     finally:
         try:

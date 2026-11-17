@@ -241,6 +241,7 @@ class State(TypedDict, total=False):
     candidate_pools: dict
     query_results: dict
     collected_web_blocks: list
+    disclosed_local_documents: list
     read_web_pages: list
     evidence_pool: list
     evidence: list
@@ -255,7 +256,6 @@ class State(TypedDict, total=False):
     warnings: list
     needs_research: bool
     content: str
-    coder_status: str
     background_decision: dict
     last_completed: str
     next_node: str
@@ -381,7 +381,7 @@ def _search_catalog(research, modes=None):
 def _available_modes(research):
     modes = _source_modes(research["source"])
     available = [mode for mode in modes if any(
-        item["name"] in {"search_papers", "search_web"}
+        item["name"] in {"search_papers", "search_web", "select_local_domains"}
         for item in _catalog_for_mode(research, mode)
     )]
     # Keep a valid workflow mode even when every source is disabled; its
@@ -397,6 +397,7 @@ def _model_template_context(state, search_mode, node_role, available_tools):
         "research_mode": research.get("research_mode", "auto"),
         "available_tools": catalog,
         "node_role": node_role,
+        "local_capable": search_mode == "paper" and research["source"] in {"local", "collection", "all", "auto"} and research.get("local_literature", True),
     }
 
 
@@ -544,7 +545,7 @@ def _evidence_signature(item):
     return (
         item.get("paper_id"), item.get("version_id"), item.get("page"),
         item.get("title"), item.get("source_level"), item.get("text"), url,
-        item.get("char_start"), item.get("char_end"),
+        item.get("document_id"), item.get("char_start"), item.get("char_end"),
     )
 
 
@@ -587,7 +588,7 @@ def _candidate_view(item, mode, *, include_text=True, text_limit=MAX_CANDIDATE_T
 
 
 def _evidence_views(items, *, text_limit=1_200):
-    fields = ("id", "paper_id", "title", "text", "source_level", "version_id", "page", "original_url", "provider", "retrieved_at", "char_start", "char_end", "published_at", "candidate_id")
+    fields = ("id", "paper_id", "title", "text", "source_level", "version_id", "page", "original_url", "provider", "retrieved_at", "char_start", "char_end", "published_at", "candidate_id", "document_id")
     result = []
     for item in items:
         view = {key: item.get(key) for key in fields if item.get(key) is not None}
@@ -734,7 +735,7 @@ def _primary_evidence_score(item):
     """Prefer locatable source text; this scores evidence properties, not domains."""
     level = str(item.get("source_level") or "").casefold()
     located = item.get("page") is not None or item.get("char_start") is not None or item.get("content_offset") is not None
-    direct = level in {"full_text", "web_content"}
+    direct = level in {"full_text", "web_content", "local_markdown"}
     return (2 if direct else 0) + (1 if located else 0)
 
 
@@ -941,7 +942,11 @@ def _find_candidates(pool, ids):
 
 def _helper_catalog(research, mode):
     """Expose the candidate-ID helper while keeping the registry's real schemas visible."""
-    catalog = [dict(item) for item in _catalog_for_mode(research, mode)]
+    catalog = [dict(item) for item in _catalog_for_mode(research, mode)
+               if not (mode == "paper" and (item["name"] == "read_paper" or
+                   (research["source"] in {"local", "collection"} and item["name"] in {"search_papers", "collect_evidence"})))]
+    if mode == "paper" and not research.get("network_search", True):
+        catalog = [item for item in catalog if item["name"] not in {"search_papers", "collect_evidence"}]
     for item in catalog:
         if item["name"] == "search_web":
             schema = item.get("input_schema", {})
@@ -1007,6 +1012,8 @@ def _invoke_tool(state, mode, tool_name, arguments):
     if tool_name not in allowed_tool_names:
         raise ToolCallValidationError("工具参数无效", "tool_not_available")
     context = _tool_context(research, mode)
+    if mode == "paper" and tool_name in {"search_papers", "collect_evidence"}:
+        context = ToolContext(research["project_id"], "openalex", (), network_search=research.get("network_search", True), local_literature=False)
     args = dict(arguments)
     # Only candidates presented in this round's ranked queue may be explicitly
     # fetched. The full pool remains available for stable identity and validation.
@@ -1022,6 +1029,31 @@ def _invoke_tool(state, mode, tool_name, arguments):
         if item.get("candidate_id")
     }
     allowed_queue_ids = visible_ids | previously_selected | previously_read
+    if tool_name == "select_local_domains":
+        from src.tools.local_markdown import list_local_domains
+        domains = [d for d in list_local_domains(context)[:200] if isinstance(d, str) and len(d) <= 200]
+        requested = args.get("domains")
+        if not isinstance(requested, list) or not requested or any(d not in domains for d in requested):
+            raise ToolCallValidationError("工具参数无效", "unknown_local_domain")
+        result = registry.invoke(tool_name, args, context=context)
+        documents = [{**item, "title": str(item.get("title", ""))[:240],
+                      "description": str(item.get("description", ""))[:240],
+                      "tags": [str(tag)[:100] for tag in item.get("tags", [])[:10]],
+                      "domains": [str(domain)[:200] for domain in item.get("domains", [])[:10]]}
+                     for item in result.get("documents", [])[:20]]
+        result = {**result, "documents": documents}
+        disclosed = list(dict.fromkeys(state.get("disclosed_local_documents", []) + [item["document_id"] for item in documents]))
+        results = list(state.get("tool_results", [])) + [{"tool": tool_name, **result}]
+        return {"disclosed_local_documents": disclosed, "tool_results": results}, result
+    if tool_name == "read_local_markdown":
+        if args.get("document_id") not in state.get("disclosed_local_documents", []):
+            raise ToolCallValidationError("工具参数无效", "undisclosed_local_document")
+        result = registry.invoke(tool_name, args, context=context)
+        pool = _unique_evidence(state.get("evidence_pool", []) + result)
+        signatures = {_evidence_signature(item): item["id"] for item in pool}
+        normalized = [{**item, "id": signatures[_evidence_signature(item)]} for item in result]
+        results = list(state.get("tool_results", [])) + [{"tool": tool_name, "document_id": args["document_id"], "evidence_ids": [item["id"] for item in normalized], "next_offset": args.get("offset", 0) + len(normalized) if len(normalized) == 5 else None}]
+        return {"evidence_pool": pool, "evidence": pool, "tool_results": results}, normalized
     if tool_name == "collect_evidence":
         pool = state.get("candidate_pools", {}).get(mode, [])
         candidate_ids = args.pop("candidate_ids", [])
@@ -1322,9 +1354,11 @@ def _background_investigator(state, on_stage):
     errors = list(state.get("errors", []))
     warnings = list(state.get("warnings", []))
     context = _tool_context(research, mode)
+    if mode == "paper":
+        context = ToolContext(research["project_id"], "openalex", (), network_search=research.get("network_search", True), local_literature=False)
     search_name = "search_web" if mode == "web" else "search_papers"
     available_names = {item["name"] for item in registry.list_tools(context)}
-    for query in queries[:_budget(state)["background_searches"]] if search_name in available_names else []:
+    for query in queries[:_budget(state)["background_searches"]] if search_name in available_names and research["source"] not in {"local", "collection"} else []:
         tool_name = search_name
         arguments = {"query": query, "limit": MAX_BACKGROUND_WEB_RESULTS} if mode == "web" else {"query": query}
         call_id = _tool_event_start(state, "background_investigator", mode, tool_name, arguments)
@@ -1462,7 +1496,6 @@ def _planner(state, on_stage):
     payload = _payload(
         state,
         round_count=len(rounds),
-        local_papers=state["research"].get("local_papers", []) if state["research"].get("local_literature", True) else [],
         core_requirements=core_requirements,
         current_plan=state.get("current_plan", []),
         current_draft=state.get("current_draft", ""),
@@ -1553,8 +1586,6 @@ def _supervisor(state, on_stage):
     if completed == "researcher":
         target = "analyst"
     elif completed == "analyst":
-        target = "coder"
-    elif completed == "coder":
         target = "planner"
     elif completed == "planner":
         target = "researcher"
@@ -1675,6 +1706,10 @@ def _researcher(state, on_stage):
     )
     tools = _helper_catalog(state["research"], mode)
     native_tools = _native_tool_specs(tools)
+    local_domains = []
+    if any(item["name"] == "select_local_domains" for item in tools):
+        from src.tools.local_markdown import list_local_domains
+        local_domains = [d for d in list_local_domains(_tool_context(state["research"], mode))[:200] if isinstance(d, str) and len(d) <= 200]
     prompt_tools = [
         {key: item[key] for key in ("name", "description") if key in item}
         for item in tools
@@ -1687,6 +1722,7 @@ def _researcher(state, on_stage):
     ):
         payload = {
             "question": state["research"]["query"],
+            "local_domains": local_domains,
             "source": state["research"]["source"],
             "phase": "act",
             "research_depth": _depth(state),
@@ -1947,6 +1983,7 @@ def _researcher(state, on_stage):
         "last_completed": "researcher",
         "collected_web_blocks": state.get("collected_web_blocks", []),
         "read_web_pages": state.get("read_web_pages", []),
+        "disclosed_local_documents": state.get("disclosed_local_documents", []),
     }
 
 
@@ -2045,13 +2082,6 @@ def _analyst(state, on_stage, on_subtask):
     }
     rounds = list(state.get("rounds", [])) + [round_item]
     return {"current_review": review, "current_findings": current_findings, "rounds": rounds, "errors": state.get("errors", []), "last_completed": "analyst"}
-
-
-def _coder(state, on_stage):
-    _emit(on_stage, "coder")
-    # This node reserves a deterministic role in the pipeline. Data safety and
-    # citation validation are performed by code at ingestion and report time.
-    return {"coder_status": "placeholder", "last_completed": "coder"}
 
 
 def _allowed_report_papers(state):
@@ -2404,8 +2434,6 @@ def _node_completion_data(node, state, patch):
         data["message"] = _safe_event_text(gaps[0], 240) if gaps else ("已覆盖主要要求。" if review.get("sufficient") else "仍需补充证据。")
         if review.get("review"):
             data["body"] = review["review"][:8_000]
-    elif node == "coder":
-        data["message"] = "本轮无需代码执行。"
     elif node == "reporter":
         evidence = patch.get("final_evidence", state.get("final_evidence", []))
         if patch.get("report_fallback"):
@@ -2422,6 +2450,14 @@ def _run_node_with_events(state, node, callback):
     return patch
 
 
+def _after_dispatch(state):
+    if not state.get("needs_research"):
+        return END
+    if not state["research"].get("network_search", True):
+        return "planner"
+    return "background_investigator"
+
+
 def _graph(on_stage, on_subtask):
     graph = StateGraph(State)
     graph.add_node("dispatcher", lambda state: _dispatch(state, on_stage))
@@ -2430,13 +2466,12 @@ def _graph(on_stage, on_subtask):
     graph.add_node("supervisor", lambda state: _run_node_with_events(state, "supervisor", lambda current: _supervisor(current, on_stage)))
     graph.add_node("researcher", lambda state: _run_node_with_events(state, "researcher", lambda current: _researcher(current, on_stage)))
     graph.add_node("analyst", lambda state: _run_node_with_events(state, "analyst", lambda current: _analyst(current, on_stage, on_subtask)))
-    graph.add_node("coder", lambda state: _run_node_with_events(state, "coder", lambda current: _coder(current, on_stage)))
     graph.add_node("reporter", lambda state: _run_node_with_events(state, "reporter", lambda current: _reporter(current, on_stage)))
     graph.add_edge(START, "dispatcher")
     graph.add_conditional_edges(
         "dispatcher",
-        lambda state: "background_investigator" if state.get("needs_research") else END,
-        {"background_investigator": "background_investigator", END: END},
+        _after_dispatch,
+        {"background_investigator": "background_investigator", "planner": "planner", END: END},
     )
     graph.add_edge("background_investigator", "planner")
     graph.add_conditional_edges(
@@ -2447,11 +2482,10 @@ def _graph(on_stage, on_subtask):
     graph.add_conditional_edges(
         "supervisor",
         lambda state: state["next_node"],
-        {"researcher": "researcher", "analyst": "analyst", "coder": "coder", "planner": "planner"},
+        {"researcher": "researcher", "analyst": "analyst", "planner": "planner"},
     )
     graph.add_edge("researcher", "supervisor")
     graph.add_edge("analyst", "supervisor")
-    graph.add_edge("coder", "supervisor")
     graph.add_edge("reporter", END)
     return graph.compile()
 

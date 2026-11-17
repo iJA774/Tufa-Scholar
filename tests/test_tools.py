@@ -62,7 +62,7 @@ class ResearchToolsTests(unittest.TestCase):
     def test_discovery_and_execution_respect_source(self):
         local_names = {item['name'] for item in self.registry.list_tools(self.local)}
         web_tools = self.registry.list_tools(self.web)
-        self.assertEqual(local_names, {'search_papers', 'collect_evidence'})
+        self.assertEqual(local_names, {'search_papers', 'select_local_domains', 'read_local_markdown'})
         self.assertEqual({item['name'] for item in web_tools}, {'search_web', 'collect_evidence', 'read_web_page'})
         self.assertTrue(all(item['description'] and item['input_schema']['properties'] for item in web_tools))
         with self.assertRaises(ValueError):
@@ -131,18 +131,20 @@ class ResearchToolsTests(unittest.TestCase):
         self.assertEqual(self.collection.paper_ids, (2, 3, 99))
 
     @patch('src.literature.evidence.repository.project_evidence')
-    def test_local_and_collection_use_only_trusted_project_records(self, evidence):
-        evidence.return_value = [{'id': 2, 'title': 'real', 'abstract': 'trusted', 'versions': []}]
-        candidates = [{'id': 2, 'title': 'fake', 'abstract': 'forged'}, {'id': 99, 'title': 'outside', 'abstract': 'outside'}]
+    def test_local_and_collection_cannot_use_the_legacy_pdf_reader(self, evidence):
+        candidates = [{'id': 2, 'title': 'candidate'}]
         for context in (self.local, self.collection):
-            result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': candidates}, context=context)
-            self.assertEqual([(e['title'], e['text']) for e in result], [('real', 'trusted')])
+            with self.assertRaises(ToolCallValidationError) as error:
+                self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': candidates}, context=context)
+            self.assertEqual(error.exception.code, 'disallowed_tool')
+        evidence.assert_not_called()
 
     @patch('src.literature.evidence.repository.project_evidence', return_value=[])
     def test_external_candidate_cannot_claim_project_paper_id(self, evidence):
         context = ToolContext(1, 'all')
         result = self.registry.invoke('collect_evidence', {'query': 'topic', 'papers': [{'id': 99, 'title': 'external topic', 'abstract': 'topic text'}]}, context=context)
         self.assertIsNone(result[0]['paper_id'])
+        evidence.assert_not_called()
 
     def test_relevance_excludes_generic_terms_and_substring_matches(self):
         from src.literature.keywords import relevance_terms, relevance_score

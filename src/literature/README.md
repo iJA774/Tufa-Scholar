@@ -1,6 +1,6 @@
 # 文献业务
 
-`retrieval.py` 提供项目文献与 OpenAlex 检索、排名合并、收藏夹候选及跨查询候选排序；`evidence.py` 提供论文及网页证据提取。业务函数使用普通参数，不依赖 LangGraph。可调用工具入口见 [src/tools](../tools/README.md)，单图八节点的规划、有限补检、分析与终稿生成见 [Agent 工作流](../agents/README.md)。
+`retrieval.py` 提供项目文献与 OpenAlex 检索、排名合并、收藏夹候选及跨查询候选排序；`evidence.py` 提供论文及网页证据提取。业务函数使用普通参数，不依赖 LangGraph。可调用工具入口见 [src/tools](../tools/README.md)，规划、有限补检、分析与终稿生成见 [Agent 工作流](../agents/README.md)。
 
 检索保留单次研究运行的跨轮候选池，论文按 DOI、arXiv ID、本地 ID 等身份标识去重，网页按去掉 fragment 的 URL 去重；不同查询的排名使用 RRF 合并，同一查询不重复增加权重。RRF 只合并检索排序，不是语义重排。收藏夹检索返回提交时的完整论文快照与当前项目的交集，不能扩展到外部来源。候选池按来源分开保存；研究节点每次取证调用最多选择六条候选，不在候选入池前截断。
 

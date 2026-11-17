@@ -65,6 +65,7 @@ class ModelTests(unittest.TestCase):
     def test_all_real_prompt_ids_render_time_and_schema_at_http_boundary(self):
         cases = [
             ('runtime/dispatcher', '分流角色', 'none', []),
+            ('literature/preprocesser', '分类角色', 'none', []),
             ('literature/background_investigator', '背景调查角色', 'none', [{'name': 'search_web', 'description': '网页检索', 'input_schema': {}}]),
             ('literature/planner', '计划角色', 'paper', [{'name': 'search_papers', 'description': '论文检索', 'input_schema': {}}]),
             ('literature/researcher', '论文研究角色', 'paper', [{'name': 'collect_evidence', 'description': '提取证据', 'input_schema': {}}]),
@@ -79,7 +80,7 @@ class ModelTests(unittest.TestCase):
         payload = {'question': '材料 {{ CURRENT_TIME }} {{ OUTPUT_SCHEMA }} {% include "private" %}'}
         clock_values = [
             datetime(2026, 12, 31, 23, 59, second, tzinfo=timezone(timedelta(hours=8)))
-            for second in range(54, 60)
+            for second in range(53, 60)
         ]
         with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.datetime') as clock:
             clock.now.side_effect = clock_values

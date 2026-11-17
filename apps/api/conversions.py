@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import sqlite3
 import time
 import threading
 import unicodedata
@@ -12,13 +13,29 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
 from src.literature.conversion.models import MAX_FILE, MAX_FILES, MAX_BATCH
 from src.persistence import conversions as store, repository as repo
 from src.persistence.storage import data_directory
 
 router = APIRouter(prefix='/conversion-batches', tags=['local-conversion'])
 FORM_LIMIT = MAX_FILE + 64*1024
+
+
+class ConversionDownload(FileResponse):
+    def __init__(self, path, *, release, temporary=False, **kwargs):
+        super().__init__(path, **kwargs)
+        self.release = release
+        self.temporary = temporary
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                if self.temporary:
+                    self.path.unlink(missing_ok=True)
+            finally:
+                self.release()
 
 
 class ConversionBodyLimit:
@@ -150,6 +167,117 @@ class LocalBatchSpec(BaseModel):
     project_id: int | None = Field(default=None, gt=0)
 
 
+@router.post('/clear')
+def clear_documents(request: Request, payload: dict):
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/json' or set(payload) != {'confirm'} or payload.get('confirm') is not True:
+        raise HTTPException(422, '请明确确认清理操作。')
+    runner = request.app.state.conversions
+    with runner.lock:
+        if runner.active_batch_id is not None or runner.inflight_uploads:
+            raise HTTPException(409, '转换或上传仍在结束，请稍后重试。')
+        if not runner.downloads.acquire(blocking=False):
+            raise HTTPException(409, '正在下载转换结果，请稍后重试。')
+        try:
+            from src.persistence.conversion_cleanup import clear
+            return clear()
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except (OSError, sqlite3.Error):
+            raise HTTPException(507, '无法安全清理转换结果，请检查目录和磁盘权限。') from None
+        finally:
+            runner.downloads.release()
+
+
+@router.post('/preprocess', status_code=201)
+def preprocess_batch(request: Request, payload: dict):
+    with request.app.state.conversions.lock:
+        return _preprocess_batch(request, payload)
+
+
+def _preprocess_batch(request: Request, payload: dict):
+    from src.infrastructure.settings import preprocesser_config
+    from src.literature.conversion.models import MAX_OUTPUT
+    from src.persistence.document_classifications import get_classification
+
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/json' or payload:
+        raise HTTPException(415, '请使用空 JSON 对象提交分析请求。')
+    runner = request.app.state.conversions
+    root = data_directory() / 'documents' / 'conversions'
+    config = preprocesser_config()
+    model = config['model']
+    if not model or not config['base_url']:
+        raise HTTPException(422, '请先在通用设置中配置模型服务地址和模型名称。')
+    work, unchanged = [], []
+    seen, scanned_bytes = 0, 0
+    try:
+        for component in (root.parent, root):
+            if component.is_symlink() or os.path.isjunction(component):
+                raise OSError('unsafe document directory')
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if d != '.batches' and not (Path(current) / d).is_symlink() and not os.path.isjunction(Path(current) / d))
+            for name in sorted(files):
+                path = Path(current) / name
+                if path.suffix.lower() != '.md' or path.is_symlink() or os.path.isjunction(path) or not path.is_file():
+                    continue
+                seen += 1
+                if seen > 10000:
+                    raise HTTPException(413, '文档数量超过扫描限制。')
+                relative = path.relative_to(root).as_posix()
+                try:
+                    safe_path(relative)
+                    # Recheck each ancestor before opening a candidate.
+                    for part in [root, *[root.joinpath(*Path(relative).parts[:i]) for i in range(1, len(Path(relative).parts) + 1)]]:
+                        if part.is_symlink() or os.path.isjunction(part): raise OSError('unsafe path')
+                    if not path.resolve().is_relative_to(root.resolve()): raise OSError('unsafe path')
+                    size = path.stat().st_size
+                    item = {'id': uuid4().hex, 'path': relative, 'output': relative,
+                            'size': size, 'format': 'md', 'state': 'uploaded', 'code': None, 'message': None}
+                    previous = get_classification(relative)
+                    if previous and size <= MAX_OUTPUT:
+                        scanned_bytes += size
+                        if scanned_bytes > 2 * 1024 * 1024 * 1024:
+                            raise HTTPException(413, '文档总量超过扫描限制。')
+                        with path.open('rb') as source:
+                            raw = source.read(MAX_OUTPUT + 1)
+                        if sha256(raw).hexdigest() == previous['digest']:
+                            item.update(state='skipped', code='already_classified', message='内容未变化，已跳过。',
+                                        classification={key: previous[key] for key in ('domains', 'tags', 'description')})
+                            if len(unchanged) < MAX_FILES: unchanged.append(item)
+                            continue
+                    if len(work) < MAX_FILES: work.append(item)
+                except (OSError, ValueError, HTTPException) as exc:
+                    if isinstance(exc, HTTPException) and exc.status_code == 413: raise
+                    if len(work) < MAX_FILES:
+                        work.append({'id': uuid4().hex, 'path': relative, 'output': relative, 'size': 0,
+                                     'format': 'md', 'state': 'failed', 'code': 'read_failed', 'message': '无法读取文件。'})
+        if not seen:
+            raise HTTPException(422, '转换目录中没有 Markdown 文档。')
+        items = (work + unchanged)[:MAX_FILES]
+        batch = {'id': uuid4().hex, 'revision': 0, 'root_name': 'Markdown', 'kind': 'preprocess',
+                 'model_name': model, 'state': 'queued', 'created': time.time(), 'files': items}
+        with runner.lock:
+            store.create(batch)
+        runner.wakeup.set()
+        return store.public(batch)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except OSError:
+        raise HTTPException(507, '无法读取本地文档。') from None
+
+
+@router.post('/prepare', status_code=201)
+def prepare_documents(spec: LocalBatchSpec, request: Request):
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/json':
+        raise HTTPException(415, '请使用 JSON 提交预处理请求。')
+    from src.infrastructure.settings import preprocesser_config
+    config = preprocesser_config()
+    if not config['model'] or not config['base_url']:
+        raise HTTPException(422, '请先在通用设置中配置模型服务地址和模型名称。')
+    if spec.project_id is not None and not repo.project_exists(spec.project_id):
+        raise HTTPException(404, '当前项目不存在。')
+    return _convert_originals(spec, request, combined_model=config['model'])
+
+
 @router.post('/open-originals')
 def open_originals():
     directory = data_directory() / 'documents' / 'originals'
@@ -165,6 +293,15 @@ def open_originals():
 
 @router.post('/from-originals', status_code=201)
 def convert_originals(spec: LocalBatchSpec, request: Request):
+    return _convert_originals(spec, request)
+
+
+def _convert_originals(spec: LocalBatchSpec, request: Request, *, combined_model: str | None = None):
+    with request.app.state.conversions.lock:
+        return _convert_originals_locked(spec, request, combined_model=combined_model)
+
+
+def _convert_originals_locked(spec: LocalBatchSpec, request: Request, *, combined_model: str | None = None):
     root = data_directory() / 'documents' / 'originals'
     if any(p.is_symlink() or os.path.isjunction(p) for p in (root.parent, root)):
         raise HTTPException(422, '原始论文目录包含不安全的链接。')
@@ -177,7 +314,15 @@ def convert_originals(spec: LocalBatchSpec, request: Request):
             path = Path(parent) / name
             if not path.is_symlink() and not os.path.isjunction(path) and path.is_file() and path.resolve().is_relative_to(root.resolve()): paths.append(path)
     paths.sort(key=lambda p: p.relative_to(root).as_posix().casefold())
-    if not paths: raise HTTPException(422, '原始论文目录为空。')
+    if not paths:
+        if not combined_model: raise HTTPException(422, '原始论文目录为空。')
+        batch = {'id': uuid4().hex, 'revision': 0, 'root_name': 'originals', 'kind': 'combined', 'model_name': combined_model, 'project_id': spec.project_id, 'state': 'queued', 'created': time.time(), 'files': []}
+        try:
+            store.create(batch)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        request.app.state.conversions.wakeup.set()
+        return store.public(batch)
     try:
         conversions = data_directory() / 'documents' / 'conversions'
         work, rest = [], []
@@ -206,6 +351,9 @@ def convert_originals(spec: LocalBatchSpec, request: Request):
         runner = request.app.state.conversions
         def mark_local(b):
             b['local_originals'] = True
+            if combined_model:
+                b['kind'] = 'combined'
+                b['model_name'] = combined_model
             for item in b['files']:
                 item['output'] = item['path'] + '.md'
         batch = store.update(batch['id'], mark_local)
@@ -255,9 +403,10 @@ def upload_file(batch_id: str, file_id: str, request: Request, file: UploadFile 
     with runner.lock:
         batch = batch_for(batch_id)
         item = item_for(batch, file_id)
-        if batch['state'] != 'uploading' or item['state'] != 'waiting':
+        if batch.get('kind') == 'preprocess' or batch['state'] != 'uploading' or item['state'] != 'waiting':
             raise HTTPException(409, '此文件不再等待上传。')
         runner._change_item(batch_id, file_id, state='uploading')
+        runner.inflight_uploads += 1
     temp = runner.directory(batch_id) / f'{file_id}.upload'
     try:
         size, digest = 0, sha256()
@@ -284,6 +433,8 @@ def upload_file(batch_id: str, file_id: str, request: Request, file: UploadFile 
         if isinstance(exc, OSError): raise HTTPException(507, '磁盘空间不足或文件写入失败。') from None
         raise
     finally:
+        with runner.lock:
+            runner.inflight_uploads -= 1
         file.file.close()
 
 
@@ -292,6 +443,7 @@ def start_batch(batch_id: str, request: Request):
     runner = request.app.state.conversions
     with runner.lock:
         batch = batch_for(batch_id)
+        if batch.get('kind') == 'preprocess': raise HTTPException(409, '分析批次无需上传或启动。')
         if batch['state'] != 'uploading': return store.public(batch)
         def start(b):
             b['state'] = 'queued'
@@ -324,6 +476,7 @@ def cancel_batch(batch_id: str, request: Request):
 
 def artifact(request, batch_id, file_id):
     batch = batch_for(batch_id)
+    if batch.get('kind') == 'preprocess': raise HTTPException(409, '分析批次不提供转换文件。')
     item = item_for(batch, file_id)
     if item['state'] not in ('succeeded', 'partial'): raise HTTPException(409, '此文件尚无可用 Markdown。')
     path = request.app.state.conversions.directory(batch_id) / f'{file_id}.md'
@@ -333,29 +486,49 @@ def artifact(request, batch_id, file_id):
 
 @router.get('/{batch_id}/files/{file_id}/preview')
 def preview(batch_id: str, file_id: str, request: Request):
-    batch, item, path = artifact(request, batch_id, file_id)
-    # One bounded preview, no all-batch content in frontend memory.
-    with path.open(encoding='utf-8') as source:
-        text = source.read(64001)
-    metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+    with request.app.state.conversions.lock:
+        batch, item, path = artifact(request, batch_id, file_id)
+        with path.open(encoding='utf-8') as source:
+            text = source.read(64001)
+        metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
     return {'markdown': text[:64000], 'truncated': len(text) > 64000,
             'mapping': metadata.get('mapping', []), 'warnings': metadata.get('warnings', [])}
 
 
 @router.get('/{batch_id}/files/{file_id}/markdown')
 def markdown(batch_id: str, file_id: str, request: Request):
-    _, item, path = artifact(request, batch_id, file_id)
-    return FileResponse(path, media_type='text/markdown; charset=utf-8', filename=PurePosixPath(item['output']).name)
+    runner = request.app.state.conversions
+    with runner.lock:
+        if not runner.downloads.acquire(blocking=False): raise HTTPException(409, '正在下载其他结果，请稍后重试。')
+        try:
+            _, item, path = artifact(request, batch_id, file_id)
+            return ConversionDownload(path, media_type='text/markdown; charset=utf-8',
+                                      filename=PurePosixPath(item['output']).name, release=runner.downloads.release)
+        except BaseException:
+            runner.downloads.release()
+            raise
 
 
 @router.get('/{batch_id}/zip')
 def archive(batch_id: str, request: Request):
-    batch = batch_for(batch_id)
-    if batch['state'] not in store.TERMINAL: raise HTTPException(409, '请等待批次结束后下载 ZIP。')
-    ready = [f for f in batch['files'] if f['state'] in ('succeeded', 'partial')]
-    if not ready: raise HTTPException(409, '此批次没有可下载的结果。')
     runner = request.app.state.conversions
-    if not runner.downloads.acquire(blocking=False): raise HTTPException(409, '正在生成其他 ZIP，请稍后重试。')
+    with runner.lock:
+        if not runner.downloads.acquire(blocking=False): raise HTTPException(409, '正在下载其他结果，请稍后重试。')
+        try:
+            batch = batch_for(batch_id)
+        except BaseException:
+            runner.downloads.release()
+            raise
+    if batch.get('kind') == 'preprocess':
+        runner.downloads.release()
+        raise HTTPException(409, '分析批次不提供转换文件。')
+    if batch['state'] not in store.TERMINAL:
+        runner.downloads.release()
+        raise HTTPException(409, '请等待批次结束后下载 ZIP。')
+    ready = [f for f in batch['files'] if f['state'] in ('succeeded', 'partial') and f['format'] != 'md']
+    if not ready:
+        runner.downloads.release()
+        raise HTTPException(409, '此批次没有可下载的结果。')
     directory = runner.directory(batch_id)
     output = directory / f'{uuid4().hex}.zip'
     try:
@@ -370,8 +543,8 @@ def archive(batch_id: str, request: Request):
                 zipped.writestr(base + '.metadata.json', json.dumps(metadata, ensure_ascii=False, indent=2))
             zipped.writestr(batch['root_name']+'-Markdown/conversion-manifest.json', json.dumps(store.public(batch), ensure_ascii=False, indent=2))
     except BaseException:
-        output.unlink(missing_ok=True)
+        try: output.unlink(missing_ok=True)
+        finally: runner.downloads.release()
         raise
-    finally:
-        runner.downloads.release()
-    return FileResponse(output, media_type='application/zip', filename=batch['root_name']+'-Markdown.zip', background=BackgroundTask(output.unlink, missing_ok=True))
+    return ConversionDownload(output, media_type='application/zip', filename=batch['root_name']+'-Markdown.zip',
+                              release=runner.downloads.release, temporary=True)

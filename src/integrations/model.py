@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 PROMPT_DIR = Path(__file__).resolve().parents[1] / 'prompts'
 PROMPT_IDS = frozenset({
     'runtime/dispatcher',
+    'literature/preprocesser',
     'literature/background_investigator',
     'literature/planner',
     'literature/researcher',
@@ -36,6 +37,7 @@ DEFAULT_TEMPLATE_CONTEXT = {
     'research_mode': 'auto',
     'available_tools': [],
     'native_tool_decision': False,
+    'local_capable': False,
 }
 
 # These nodes return bounded decisions or tool choices. Writing stages are left

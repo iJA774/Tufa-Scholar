@@ -173,6 +173,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def _model_result(role, payload, system=''):
         question = str(payload.get('question', ''))
         folded = question.casefold()
+        if not role and 'markdown' in payload:
+            return {'domains': ['模型评估'], 'tags': ['准确率'], 'description': '测试准确率'}
         if role == 'dispatcher':
             direct = folded.startswith('direct:')
             quick_mode = '当前是快速探索模式' in system
@@ -231,6 +233,22 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 item.get('source_level') in {'web_content', 'web_snippet'} if mode == 'web'
                 else item.get('source_level') not in {'web_content', 'web_snippet'}
             )]
+            if payload.get('phase') == 'act' and payload.get('local_domains') and not matching:
+                documents = [
+                    doc for result in payload.get('tool_results', [])
+                    if result.get('tool') == 'select_local_domains'
+                    for doc in result.get('documents', [])
+                ]
+                if documents:
+                    selected = next((doc for doc in documents if 'accuracy' in doc['title'].casefold()), documents[0])
+                    return {
+                        'action': 'tool', 'tool_name': 'read_local_markdown',
+                        'arguments': {'query': question, 'document_id': selected['document_id']},
+                    }
+                return {
+                    'action': 'tool', 'tool_name': 'select_local_domains',
+                    'arguments': {'domains': payload['local_domains'][:1]},
+                }
             if payload.get('phase') == 'act' and candidates and not matching:
                 return {
                     'action': 'tool',

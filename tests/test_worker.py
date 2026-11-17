@@ -12,31 +12,6 @@ from src.persistence.storage import initialize_storage
 
 
 class WorkerTests(unittest.TestCase):
-    def test_local_paper_context_contains_only_latest_filenames_in_scope(self):
-        from apps.worker.__main__ import _local_papers
-
-        rows = [
-            {'id': 1, 'title': 'private title one', 'versions': [
-                {'filename': 'old.pdf'}, {'filename': 'latest.pdf'},
-            ]},
-            {'id': 2, 'title': 'private title two', 'versions': [
-                {'filename': 'shared.pdf'},
-            ]},
-            {'id': 3, 'title': 'no file', 'versions': []},
-            {'id': 4, 'title': 'outside snapshot', 'versions': [
-                {'filename': 'outside.pdf'},
-            ]},
-        ]
-        with patch.object(repository, 'list_papers', return_value=rows):
-            project_names = _local_papers(7, 'local', [])
-            collection_names = _local_papers(7, 'collection', [2, 1, 4, 3])
-
-        self.assertEqual(project_names, ['latest.pdf', 'shared.pdf', 'outside.pdf'])
-        self.assertEqual(collection_names, ['shared.pdf', 'latest.pdf', 'outside.pdf'])
-        self.assertNotIn('private title one', str(collection_names))
-        self.assertNotIn('old.pdf', str(project_names))
-        self.assertNotIn('no file', str(collection_names))
-
     def test_chat_history_is_loaded_and_stage_callback_persists(self):
         from apps.worker.__main__ import run_once
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
@@ -52,12 +27,13 @@ class WorkerTests(unittest.TestCase):
                 observed.append((research, history, repository.get_task(current['run_id'])['stage']))
                 return 'answer', []
             current = first
-            with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', wraps=repository.task_history) as load:
+            with patch('src.agents.literature.run', side_effect=agent), patch.object(repository, 'task_history', wraps=repository.task_history) as load, patch.object(repository, 'list_papers') as list_papers:
                 self.assertTrue(run_once())
                 self.assertEqual(load.call_count, 1)
+                list_papers.assert_not_called()
             self.assertEqual(observed[0][2], 'dispatcher')
             self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
-            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'local_papers', 'network_search', 'local_literature'})
+            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'})
             self.assertEqual(observed[0][0]['research_mode'], 'auto')
             self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
             self.assertEqual([n['task'] for n in repository.get_task(first['run_id'])['subtasks']], ['topic'])

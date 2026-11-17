@@ -158,13 +158,161 @@ class ConversionApiTest(unittest.TestCase):
         return batch
 
     def finish(self,batch):
-        self.client.post(f'/conversion-batches/{batch["id"]}/start')
+        if batch.get('kind') != 'preprocess':
+            self.client.post(f'/conversion-batches/{batch["id"]}/start')
         deadline = time.monotonic()+65
         while time.monotonic() < deadline:
             value = self.client.get(f'/conversion-batches/{batch["id"]}').json()
             if value['state'] in store.TERMINAL: return value
             time.sleep(.1)
         self.fail('batch did not reach terminal state')
+
+    def test_prepare_converts_then_classifies_and_reuses(self):
+        from src.agents.preprocesser import Classification
+        root = Path(self.tmp.name) / 'documents' / 'originals'
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'notes.txt').write_text('A research document.', encoding='utf-8')
+        result = Classification(domains=['物理'], tags=['测试'], description='研究材料')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            self.assertNotEqual(self.client.post('/conversion-batches/prepare', content='{}', headers={'Content-Type': 'text/plain'}).status_code, 201)
+            response = self.client.post('/conversion-batches/prepare', json={})
+            self.assertEqual(response.status_code, 201, response.text)
+            batch = self.finish(response.json())
+            self.assertEqual(batch['state'], 'completed')
+            self.assertEqual([i['format'] for i in batch['files']], ['txt', 'md'])
+            self.assertEqual(batch['files'][1]['classification']['domains'], ['物理'])
+            self.assertEqual(self.client.get(f"/conversion-batches/{batch['id']}/files/{batch['files'][0]['id']}/markdown").status_code, 200)
+            again = self.finish(self.client.post('/conversion-batches/prepare', json={}).json())
+            self.assertEqual(again['files'][-1]['code'], 'already_classified')
+            self.assertEqual(classify.call_count, 1)
+
+    def test_prepare_pdf_reuse_links_project_and_collection(self):
+        from src.agents.preprocesser import Classification
+        from src.literature.markdown_corpus import select_domains, read_markdown
+        from src.tools.registry import ToolContext
+        a = self.client.post('/projects', json={'name': 'A'}).json()['id']
+        b = self.client.post('/projects', json={'name': 'B'}).json()['id']
+        c = self.client.post('/projects', json={'name': 'C'}).json()['id']
+        root = Path(self.tmp.name) / 'documents' / 'originals'
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'paper.pdf').write_bytes(pdf_fixture())
+        result = Classification(domains=['物理'], tags=['测试'], description='研究材料')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            first = self.finish(self.client.post('/conversion-batches/prepare', json={'project_id': a}).json())
+            paper_id = first['files'][0]['paper_id']
+            self.assertIsNotNone(paper_id)
+            second = self.finish(self.client.post('/conversion-batches/prepare', json={'project_id': b}).json())
+            self.assertEqual(second['files'][0]['paper_id'], paper_id)
+            self.assertEqual(second['files'][-1]['code'], 'already_classified')
+            self.assertEqual(classify.call_count, 1)
+            docs = select_domains(ToolContext(b, 'collection', (paper_id,)), ['物理'], 0)['documents']
+            self.assertEqual(len(docs), 1)
+            fragments = read_markdown(ToolContext(b, 'collection', (paper_id,)), docs[0]['document_id'], 'Traceable', 0)
+            self.assertTrue(fragments)
+            self.assertEqual(fragments[0]['paper_id'], paper_id)
+            self.assertEqual(select_domains(ToolContext(c, 'local'), ['物理'], 0)['documents'], [])
+            self.assertEqual(select_domains(ToolContext(b, 'collection', (paper_id + 1000,)), ['物理'], 0)['documents'], [])
+
+    def test_preprocess_logs_schema_failure_without_document_or_provider_text(self):
+        from src.integrations.model import StructuredOutputError
+
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'private-filename.md').write_text('private document text', encoding='utf-8')
+        model = {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}
+        failure = StructuredOutputError('private provider response')
+        with patch.dict(os.environ, model), patch('src.agents.preprocesser.classify_markdown', side_effect=failure):
+            with self.assertLogs('tufa.api', level='INFO') as captured:
+                created = self.client.post('/conversion-batches/preprocess', json={}).json()
+                result = self.finish(created)
+        item = result['files'][0]
+        self.assertEqual(item['state'], 'failed')
+        self.assertEqual(item['code'], 'preprocess_invalid_output')
+        line = next(line for line in captured.output if 'preprocess_item failed' in line)
+        self.assertIn(f"batch_id={result['id']} file_id={item['id']}", line)
+        self.assertIn('stage=classify code=preprocess_invalid_output', line)
+        for private in ('private-filename', 'private document text', 'private provider response'):
+            self.assertNotIn(private, line)
+
+    def test_preprocess_incremental_and_retry(self):
+        from src.agents.preprocesser import Classification
+        from src.persistence.document_classifications import get_classification
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'nested').mkdir()
+        doc = root / 'nested' / 'paper.md'
+        doc.write_text('original markdown', encoding='utf-8')
+        result = Classification(domains=['物理', '材料'], tags=['测试'], description='研究材料')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            response = self.client.post('/conversion-batches/preprocess', json={})
+            self.assertEqual(response.status_code, 201, response.text)
+            batch = self.finish(response.json())
+            self.assertEqual(batch['kind'], 'preprocess')
+            self.assertEqual(batch['files'][0]['classification']['domains'], ['物理', '材料'])
+            self.assertEqual(get_classification('nested/paper.md')['description'], '研究材料')
+            again = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(again['counts']['skipped'], 1)
+            self.assertEqual(classify.call_count, 1)
+            doc.write_text('changed', encoding='utf-8')
+            classify.side_effect = RuntimeError('secret upstream content')
+            failed = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(failed['counts']['failed'], 1)
+            self.assertNotIn('secret', str(failed))
+            classify.side_effect = None
+            retried = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(retried['counts']['succeeded'], 1)
+            self.assertEqual(doc.read_text(encoding='utf-8'), 'changed')
+
+    def test_preprocess_requires_json_and_nonempty_document(self):
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'empty.md').write_text('\ufeff  \n', encoding='utf-8')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown') as classify:
+            self.assertNotEqual(self.client.post('/conversion-batches/preprocess', content='{}', headers={'Content-Type': 'text/plain'}).status_code, 201)
+            self.assertNotEqual(self.client.post('/conversion-batches/preprocess', content='{}').status_code, 201)
+            self.assertFalse(store.active())
+            batch = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(batch['counts']['failed'], 1)
+            classify.assert_not_called()
+
+    def test_preprocess_reuses_duplicate_content_across_paths(self):
+        from src.agents.preprocesser import Classification
+        from src.persistence.document_classifications import get_classification
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        (root / 'a.md').write_text('same document', encoding='utf-8')
+        (root / 'b.md').write_text('same document', encoding='utf-8')
+        result = Classification(domains=['物理'], tags=['测试'], description='研究')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            batch = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(batch['counts']['succeeded'], 1)
+            self.assertEqual(batch['counts']['skipped'], 1)
+            self.assertEqual(classify.call_count, 1)
+            self.assertEqual(get_classification('a.md')['domains'], ['物理'])
+            self.assertEqual(get_classification('b.md')['domains'], ['物理'])
+            (root / 'c.md').write_text('same document', encoding='utf-8')
+            again = self.finish(self.client.post('/conversion-batches/preprocess', json={}).json())
+            self.assertEqual(again['counts']['skipped'], 3)
+            self.assertEqual(classify.call_count, 1)
+            self.assertEqual(get_classification('c.md')['tags'], ['测试'])
+
+    def test_preprocess_prioritizes_new_after_many_indexed(self):
+        from src.agents.preprocesser import Classification
+        from src.persistence.document_classifications import upsert_classification
+        root = Path(self.tmp.name) / 'documents' / 'conversions'
+        result = Classification(domains=['物理'], tags=['测试'], description='研究')
+        for i in range(101):
+            name = f'{i:03}.md'
+            (root / name).write_text('old', encoding='utf-8')
+            upsert_classification(name, sha256(b'old').hexdigest(), result.model_dump())
+        (root / 'new.md').write_text('new', encoding='utf-8')
+        with patch.dict(os.environ, {'OPENAI_MODEL': 'test-model', 'OPENAI_BASE_URL': 'http://localhost:1234/v1'}), patch('src.agents.preprocesser.classify_markdown', return_value=result) as classify:
+            response = self.client.post('/conversion-batches/preprocess', json={})
+            self.assertEqual(response.status_code, 201, response.text)
+            batch = self.finish(response.json())
+            self.assertEqual(batch['total'], 100)
+            self.assertEqual(batch['counts']['succeeded'], 1)
+            self.assertEqual(classify.call_count, 1)
+            self.assertTrue(any(item['path'] == 'new.md' and item['state'] == 'succeeded' for item in batch['files']))
+            self.assertTrue(any(item.get('classification') for item in batch['files'] if item['state'] == 'skipped'))
+            self.assertEqual(self.client.post(f"/conversion-batches/{batch['id']}/start").status_code, 409)
+            self.assertEqual(self.client.get(f"/conversion-batches/{batch['id']}/zip").status_code, 409)
 
     def test_local_originals_conversion_and_existing_markdown(self):
         root = Path(self.tmp.name) / 'documents'
@@ -339,11 +487,11 @@ class ConversionApiTest(unittest.TestCase):
         papers = repo.local_search(a,'Traceable')
         self.assertEqual(len(papers),1)
         self.assertEqual(repo.local_search(b,'Traceable'),[])
-        from src.tools.registry import ToolContext, ToolRegistry
-        evidence = ToolRegistry().invoke('collect_evidence',{'query':'Traceable','papers':papers},context=ToolContext(a,'local'))
+        from src.literature.evidence import collect_evidence
+        evidence = collect_evidence(a, 'local', (), 'Traceable', papers)
         self.assertEqual({item['page'] for item in evidence},{1,2})
         self.assertTrue(all(item['paper_id']==papers[0]['id'] for item in evidence))
-        restricted = ToolRegistry().invoke('collect_evidence',{'query':'Traceable','papers':papers},context=ToolContext(b,'local'))
+        restricted = collect_evidence(b, 'local', (), 'Traceable', papers)
         self.assertEqual(restricted,[])
         paper_id = papers[0]['id']
         with connect_database() as db:

@@ -52,7 +52,6 @@ const nodeLabels: Record<string, string> = {
   supervisor: "研究调度",
   researcher: "搜索与证据整理",
   analyst: "证据分析",
-  coder: "研究检查",
   reporter: "报告整理",
 };
 
@@ -61,6 +60,8 @@ const toolLabels: Record<string, string> = {
   read_web_page: "读取网页",
   search_papers: "学术检索",
   search_local_papers: "检索本地文献",
+  select_local_domains: "查看研究领域文献",
+  read_local_markdown: "读取本地 Markdown",
   collect_evidence: "提取证据",
 };
 
@@ -170,13 +171,13 @@ function ActivityIcon({ event, complete, failed, playing }: { event: RunEvent; c
   if (failed) return <ActivityLottie animationData={alertCircleAnimation} mode="complete" visualState="failure" />;
 
   const mode = playing ? "loop" : "static";
-  if (tool === "read_web_page" || tool === "collect_evidence" || node === "analyst") {
+  if (tool === "read_web_page" || tool === "read_local_markdown" || tool === "collect_evidence" || node === "analyst") {
     return <ActivityLottie animationData={fileCheckAnimation} mode={mode} />;
   }
   if (tool.startsWith("search_") || node === "background_investigator" || node === "researcher") {
     return <ActivityLottie animationData={searchAnimation} mode={mode} />;
   }
-  if (["planner", "supervisor", "coder"].includes(node)) {
+  if (["planner", "supervisor"].includes(node)) {
     return <ActivityLottie animationData={gearLoadingAnimation} mode={mode} segment={gearAnimationSegment} />;
   }
   if (node === "reporter") {

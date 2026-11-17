@@ -9,6 +9,7 @@ ENV = {
     'openai_api_key': 'OPENAI_API_KEY',
     'openai_base_url': 'OPENAI_BASE_URL',
     'openai_model': 'OPENAI_MODEL',
+    'preprocesser_model': 'TUFA_PREPROCESSER_MODEL',
     'web_search_engine': 'SEARCH_API',
     'tavily_api_key': 'TAVILY_API_KEY',
     'infoquest_api_key': 'INFOQUEST_API_KEY',
@@ -62,6 +63,7 @@ def public_settings():
     key, key_source = _resolve('openai_api_key', local)
     url, url_source = _resolve('openai_base_url', local)
     model, model_source = _resolve('openai_model', local)
+    preprocesser_model, preprocesser_source = _resolve('preprocesser_model', local)
     engine, engine_source = _resolve_default('web_search_engine', local, 'duckduckgo')
     searx_url, searx_source = _resolve('searx_base_url', local)
     language, language_source = _resolve_default('wikipedia_lang', local, 'zh')
@@ -74,6 +76,7 @@ def public_settings():
             'model': {'base_url': url, 'base_url_source': url_source,
                       'model': model, 'model_source': model_source,
                       'key_configured': bool(key), 'key_source': key_source},
+            'preprocesser': {'model': preprocesser_model or model, 'model_source': preprocesser_source if preprocesser_model else 'default'},
             'web_search': {'engine': engine, 'engine_source': engine_source,
                            'providers': providers, 'searx_base_url': searx_url,
                            'searx_base_url_source': searx_source,
@@ -159,3 +162,9 @@ def web_search_config():
     requires_key = next(provider[2] for provider in SEARCH_PROVIDERS if provider[0] == engine)
     key = _resolve(engine + '_api_key', local)[0] if requires_key else None
     return {'engine': engine, 'api_key': key, 'base_url': base_url, 'wikipedia_lang': language}
+
+
+def preprocesser_config():
+    config = model_config()
+    config['model'] = _resolve('preprocesser_model', _local())[0] or config['model']
+    return config

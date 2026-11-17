@@ -45,6 +45,9 @@ def sample_web_page(content="Accuracy is 92% now."):
 
 class WorkflowFailureTests(unittest.TestCase):
     def setUp(self):
+        domains = patch("src.tools.local_markdown.list_local_domains", return_value=[])
+        domains.start()
+        self.addCleanup(domains.stop)
         self.tmp = tempfile.TemporaryDirectory()
         env = patch.dict(os.environ, {"TUFA_DATA_DIR": self.tmp.name}, clear=True)
         env.start()
@@ -152,7 +155,7 @@ class WorkflowFailureTests(unittest.TestCase):
 
         stages = []
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke:
-            content, evidence = self._invoke_run(Model(), source="local", retrieve=retrieve, on_stage=stages.append)
+            content, evidence = self._invoke_run(Model(), source="openalex", retrieve=retrieve, on_stage=stages.append)
             invoke_calls = [call.args[0] for call in invoke.call_args_list]
 
         act_calls = [item for item in researcher_calls if item[0]["phase"] == "act"]
@@ -234,7 +237,7 @@ class WorkflowFailureTests(unittest.TestCase):
             )
             invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
-        self.assertIn(("question as submitted", "all"), searched)
+        self.assertIn(("question as submitted", "openalex"), searched)
         self.assertLessEqual(len(searched), workflow.DEPTH_BUDGETS["standard"]["background_searches"])
         self.assertTrue(all(query_text == "question as submitted" for query_text, _ in searched))
         self.assertEqual(len([call for call in calls if call[0] == "literature/reporter"]), 1)
@@ -288,7 +291,7 @@ class WorkflowFailureTests(unittest.TestCase):
 
         with patch.object(workflow.registry, "invoke", wraps=workflow.registry.invoke) as invoke, \
              diagnostic_scope(run_id=42), self.assertLogs("tufa.agent", "WARNING") as logs:
-            content, evidence = self._invoke_run(Model(), source="local", retrieve=lambda project, query, source: {
+            content, evidence = self._invoke_run(Model(), source="openalex", retrieve=lambda project, query, source: {
                 "query": query, "source": source, "method": "fixture", "results": [paper], "warnings": [],
             })
             invoke_names = [call.args[0] for call in invoke.call_args_list]

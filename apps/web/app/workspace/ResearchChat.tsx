@@ -53,7 +53,6 @@ const stageText: Record<string, string> = {
   supervisor: "统筹研究步骤",
   researcher: "搜索与整理证据",
   analyst: "分析研究证据",
-  coder: "",
   reporter: "整理最终报告",
 };
 
@@ -200,7 +199,7 @@ function ModePicker({ mode, disabled, onModeChange }: { mode: ResearchMode; disa
   </div>;
 }
 
-const deepResearchNodes = new Set(["background_investigator", "planner", "supervisor", "researcher", "analyst", "coder", "reporter"]);
+const deepResearchNodes = new Set(["background_investigator", "planner", "supervisor", "researcher", "analyst", "reporter"]);
 
 function isDeepResearchRun(run?: Run, events: RunEvent[] = []) {
   if (!run) return false;
@@ -729,7 +728,7 @@ export default function ResearchChat({
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
                 return <div className={styles.citation} key={`${citation.id || index}-${index}`}>
                   {href ? <a href={href} target="_blank" rel="noopener noreferrer">{citation.title || `参考文献 ${index + 1}`} ↗</a> : <span>{citation.title || `参考文献 ${index + 1}`}</span>}
-                  {citation.id && ` [${citation.id}]`}{citation.page && ` · 第 ${citation.page} 页`}{citation.source_level && ["abstract", "web_snippet", "web_content"].includes(citation.source_level) && ` · ${webSourceLabel(citation.source_level)}`}{citation.provider && ` · ${citation.provider}`}{citation.retrieved_at && ` · 检索于 ${new Date(citation.retrieved_at).toLocaleString("zh-CN")}`}
+                  {citation.id && ` [${citation.id}]`}{citation.page && ` · 第 ${citation.page} 页`}{citation.source_level && ["abstract", "web_snippet", "web_content"].includes(citation.source_level) && ` · ${webSourceLabel(citation.source_level)}`}{citation.source_level === "local_markdown" && ` · 本地 Markdown，字符 ${citation.char_start}–${citation.char_end}`}{citation.provider && ` · ${citation.provider}`}{citation.retrieved_at && ` · 检索于 ${new Date(citation.retrieved_at).toLocaleString("zh-CN")}`}
                 </div>;
               })}
               {message.metadata?.report_id && <div className={styles.reportLinks}>

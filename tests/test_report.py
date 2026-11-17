@@ -4,6 +4,18 @@ from src.agents import literature, report
 
 
 class ReportValidationTests(unittest.TestCase):
+    def test_markdown_offsets_group_under_the_same_document(self):
+        section = {'title': 'Local notes', 'source_level': 'local_markdown', 'document_id': 'doc-a'}
+        evidence = [
+            {**section, 'id': 'm1', 'char_start': 0, 'char_end': 22},
+            {**section, 'id': 'm2', 'char_start': 80, 'char_end': 99},
+        ]
+        content = report.numbered_references('Terms [[m1]], results [[m2]].', evidence)
+        self.assertIn(r'Terms \[1\], results \[1\].', content)
+        self.assertEqual(content.count('Local notes'), 1)
+        self.assertIn('本地 Markdown 字符区间 0–22', content)
+        self.assertIn('本地 Markdown 字符区间 80–99', content)
+
     def setUp(self):
         self.evidence = {
             'paper': {

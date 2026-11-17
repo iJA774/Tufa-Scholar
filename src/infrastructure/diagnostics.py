@@ -34,6 +34,8 @@ _SENSITIVE = {'api_key', 'apikey', 'authorization', 'proxy_authorization', 'pass
 
 
 def record_failure(*, kind, payload, schema, response=None, errors=None, context=None, secrets=()):
+    if _scope.get().get("suppress_artifacts"):
+        return ""
     try:
         from src.infrastructure.settings import ENV, SECRET_FIELDS, _local
         known = set(secrets or ())

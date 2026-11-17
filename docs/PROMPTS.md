@@ -1,6 +1,6 @@
 # 提示词与节点契约
 
-提示词正文集中在 `src/prompts/`，按调用 ID 加载。八个工作流节点中，`supervisor` 与占位 `coder` 是确定性节点，不调用模型；其余模型调用使用下表六个 ID。结构、字段范围和证据检查由 Python 代码负责，提示词不替代代码校验。
+提示词正文集中在 `src/prompts/`，按调用 ID 加载。研究工作流中的 `supervisor` 负责确定性调度，其余六个节点调用模型。`preprocesser` 独立处理本地 Markdown 分类。结构、字段范围和证据检查由 Python 代码负责。
 
 | Prompt ID | 文件 | 职责与输出 |
 |---|---|---|
@@ -10,17 +10,19 @@
 | `literature/researcher` | `literature/researcher.md` | act 阶段通过原生 Function Calling 选择工具；draft 阶段根据已有证据写初稿。 |
 | `literature/analyst` | `literature/analyst.md` | 审查本轮初稿是否回应要求、引用是否有据，并输出覆盖、缺口和下一步。 |
 | `literature/reporter` | `literature/reporter.md` | 根据各轮材料自由组织 Markdown 报告。论文主线比较研究方法、实验设计和结论，网页主线组织可核查事实和来源。证据不足时具体说明影响。 |
+| `literature/preprocesser` | `literature/preprocesser.md` | 从本地 Markdown 提取多个研究领域、标签和简短描述。 |
 
 ## 结构化数据
 
-提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息。每次请求都注入带时区的北京时间 `CURRENT_TIME`。分流和背景调查使用由代码 schema 生成的 `OUTPUT_SCHEMA`，researcher act 使用原生 Function Calling，其余生成阶段使用 Markdown 文本。节点角色、搜索模式、研究模式和可用工具由代码提供。问题、历史、检索材料和本地文件名只作为 user JSON 数据发送。
+提示词只允许从受信的 `PROMPT_IDS` 白名单加载，使用 Jinja2 `StrictUndefined` 渲染系统消息。每次请求都注入带时区的北京时间 `CURRENT_TIME`。分流、背景调查和文档分类使用由代码 schema 生成的 `OUTPUT_SCHEMA`，researcher act 使用原生 Function Calling，其余研究生成阶段使用 Markdown 文本。问题、历史、检索材料和本地文档只作为 user JSON 数据发送。
 
-各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录；候选只在背景筛选或 researcher 当前来源字段按需发送。planner 和 reporter 使用精简 background。Planner 的 `local_papers` 是用户数据，只出现在 JSON 输入中。researcher 的 act 阶段仅提供当前轮的目标、计划、候选和证据预览及近期工具反馈；达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID，不授予工具权限。reporter 汇总各轮可复用的草稿内容、审查和累计证据；超过[证据额度](ARCHITECTURE.md#工作流预算)时保留各轮补查材料并提供 `evidence_omitted_count`。Reporter 只能引用可见证据，草稿只保留引用可核对的结论，不附候选池。
+各节点只接收本阶段所需的数据。background 保留筛选总结、缺口和已筛选候选 ID，不重复嵌入候选记录。planner 和 reporter 使用精简 background。researcher 的 act 阶段接收当前轮目标、计划、候选、证据预览及近期工具反馈。Jinja2 根据研究方向、本地来源开关和当前阶段选择指引。本地研究的领域名称通过 `local_domains` 传入，领域选择后通过工具反馈逐页披露文献元数据。达到上下文预算、工具预算或连续失败门槛后结束工具循环。draft 使用筛选后的证据片段和原引用 ID。reporter 汇总各轮草稿、审查和累计证据。超过[证据额度](ARCHITECTURE.md#工作流预算)时保留各轮补查材料并提供 `evidence_omitted_count`。
 
 | 结构 | 字段 |
 |---|---|
 | 分流 `DispatcherOutput` | `needs_research`、`reason`、`answer`。`auto` 下直接回答时 answer 非空并由 dispatcher 结束；`quick` 也要求 answer 非空，由代码忽略 `needs_research` 并强制直接结束；`deep` 不调用 dispatcher 模型。 |
 | 背景调查 `BackgroundOutput` | `source`（`web` 或 `paper`）、`queries`、`selected_candidate_ids`、`summary`、`gaps`。查询预算和每次搜索结果上限见[工作流预算表](ARCHITECTURE.md#工作流预算)；筛选阶段只能选择实际返回的候选。 |
+| 文档分类 | `domains` 为一项或多项研究领域，`tags` 为主题标签，`description` 为最长 20 字的单行描述。 |
 | 计划 Markdown 与调度控制块 | 正文由模型自由组织。末尾 `tufa-control` 块包含 `requirements`、`plan`、`source`、`action`、`rationale` 和深入档的 `completion_confirmed`，按 `PlannerOutput` 校验。首轮必须研究且计划非空。 |
 | 工具决策 | 模型接口返回原生函数调用或表示本轮结束。函数名和参数须通过目录及范围校验。`reason` 是用户可见的简短操作目的，执行前从业务参数中取出。 |
 | 初稿 | 自由 Markdown 正文，在支持主张的段落、列表项或表格行内使用 `[[证据ID]]`。无引用的过程性缺口用 `> 局限：…`。 |
