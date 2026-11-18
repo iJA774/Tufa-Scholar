@@ -33,28 +33,43 @@ MAX_EVIDENCE_CONTEXT = 8
 MAX_EVIDENCE_TEXT = 9_600
 MAX_REPORT_EVIDENCE_CONTEXT = 48
 MAX_CANDIDATE_TEXT = 1_600
+FREE_RESEARCH_TOOLS = frozenset({"select_local_domains", "collect_evidence"})
+LOCAL_RESEARCH_TOOLS = frozenset({"select_local_domains", "read_local_markdown"})
 
 DEPTH_BUDGETS = {
     "light": {
         "rounds": 1, "actions_per_round": 4, "actions": 4,
-        "background_searches": 1, "decision_input_units": 10_000,
-        "cumulative_decision_input_units": 12_000,
+        "background_searches": 1, "local_actions": 2, "decision_input_units": 10_000,
+        "cumulative_decision_input_units": 48_000,
     },
     "standard": {
-        "rounds": 2, "actions_per_round": 6, "actions": 10,
-        "background_searches": 2, "decision_input_units": 10_000,
-        "cumulative_decision_input_units": 24_000,
+        "rounds": 2, "actions_per_round": 10, "actions": 20,
+        "background_searches": 1, "local_actions": 5, "decision_input_units": 10_000,
+        "cumulative_decision_input_units": 160_000,
     },
     "deep": {
-        "rounds": 4, "actions_per_round": 8, "actions": 24,
-        "background_searches": 4, "decision_input_units": 14_000,
-        "cumulative_decision_input_units": 60_000,
+        "rounds": 4, "actions_per_round": 15, "actions": 48,
+        "background_searches": 1, "local_actions": 8, "decision_input_units": 14_000,
+        "cumulative_decision_input_units": 400_000,
     },
 }
 
 
 def _budget(state):
     return DEPTH_BUDGETS[_depth(state)]
+
+
+def _local_action_limit(state):
+    research = state["research"]
+    if (research["source"] in {"auto", "all"}
+            and research.get("network_search", True) and research.get("local_literature", True)):
+        return _budget(state)["local_actions"]
+    return 0
+
+
+def _research_tool_budget_exhausted(state):
+    return (state.get("research_actions_used", 0) >= _budget(state)["actions"]
+            and state.get("research_local_actions_used", 0) >= _local_action_limit(state))
 
 
 def _depth(state):
@@ -249,6 +264,7 @@ class State(TypedDict, total=False):
     core_requirements: list
     tool_results: list
     research_actions_used: int
+    research_local_actions_used: int
     research_decision_input_units: int
     research_context_limit_reached: bool
     research_stop_reason: str
@@ -564,8 +580,6 @@ def _candidate_view(item, mode, *, include_text=True, text_limit=MAX_CANDIDATE_T
         result["abstract"] = str(item["abstract"])[:text_limit]
     if item.get("content") and include_text:
         result["content"] = str(item["content"])[:text_limit]
-    if item.get("next_offset") is not None:
-        result["next_offset"] = item["next_offset"]
     if include_text and item.get("content_blocks"):
         blocks = []
         budget = text_limit
@@ -576,7 +590,6 @@ def _candidate_view(item, mode, *, include_text=True, text_limit=MAX_CANDIDATE_T
             blocks.append({
                 "content": body,
                 "offset": block.get("content_offset"),
-                "next_offset": block.get("next_offset"),
                 "source_level": block.get("source_level"),
             })
             budget -= len(body)
@@ -611,7 +624,6 @@ def _pool_add(pools, mode, items):
             block = {
                 "content": item["content"],
                 "content_offset": item.get("content_offset"),
-                "next_offset": item.get("next_offset"),
                 "source_level": item.get("source_level"),
             }
             blocks = list(item.get("content_blocks", []))
@@ -624,7 +636,7 @@ def _pool_add(pools, mode, items):
             for name, value in item.items():
                 if name == "content_blocks":
                     continue
-                if value is not None and (not old.get(name) or name in {"content", "source_level", "content_offset", "next_offset"}):
+                if value is not None and (not old.get(name) or name in {"content", "source_level", "content_offset"}):
                     old[name] = value
             merged_blocks = old_blocks
             for block in item.get("content_blocks", []):
@@ -976,7 +988,6 @@ def _helper_catalog(research, mode):
                 "properties": {
                     "candidate_id": {"type": "string"},
                     "url": {"type": "string", "maxLength": 4096},
-                    "offset": {"type": "integer", "minimum": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 4000},
                 },
                 "anyOf": [{"required": ["candidate_id"]}, {"required": ["url"]}],
@@ -1126,19 +1137,18 @@ def _invoke_tool(state, mode, tool_name, arguments):
             "url": original.get("url") or args["url"],
             "original_url": original.get("original_url") or args["url"],
             "content": content,
-            "content_offset": result.get("offset", args.get("offset", 0)),
-            "next_offset": result.get("next_offset"),
+            "content_offset": 0,
             "source_level": "web_content",
             "provider": original.get("provider") or "web_reader",
             "retrieved_at": result.get("retrieved_at") or original.get("retrieved_at") or "",
         }
         pools = dict(state.get("candidate_pools", {}))
         _pool_add(pools, "web", [page_item])
-        tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "candidate_id": page_item["candidate_id"], "offset": page_item["content_offset"], "next_offset": page_item["next_offset"], "content": content[:MAX_CANDIDATE_TEXT]}]
+        tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "candidate_id": page_item["candidate_id"], "content": content[:MAX_CANDIDATE_TEXT], "truncated": result.get("truncated", False)}]
         read_web_pages = list(state.get("read_web_pages", []))
         if read_key is not None and read_key not in read_web_pages:
             read_web_pages.append(read_key)
-        return {"candidate_pools": pools, "tool_results": tool_results, "read_web_pages": read_web_pages}, {"candidate_id": page_item["candidate_id"], "content": content[:MAX_CANDIDATE_TEXT], "offset": page_item["content_offset"], "next_offset": page_item["next_offset"], "truncated": result.get("truncated", False)}
+        return {"candidate_pools": pools, "tool_results": tool_results, "read_web_pages": read_web_pages}, tool_results[-1]
     if tool_name == "search_papers":
         result = registry.invoke(tool_name, args, context=context)
         items = result.get("results", [])
@@ -1466,7 +1476,7 @@ def _planner(state, on_stage):
     budget = _budget(state)
     if rounds and (
         state.get("research_context_limit_reached")
-        or state.get("research_actions_used", 0) >= budget["actions"]
+        or _research_tool_budget_exhausted(state)
     ):
         context_limited = bool(state.get("research_context_limit_reached"))
         return _planner_stop(
@@ -1648,16 +1658,15 @@ def _force_search_retry(state, mode, tried_queries):
 
 
 def _web_read_key(state, arguments):
-    """Return an in-memory identity for a candidate page slice, without logging it."""
+    """Return an in-memory identity for a candidate page, without logging it."""
     candidate_id = arguments.get("candidate_id")
-    offset = arguments.get("offset", 0)
-    if not isinstance(offset, int) or isinstance(offset, bool):
+    if "offset" in arguments:
         return None
     pool = state.get("candidate_pools", {}).get("web", [])
     candidate = next((item for item in pool if item.get("candidate_id") == candidate_id), None)
     url = (candidate or {}).get("url") or (candidate or {}).get("original_url")
     url = url or arguments.get("url") or candidate_id
-    return (str(url), offset) if url else None
+    return str(url) if url else None
 
 
 def _log_research_stop(reason, *, failed_reads, tool_actions, consecutive_failures):
@@ -1695,31 +1704,42 @@ def _researcher(state, on_stage):
             for query in item.get("queries", [])
         ]
     action_count = 0
+    local_action_count = 0
     actions_used = state.get("research_actions_used", 0)
+    local_actions_used = state.get("research_local_actions_used", 0)
     decision_input_units = state.get("research_decision_input_units", 0)
     budget = _budget(state)
     round_action_limit = budget["actions_per_round"]
+    local_action_limit = _local_action_limit(state)
+    free_requests = set()
     failure_message = (
         "研究决策输入达到估算上下文预算，已停止新增工具调用；以下仅整理已提取的证据。"
         if state.get("research_context_limit_reached")
         else ""
     )
     tools = _helper_catalog(state["research"], mode)
-    native_tools = _native_tool_specs(tools)
     local_domains = []
     if any(item["name"] == "select_local_domains" for item in tools):
         from src.tools.local_markdown import list_local_domains
         local_domains = [d for d in list_local_domains(_tool_context(state["research"], mode))[:200] if isinstance(d, str) and len(d) <= 200]
-    prompt_tools = [
-        {key: item[key] for key in ("name", "description") if key in item}
-        for item in tools
-    ]
-    while (
-        native_tools
-        and action_count < round_action_limit
-        and actions_used < budget["actions"]
-        and not state.get("research_context_limit_reached")
-    ):
+
+    def remaining_actions():
+        general = min(round_action_limit - action_count, budget["actions"] - actions_used)
+        local = min(local_action_limit - local_action_count, local_action_limit - local_actions_used)
+        return max(0, general), max(0, local) if local_domains else 0
+
+    while not state.get("research_context_limit_reached"):
+        general_remaining, local_remaining = remaining_actions()
+        available = [
+            tool for tool in tools
+            if (tool["name"] not in LOCAL_RESEARCH_TOOLS or local_domains)
+            and (tool["name"] in FREE_RESEARCH_TOOLS or general_remaining
+                 or (tool["name"] in LOCAL_RESEARCH_TOOLS and local_remaining))
+        ]
+        if not available:
+            break
+        native_tools = _native_tool_specs(available)
+        prompt_tools = [{"name": item["name"], "description": item["description"]} for item in available]
         payload = {
             "question": state["research"]["query"],
             "local_domains": local_domains,
@@ -1737,10 +1757,10 @@ def _researcher(state, on_stage):
             "evidence": _evidence_views(_select_evidence(state), text_limit=240),
             "tool_results": _compact_tool_results(state.get("tool_results", [])),
             "tool_feedback": state.get("errors", [])[-4:],
-            "calls_remaining": min(
-                round_action_limit - action_count,
-                budget["actions"] - actions_used,
-            ),
+            "calls_remaining": general_remaining,
+            "local_calls_remaining": local_remaining,
+            "free_tools": [item["name"] for item in available if item["name"] in FREE_RESEARCH_TOOLS],
+            "metered_tools": [item["name"] for item in available if item["name"] not in FREE_RESEARCH_TOOLS],
             "search_attempts": search_attempts,
             "search_failures": search_failures,
             "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
@@ -1771,7 +1791,7 @@ def _researcher(state, on_stage):
             _log_research_stop(
                 "decision_context_budget",
                 failed_reads=len(failed_web_reads),
-                tool_actions=action_count,
+                tool_actions=action_count + local_action_count,
                 consecutive_failures=0,
             )
             break
@@ -1802,8 +1822,7 @@ def _researcher(state, on_stage):
             if (
                 search_failures
                 and search_attempts < 3
-                and action_count < round_action_limit
-                and actions_used < budget["actions"]
+                and general_remaining
                 and not state.get("research_context_limit_reached")
             ):
                 name, args = _force_search_retry(state, mode, tried_queries)
@@ -1822,6 +1841,7 @@ def _researcher(state, on_stage):
                         reason="改写查询以恢复失败的检索。",
                     )
                     state.update(patch)
+                    free_requests = {key for key in free_requests if key[0] != "collect_evidence"}
                     consecutive_search_failures = 0
                     consecutive_web_read_failures = 0
                     consecutive_duplicate_reads = 0
@@ -1834,7 +1854,7 @@ def _researcher(state, on_stage):
                         _log_research_stop(
                             "consecutive_search_failures",
                             failed_reads=len(failed_web_reads),
-                            tool_actions=action_count,
+                            tool_actions=action_count + local_action_count,
                             consecutive_failures=consecutive_search_failures,
                         )
                         break
@@ -1845,13 +1865,28 @@ def _researcher(state, on_stage):
         if state.get("research_context_limit_reached"):
             failure_message = "研究决策输入达到估算上下文预算，已停止新增工具调用；以下仅整理已提取的证据。"
             break
-        if result.tool_name == "read_web_page":
-            read_key = _web_read_key(state, result.arguments)
-            if read_key in failed_web_reads or read_key in set(state.get("read_web_pages", [])):
+        if result.tool_name not in {item["name"] for item in available}:
+            state["errors"].append(_safe_error("researcher", "tool_not_available", "该工具当前不可用，请按剩余额度选择可用工具。"))
+            break
+        if result.tool_name in FREE_RESEARCH_TOOLS:
+            request_key = (result.tool_name, json.dumps(result.arguments, sort_keys=True))
+            if request_key in free_requests:
+                state["errors"].append(_safe_error("researcher", "duplicate_free_tool", "本轮已执行同样的免额度请求。"))
+                continue
+            free_requests.add(request_key)
+        else:
+            if result.tool_name in LOCAL_RESEARCH_TOOLS and local_remaining:
+                local_action_count += 1
+                local_actions_used += 1
+                state["research_local_actions_used"] = local_actions_used
+            else:
                 action_count += 1
                 actions_used += 1
                 state["research_actions_used"] = actions_used
-                state["errors"].append(_safe_error("researcher", "duplicate_web_read_skipped", "已跳过同一网页候选与字符区间的重复读取请求。"))
+        if result.tool_name == "read_web_page":
+            read_key = _web_read_key(state, result.arguments)
+            if read_key in failed_web_reads or read_key in set(state.get("read_web_pages", [])):
+                state["errors"].append(_safe_error("researcher", "duplicate_web_read_skipped", "已跳过同一网页的重复读取请求。"))
                 consecutive_duplicate_reads += 1
                 if consecutive_web_read_failures:
                     consecutive_web_read_failures += 1
@@ -1859,7 +1894,7 @@ def _researcher(state, on_stage):
                     _log_research_stop(
                         "consecutive_web_read_failures",
                         failed_reads=len(failed_web_reads),
-                        tool_actions=action_count,
+                        tool_actions=action_count + local_action_count,
                         consecutive_failures=consecutive_web_read_failures,
                     )
                     break
@@ -1868,14 +1903,11 @@ def _researcher(state, on_stage):
                     _log_research_stop(
                         "duplicate_web_read",
                         failed_reads=len(failed_web_reads),
-                        tool_actions=action_count,
+                        tool_actions=action_count + local_action_count,
                         consecutive_failures=consecutive_duplicate_reads,
                     )
                     break
                 continue
-        action_count += 1
-        actions_used += 1
-        state["research_actions_used"] = actions_used
         try:
             if result.tool_name in {"search_web", "search_papers"}:
                 search_attempts += 1
@@ -1891,6 +1923,8 @@ def _researcher(state, on_stage):
                 reason=result.reason,
             )
             state.update(patch)
+            if result.tool_name in {"search_web", "search_papers", "read_web_page"}:
+                free_requests = {key for key in free_requests if key[0] != "collect_evidence"}
             consecutive_search_failures = 0
             consecutive_web_read_failures = 0
             consecutive_duplicate_reads = 0
@@ -1907,7 +1941,7 @@ def _researcher(state, on_stage):
                     _log_research_stop(
                         "consecutive_web_read_failures",
                         failed_reads=len(failed_web_reads),
-                        tool_actions=action_count,
+                        tool_actions=action_count + local_action_count,
                         consecutive_failures=consecutive_web_read_failures,
                     )
                     break
@@ -1919,7 +1953,7 @@ def _researcher(state, on_stage):
                     _log_research_stop(
                         "consecutive_search_failures",
                         failed_reads=len(failed_web_reads),
-                        tool_actions=action_count,
+                        tool_actions=action_count + local_action_count,
                         consecutive_failures=consecutive_search_failures,
                     )
                     break
@@ -1941,6 +1975,7 @@ def _researcher(state, on_stage):
         "tool_results": _compact_tool_results(state.get("tool_results", [])),
         "tool_feedback": state.get("errors", [])[-6:],
         "calls_remaining": 0,
+        "local_calls_remaining": 0,
         "prefer_primary_evidence": state.get("research", {}).get("prefer_primary_evidence", True),
         "relevance_filter": state.get("research", {}).get("relevance_filter", "standard"),
     }
@@ -1974,8 +2009,9 @@ def _researcher(state, on_stage):
         "current_findings": verified["findings"],
         "tool_results": state.get("tool_results", []),
         "research_actions_used": state.get("research_actions_used", 0),
+        "research_local_actions_used": state.get("research_local_actions_used", 0),
         "research_decision_input_units": state.get("research_decision_input_units", 0),
-        "round_tool_actions": action_count,
+        "round_tool_actions": action_count + local_action_count,
         "round_search_queries": round_search_queries,
         "research_context_limit_reached": state.get("research_context_limit_reached", False),
         "errors": state.get("errors", []),
@@ -2187,7 +2223,7 @@ def _warning_caveats(state, *, fallback=False):
         caveats.append("论文检索的部分外部来源失败，已保留可用结果，资料可能不完整。")
     if state.get("research_context_limit_reached"):
         caveats.append("研究决策输入达到本机估算上下文预算，已停止新增工具调用。本报告基于现有材料，收束原因是预算耗尽。")
-    elif state.get("research_actions_used", 0) >= _budget(state)["actions"]:
+    elif _research_tool_budget_exhausted(state):
         caveats.append("研究工具总预算已用完。本报告基于现有材料，收束原因是预算耗尽。")
     stop_reason = state.get("research_stop_reason")
     if stop_reason == "round_budget_exhausted":
@@ -2531,6 +2567,7 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
         "rounds": [],
         "tool_results": [],
         "research_actions_used": 0,
+        "research_local_actions_used": 0,
         "research_decision_input_units": 0,
         "research_context_limit_reached": False,
         "errors": [],

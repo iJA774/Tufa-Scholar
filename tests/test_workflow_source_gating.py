@@ -5,6 +5,47 @@ from src.agents import literature
 
 
 class SourceGatingWorkflowTests(unittest.TestCase):
+    def test_mixed_search_reserves_local_calls_after_general_budget_is_spent(self):
+        research = {
+            'project_id': 1, 'query': 'question', 'source': 'auto',
+            'network_search': True, 'local_literature': True, 'research_depth': 'standard',
+        }
+        state = {'research': research, 'research_actions_used': 19, 'research_local_actions_used': 3}
+        decisions = iter([
+            ('search_papers', {'query': 'test'}),
+            ('select_local_domains', {'domains': ['Area']}),
+            ('collect_evidence', {'query': 'test', 'candidate_ids': ['remote']}),
+            ('read_local_markdown', {'document_id': 'local', 'query': 'test'}),
+            ('read_local_markdown', {'document_id': 'local', 'query': 'other'}),
+        ])
+        snapshots = []
+
+        def model(_state, _prompt, payload, _schema, **kwargs):
+            if payload['phase'] == 'draft':
+                return '> 局限：资料不足。'
+            snapshots.append((payload['calls_remaining'], payload['local_calls_remaining'],
+                              set(payload['free_tools']), set(payload['metered_tools'])))
+            decision = next(decisions, None)
+            if decision is None:
+                return literature.ResearchActionOutput(action='finish')
+            name, arguments = decision
+            return literature.ResearchActionOutput(action='tool', tool_name=name, arguments=arguments)
+
+        with patch('src.tools.local_markdown.list_local_domains', return_value=['Area']), \
+             patch.object(literature, '_model', side_effect=model), \
+             patch.object(literature, 'structured_input_units', return_value=1), \
+             patch.object(literature, '_invoke_tool_with_events', return_value=({}, {})) as execute:
+            result = literature._researcher(state, None)
+        self.assertEqual([(general, local) for general, local, _, _ in snapshots],
+                         [(1, 2), (0, 2), (0, 2), (0, 2), (0, 1), (0, 0)])
+        self.assertEqual(snapshots[1][2], {'select_local_domains', 'collect_evidence'})
+        self.assertEqual(snapshots[1][3], {'read_local_markdown'})
+        self.assertEqual(snapshots[-1][3], set())
+        self.assertEqual(execute.call_count, 5)
+        self.assertEqual(result['research_actions_used'], 20)
+        self.assertEqual(result['research_local_actions_used'], 5)
+        self.assertEqual(result['round_tool_actions'], 3)
+
     def test_disabled_network_changes_mode_and_never_calls_background_web(self):
         research = {'project_id': 1, 'query': 'question', 'source': 'auto',
                     'network_search': False, 'local_literature': True}

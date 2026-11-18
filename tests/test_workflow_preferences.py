@@ -91,6 +91,8 @@ class ResearchPreferenceTests(unittest.TestCase):
                 return plan(requirements=["answer"], plan=["answer the question"], source="paper", action="research")
             if prompt_id == "literature/researcher":
                 if payload["phase"] == "act":
+                    if not payload["calls_remaining"]:
+                        return workflow.ResearchActionOutput(action="finish")
                     round_number = payload["current_round"]
                     action_count = actions_by_round.get(round_number, 0)
                     if actions_per_round is not None and action_count >= actions_per_round:
@@ -128,31 +130,31 @@ class ResearchPreferenceTests(unittest.TestCase):
 
     def test_depth_caps_bound_executed_rounds_actions_and_background_queries(self):
         expected_budgets = {
-            "light": {"rounds": 1, "actions_per_round": 4, "actions": 4, "background_searches": 1, "decision_input_units": 10_000, "cumulative_decision_input_units": 12_000},
-            "standard": {"rounds": 2, "actions_per_round": 6, "actions": 10, "background_searches": 2, "decision_input_units": 10_000, "cumulative_decision_input_units": 24_000},
-            "deep": {"rounds": 4, "actions_per_round": 8, "actions": 24, "background_searches": 4, "decision_input_units": 14_000, "cumulative_decision_input_units": 60_000},
+            "light": (1, 4, 4),
+            "standard": (1, 10, 20),
+            "deep": (1, 15, 48),
         }
-        expected_executed_actions = {"light": [4], "standard": [6, 4], "deep": [8, 8, 8]}
+        expected_executed_actions = {"light": [4], "standard": [10, 10], "deep": [15, 15, 15, 3]}
         for depth, expected_budget in expected_budgets.items():
             with self.subTest(depth=depth):
-                self.assertEqual(workflow.DEPTH_BUDGETS[depth], expected_budget)
+                background, per_round, total = expected_budget
                 _, searches, stages, actions = self.run_mock_workflow(depth=depth)
                 expected_round_actions = expected_executed_actions[depth]
                 self.assertEqual(stages.count("analyst"), len(expected_round_actions))
-                self.assertEqual(sum(query.startswith("background-") for query in searches), expected_budget["background_searches"])
+                self.assertEqual(sum(query.startswith("background-") for query in searches), background)
                 self.assertEqual(
                     [actions.count(round_number) for round_number in range(1, len(expected_round_actions) + 1)],
                     expected_round_actions,
                 )
-                self.assertLessEqual(len(actions), expected_budget["actions"])
+                self.assertLessEqual(len(actions), total)
                 for actions_this_round in expected_round_actions:
-                    self.assertLessEqual(actions_this_round, expected_budget["actions_per_round"])
+                    self.assertLessEqual(actions_this_round, per_round)
 
     def test_deep_research_can_use_all_four_rounds_before_stopping(self):
         _, searches, stages, actions = self.run_mock_workflow(depth="deep", actions_per_round=1)
         self.assertEqual(stages.count("analyst"), 4)
         self.assertEqual(actions, [1, 2, 3, 4])
-        self.assertEqual(sum(query.startswith("background-") for query in searches), 4)
+        self.assertEqual(sum(query.startswith("background-") for query in searches), 1)
         self.assertLessEqual(len(actions), workflow.DEPTH_BUDGETS["deep"]["actions"])
 
     @staticmethod

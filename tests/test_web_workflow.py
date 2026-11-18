@@ -216,7 +216,7 @@ class WebWorkflowTests(unittest.TestCase):
             if payload.get('phase') == 'act':
                 return researcher_output(
                     action='tool', tool_name='read_web_page',
-                    arguments={'candidate_id': 'web:inaccessible', 'offset': 0},
+                    arguments={'candidate_id': 'web:inaccessible'},
                 )
             return '> 局限：网页无法读取，证据不足。'
 
