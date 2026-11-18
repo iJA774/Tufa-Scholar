@@ -99,20 +99,19 @@ class WebPageTests(unittest.TestCase):
         self.assertEqual(result[0]['content'], '')
         self.assertEqual(result[0]['title'], 'example.com')
 
-    def test_html_pagination_and_evidence_offsets(self):
+    def test_html_returns_one_excerpt_and_rejects_continuation(self):
         body = '<html><title>Example</title><body><nav>ignore</nav><article><h1>Title</h1><p>' + 'a' * 1600 + ' keyword important end</p></article><script>secret</script></body></html>'
-        Connection.responses = [Response(body=body.encode(), headers={'Content-Type': 'text/html; charset=utf-8'}) for _ in range(2)]
-        first = self.registry.invoke('read_web_page', {'url': 'https://example.com/a'}, context=self.context)
-        second = self.registry.invoke('read_web_page', {'url': 'https://example.com/a', 'offset': first['next_offset']}, context=self.context)
-        self.assertEqual(len(first['markdown']), 1000)
-        self.assertIsNone(second['next_offset'])
-        self.assertNotIn('ignore', first['markdown']); self.assertNotIn('secret', second['markdown'])
-        candidate = {'url': second['url'], 'title': second['title'], 'content': second['markdown'], 'content_offset': second['offset'], 'source_level': 'web_content', 'provider': 'web_page', 'retrieved_at': second['retrieved_at']}
-        e = self.registry.invoke('collect_evidence', {'query': 'keyword', 'papers': [candidate]}, context=self.context)[0]
-        self.assertIn('keyword', e['text']); self.assertEqual(e['char_start'], 1000)
-        self.assertEqual(e['char_end'] - e['char_start'], len(e['text']))
+        Connection.responses = [Response(body=body.encode(), headers={'Content-Type': 'text/html; charset=utf-8'})]
+        result = self.registry.invoke('read_web_page', {'url': 'https://example.com/a'}, context=self.context)
+        self.assertEqual(len(result['markdown']), 1000)
+        self.assertTrue(result['truncated'])
+        self.assertNotIn('next_offset', result)
+        self.assertNotIn('ignore', result['markdown'])
+        self.assertNotIn('secret', result['markdown'])
+        with self.assertRaises(ValueError):
+            self.registry.invoke('read_web_page', {'url': 'https://example.com/a', 'offset': 1000}, context=self.context)
 
-    def test_pdf_actual_bytes_and_pagination(self):
+    def test_pdf_actual_bytes_in_one_read(self):
         writer = PdfWriter()
         for text in ('First page ' + 'alpha ' * 200, 'Second page election deadline'):
             page = writer.add_blank_page(width=612, height=792)
@@ -122,13 +121,12 @@ class WebPageTests(unittest.TestCase):
             stream.set_data(('BT /F1 12 Tf 20 700 Td (' + text + ') Tj ET').encode())
             page[NameObject('/Contents')] = writer._add_object(stream)
         output = io.BytesIO(); writer.write(output)
-        Connection.responses = [Response(body=output.getvalue(), headers={'Content-Type': 'application/pdf'}) for _ in range(2)]
-        first = self.registry.invoke('read_web_page', {'url': 'https://example.com/a.pdf'}, context=self.context)
-        second = self.registry.invoke('read_web_page', {'url': 'https://example.com/a.pdf', 'offset': first['next_offset']}, context=self.context)
-        self.assertIn('第 1 页', first['markdown'])
-        self.assertIn('第 2 页', second['markdown'])
-        self.assertIn('election deadline', second['markdown'])
-        self.assertEqual(second['offset'], len(first['markdown']))
+        Connection.responses = [Response(body=output.getvalue(), headers={'Content-Type': 'application/pdf'})]
+        result = self.registry.invoke('read_web_page', {'url': 'https://example.com/a.pdf', 'limit': 4000}, context=self.context)
+        self.assertIn('第 1 页', result['markdown'])
+        self.assertIn('第 2 页', result['markdown'])
+        self.assertIn('election deadline', result['markdown'])
+        self.assertFalse(result['truncated'])
 
     def test_pdf_rejects_invalid_empty_and_encrypted(self):
         writer = PdfWriter(); writer.add_blank_page(width=100, height=100)

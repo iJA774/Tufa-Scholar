@@ -27,7 +27,7 @@ if result["documents"]:
 |---|---|---|---|
 | `search_papers` | `query` | 含 `query`、`source`、`method`、`results`、`warnings` 的字典 | `local`、`openalex`、`all`、`collection` |
 | `search_web` | `query`、可选 `limit`（1–5，默认 5）、`backend`（`configured` 或 `alternative`，默认 `configured`） | 网页结果列表，含 URL、文本、来源层级、引擎和获取时间 | `web` |
-| `read_web_page` | `url`、`offset`（默认 0）、`limit`（默认 1000，最大 4000） | 清理后的 Markdown 字符片段及下一偏移、最终 URL、标题和获取时间 | `web` |
+| `read_web_page` | `url`、`limit`（默认 1000，最大 4000） | 清理后的 Markdown 开头、截断状态、最终 URL、标题和获取时间 | `web` |
 | `select_local_domains` | `domains`、可选 `offset` | 当前范围的标题、领域、标签、短描述和下一页偏移 | `local`、`all`、`collection` |
 | `read_local_markdown` | `document_id`、可选 `query`、可选 `offset` | FTS5 召回的片段及 Markdown 字符定位，或顺序读取的片段 | `local`、`all`、`collection` |
 | `collect_evidence` | `query`、`papers`（最多六条检索结果）、可选 `relevance_queries`（最多八条，每条非空且不超过 1000 字符） | 外部论文摘要或网页证据 | `openalex`、联网的 `all`、`web` |
@@ -75,4 +75,4 @@ registry.invoke("text_length", {"text": "科研"}, context=context)
 
 从仓库根目录运行 `uv run --locked python -m unittest tests.test_tools -v` 验证工具入口。跨层回归及实际 API/worker 验收命令见 [根 README](../../README.md#验证)。
 
-`read_web_page` 读取公网 HTTP(S) 网页，按清理后的 Markdown 字符分页；只返回片段，不选择证据。地址和每次跳转均检查公网 DNS，连接固定已验证 IP，HTTPS 校验原域名。支持 HTML、纯文本及公开 PDF 的可提取文本；PDF 最多提取前 50 页、20 万字符，按页标注，图片型或加密文件不可读取，不运行脚本或加载资源；受响应大小、时间和跳转数限制。网页正文片段以 `content_offset` 交给取证时，结果保留绝对字符范围。
+`read_web_page` 读取公网 HTTP(S) 网页，返回清理后的 Markdown 开头片段。地址和每次跳转均检查公网 DNS，连接固定已验证 IP，HTTPS 校验原域名。支持 HTML、纯文本和公开 PDF 的可提取文本。PDF 最多提取前 50 页、20 万字符，按页标注，图片型或加密文件不可读取。网页正文片段以 `content_offset` 交给取证时，结果保留绝对字符范围。

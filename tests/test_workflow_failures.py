@@ -112,7 +112,7 @@ class WorkflowFailureTests(unittest.TestCase):
                 on_stage=on_stage,
             )
 
-    def test_six_researcher_tool_actions_are_followed_by_tool_free_draft(self):
+    def test_researcher_metered_actions_are_followed_by_tool_free_draft(self):
         paper = sample_paper()
         researcher_calls = []
         retrieved = []
@@ -135,6 +135,8 @@ class WorkflowFailureTests(unittest.TestCase):
                     researcher_calls.append((payload, kwargs["template_context"], kwargs.get("native_tools")))
                     if payload["phase"] == "act":
                         index = sum(item[0]["phase"] == "act" for item in researcher_calls)
+                        if not payload["calls_remaining"]:
+                            return researcher_output(action="finish")
                         return researcher_output(
                             action="tool", tool_name="search_papers",
                             arguments={"query": f"accuracy retry {index}"},
@@ -161,7 +163,7 @@ class WorkflowFailureTests(unittest.TestCase):
         act_calls = [item for item in researcher_calls if item[0]["phase"] == "act"]
         draft_calls = [item for item in researcher_calls if item[0]["phase"] == "draft"]
         action_cap = workflow.DEPTH_BUDGETS["standard"]["actions_per_round"]
-        self.assertEqual(len(act_calls), action_cap)
+        self.assertEqual(len(act_calls), action_cap + 1)
         self.assertEqual(len(draft_calls), 1)
         self.assertEqual(draft_calls[0][1]["available_tools"], [])
         self.assertIsNone(draft_calls[0][2])
@@ -404,7 +406,7 @@ class WorkflowFailureTests(unittest.TestCase):
             if payload.get("warnings"):
                 self.assertEqual(payload["warnings"], ["paper_search_incomplete"])
 
-    def test_web_page_offsets_collect_two_distinct_blocks_from_one_candidate(self):
+    def test_web_page_reads_once_and_free_collection_keeps_the_budget(self):
         full_page = "Accuracy is 92% now."
         web_calls = []
         fetch_calls = []
@@ -438,28 +440,18 @@ class WorkflowFailureTests(unittest.TestCase):
                     if self.researcher_actions == 1:
                         return researcher_output(
                             action="tool", tool_name="read_web_page",
-                            arguments={"candidate_id": candidate_id, "offset": 0, "limit": 10},
+                            arguments={"candidate_id": candidate_id, "limit": 20},
                         )
                     if self.researcher_actions == 2:
                         read = next(item for item in payload["tool_results"] if item["tool"] == "read_web_page")
-                        web_calls.append(("visible_first_next_offset", read["next_offset"]))
+                        self_test.assertNotIn("next_offset", read)
+                        web_calls.append(payload["calls_remaining"])
                         return researcher_output(
                             action="tool", tool_name="collect_evidence",
                             arguments={"query": "accuracy", "candidate_ids": [candidate_id]},
                         )
                     if self.researcher_actions == 3:
-                        read = next(item for item in reversed(payload["tool_results"]) if item["tool"] == "read_web_page")
-                        next_offset = read["next_offset"]
-                        web_calls.append(("second_offset", next_offset))
-                        return researcher_output(
-                            action="tool", tool_name="read_web_page",
-                            arguments={"candidate_id": candidate_id, "offset": next_offset, "limit": 10},
-                        )
-                    if self.researcher_actions == 4:
-                        return researcher_output(
-                            action="tool", tool_name="collect_evidence",
-                            arguments={"query": "accuracy", "candidate_ids": [candidate_id]},
-                        )
+                        web_calls.append(payload["calls_remaining"])
                     evidence = payload["evidence"]
                     return researcher_output(
                         action="finish",
@@ -490,30 +482,29 @@ class WorkflowFailureTests(unittest.TestCase):
             )
             invoke_calls = [(call.args[0], call.args[1], call.kwargs) for call in invoke.call_args_list]
 
-        self.assertEqual(web_calls, [("visible_first_next_offset", 10), ("second_offset", 10)])
+        self.assertEqual(web_calls, [9, 9])
         self.assertTrue(all(native_tools for _, native_tools in native_act_calls))
         read_tool = next(
             item for item in native_act_calls[2][1]
             if item["name"] == "read_web_page"
         )
-        self.assertEqual(read_tool["input_schema"]["properties"]["offset"]["type"], "integer")
+        self.assertNotIn("offset", read_tool["input_schema"]["properties"])
         prior_read = next(
             item for item in native_act_calls[2][0]["tool_results"]
             if item["tool"] == "read_web_page"
         )
-        self.assertEqual(prior_read["next_offset"], 10)
-        self.assertEqual(fetch_calls, ["https://example.org/accuracy", "https://example.org/accuracy"])
+        self.assertNotIn("next_offset", prior_read)
+        self.assertEqual(fetch_calls, ["https://example.org/accuracy"])
         read_calls = [(name, args, kwargs) for name, args, kwargs in invoke_calls if name == "read_web_page"]
-        self.assertEqual(len(read_calls), 2)
-        self.assertEqual([args["offset"] for _, args, _ in read_calls], [0, 10])
-        self.assertEqual([name for name, _, _ in invoke_calls].count("collect_evidence"), 2)
-        self.assertEqual(sorted((item["char_start"], item["char_end"]) for item in evidence), [(0, 10), (10, 20)])
-        self.assertEqual(len({item["id"] for item in evidence}), 2)
+        self.assertEqual(len(read_calls), 1)
+        self.assertEqual([name for name, _, _ in invoke_calls].count("collect_evidence"), 1)
+        self.assertEqual(sorted((item["char_start"], item["char_end"]) for item in evidence), [(0, 20)])
+        self.assertEqual(len({item["id"] for item in evidence}), 1)
         self.assertEqual(len(reporter_payloads), 1)
         self.assertIn("网页资料已按片段读取", content)
         self.assertEqual(stages[-1], "reporter")
 
-    def test_successful_repeated_page_offset_is_skipped(self):
+    def test_successful_repeated_page_read_is_skipped(self):
         fetch_calls = []
         draft_feedback = []
 
@@ -540,7 +531,7 @@ class WorkflowFailureTests(unittest.TestCase):
                         if self.researcher_actions <= 2:
                             return researcher_output(
                                 action="tool", tool_name="read_web_page",
-                                arguments={"candidate_id": candidate_id, "offset": 0, "limit": 10},
+                                arguments={"candidate_id": candidate_id, "limit": 20},
                             )
                         return researcher_output(action="finish")
                     draft_feedback.extend(payload.get("tool_feedback", []))
@@ -566,7 +557,7 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual([call[0] for call in invoke_calls].count("read_web_page"), 1)
         self.assertIn("duplicate_web_read_skipped", [item.get("code") for item in draft_feedback])
 
-    def test_estimated_context_budget_stops_after_two_pages_and_latches(self):
+    def test_estimated_context_budget_stops_after_two_decisions_and_latches(self):
         full_page = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         fetch_calls = []
         act_model_calls = []
@@ -597,15 +588,11 @@ class WorkflowFailureTests(unittest.TestCase):
                     act_model_calls.append(payload)
                     act_native_tools.append(kwargs.get("native_tools"))
                     candidate_id = payload["current_candidates"][0]["candidate_id"]
-                    offset = 0
-                    if payload.get("tool_results"):
-                        previous = next(item for item in reversed(payload["tool_results"]) if item["tool"] == "read_web_page")
-                        offset = previous["next_offset"]
-                    # If a third act decision were issued, this fixture would ask
-                    # for another page. The cumulative input barrier must stop it.
+                    if len(act_model_calls) > 1:
+                        return researcher_output(action="tool", tool_name="search_web", arguments={"query": "another page"})
                     return researcher_output(
                         action="tool", tool_name="read_web_page",
-                        arguments={"candidate_id": candidate_id, "offset": offset, "limit": 10},
+                        arguments={"candidate_id": candidate_id, "limit": 10},
                     )
                 if prompt_id == "literature/analyst":
                     return review(sufficient=False, gaps=["頁面片段尚未轉成證據"], review="資料不足。")
@@ -662,8 +649,8 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(act_native_tools[0], estimated_native_tools[2])
         self.assertTrue(all(native_tools for native_tools in act_native_tools))
         self.assertIsNone(schemas[-1][2])
-        self.assertEqual([name for name, _, _ in invoke_calls].count("read_web_page"), 2)
-        self.assertEqual(fetch_calls, ["https://example.org/accuracy", "https://example.org/accuracy"])
+        self.assertEqual([name for name, _, _ in invoke_calls].count("read_web_page"), 1)
+        self.assertEqual(fetch_calls, ["https://example.org/accuracy"])
         self.assertEqual(stages.count("researcher"), 1)
         self.assertEqual(stages[-1], "reporter")
         self.assertEqual(evidence, [])
@@ -679,7 +666,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     latched_state,
                     "web",
                     "read_web_page",
-                    {"url": "https://example.org/accuracy", "offset": 20, "limit": 10},
+                    {"url": "https://example.org/accuracy", "limit": 10},
                 )
             invoke.assert_not_called()
 
