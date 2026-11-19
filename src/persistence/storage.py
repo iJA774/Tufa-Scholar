@@ -30,6 +30,8 @@ def initialize_storage() -> dict:
     directory = data_directory()
     for child in ("originals", "reports"):
         (directory / child).mkdir(parents=True, exist_ok=True)
+    from src.persistence.benchmark_schema import SCHEMA as benchmark_schema
+
     with connect_database() as connection:
         connection.executescript("""
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -51,6 +53,7 @@ def initialize_storage() -> dict:
         CREATE TABLE IF NOT EXISTS markdown_chunks (id INTEGER PRIMARY KEY, document_id TEXT NOT NULL REFERENCES markdown_documents(id), char_start INTEGER NOT NULL, char_end INTEGER NOT NULL, text TEXT NOT NULL);
         CREATE VIRTUAL TABLE IF NOT EXISTS markdown_fts USING fts5(text);
         """)
+        connection.executescript(benchmark_schema)
         connection.execute("BEGIN IMMEDIATE")
         if 'index_format' not in {row[1] for row in connection.execute('PRAGMA table_info(markdown_documents)')}:
             connection.execute('ALTER TABLE markdown_documents ADD COLUMN index_format INTEGER NOT NULL DEFAULT 0')

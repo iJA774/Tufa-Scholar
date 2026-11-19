@@ -1,4 +1,6 @@
 """OpenAlex works search; network operations run outside database transactions."""
+from src.infrastructure.execution import allowed_source, observed_retrieval
+
 import re
 import logging
 import time
@@ -33,6 +35,7 @@ def normalize_work(work):
     }
 
 
+@observed_retrieval("openalex")
 def search_works(query, limit=20):
     params = {"search": query, "per_page": limit}
     key = openalex_key()
@@ -45,6 +48,7 @@ def search_works(query, limit=20):
         response = httpx.get("https://api.openalex.org/works", params=params, headers=headers, timeout=20)
         response.raise_for_status()
         results = [normalize_work(work) for work in response.json()["results"]]
+        results = [work for work in results if all(allowed_source(work.get(k)) for k in ("original_url", "pdf_url", "doi"))]
         logger.info('openalex_search completed elapsed_ms=%d status=%d result_count=%d', int((time.monotonic() - start) * 1000), response.status_code, len(results))
         return results
     except httpx.HTTPStatusError as exc:

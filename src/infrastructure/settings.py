@@ -1,8 +1,22 @@
 """Local configuration; environment values take precedence over SQLite."""
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 import re
 from urllib.parse import urlsplit
 from src.persistence.storage import connect_database, data_directory
+
+_research_settings = ContextVar("research_settings", default=None)
+
+
+@contextmanager
+def research_settings(snapshot):
+    token = _research_settings.set(snapshot)
+    try:
+        yield
+    finally:
+        _research_settings.reset(token)
+
 
 ENV = {
     'openalex_api_key': 'OPENALEX_API_KEY',
@@ -51,7 +65,9 @@ def _resolve(name, local):
 
 
 def openalex_key():
-    # Called for every request so a running worker picks up settings changes.
+    snapshot = _research_settings.get()
+    if snapshot is not None:
+        return snapshot['openalex_key']
     if os.environ.get('OPENALEX_API_KEY'):
         return os.environ['OPENALEX_API_KEY']
     return _resolve('openalex_api_key', _local())[0]
@@ -147,14 +163,22 @@ def update(values):
 
 
 def model_config():
+    snapshot = _research_settings.get()
+    if snapshot is not None:
+        return snapshot['model']
     local = _local()
     return {'base_url': _resolve('openai_base_url', local)[0], 'api_key': _resolve('openai_api_key', local)[0], 'model': _resolve('openai_model', local)[0]}
 
 
 def web_search_config():
-    # Resolve on each call so the worker picks up changes without restarting.
-    local = _local()
-    engine = _resolve_default('web_search_engine', local, 'duckduckgo')[0].strip() or 'duckduckgo'
+    snapshot = _research_settings.get()
+    if snapshot is not None:
+        return snapshot['search']
+    return _web_search_config(_local())
+
+
+def _web_search_config(local, engine_override=None):
+    engine = engine_override or _resolve_default('web_search_engine', local, 'duckduckgo')[0].strip() or 'duckduckgo'
     base_url = _resolve('searx_base_url', local)[0] if engine == 'searx' else None
     base_url = base_url.strip() if base_url else None
     language = _resolve_default('wikipedia_lang', local, 'zh')[0].strip() or 'zh'
@@ -168,3 +192,16 @@ def preprocesser_config():
     config = model_config()
     config['model'] = _resolve('preprocesser_model', _local())[0] or config['model']
     return config
+
+
+def benchmark_research_snapshot(model_override=None, search_override=None):
+    local = _local()
+    model = {'base_url': _resolve('openai_base_url', local)[0],
+             'api_key': _resolve('openai_api_key', local)[0],
+             'model': os.environ.get('OPENAI_MODEL') or model_override or _resolve('openai_model', local)[0]}
+    validate_base_url(model['base_url'])
+    if not model['base_url'] or not model['model']:
+        raise ValueError('请先配置待测模型地址和名称')
+    validate_web_search(search_override, None, None)
+    return {'model': model, 'search': _web_search_config(local, search_override),
+            'openalex_key': _resolve('openalex_api_key', local)[0]}

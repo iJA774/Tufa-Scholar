@@ -5,6 +5,9 @@ import json
 import logging
 import re
 import time
+
+from src.benchmark import scheduler as benchmark_scheduler
+from src.persistence import benchmarks as benchmark_store
 from threading import Event
 
 from src.persistence import repository
@@ -15,8 +18,8 @@ from src.infrastructure.diagnostics import diagnostic_scope
 from src.integrations.model import ModelServiceError, StructuredOutputError
 
 
-def run_once():
-    task = repository.claim_task()
+def run_once(benchmark_task_id=None):
+    task = repository.claim_task(benchmark_task_id)
     if task is None:
         return False
     log = logging.getLogger('tufa.worker')
@@ -30,12 +33,18 @@ def run_once():
                 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
             )}
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
-            with diagnostic_scope(run_id=task['id'], project_id=task['project_id']):
+            def on_event(kind, data):
+                if benchmark_task_id is not None:
+                    data = {**data, 'timestamp': time.time()}
+                repository.record_research_event(task['id'], kind, data)
+
+            tags = {'suppress_artifacts': True} if benchmark_task_id is not None else {}
+            with diagnostic_scope(run_id=task['id'], project_id=task['project_id'], **tags):
                 content, evidence = run(
                     research, history=history,
                     on_stage=lambda stage: repository.update_stage(task['id'], stage),
                     on_subtask=lambda note: repository.record_subtask(task['id'], note),
-                    on_event=lambda kind, data: repository.record_research_event(task['id'], kind, data),
+                    on_event=on_event,
                 )
             repository.finish_chat_task(task['id'], content, evidence)
         else:
@@ -93,11 +102,61 @@ def run_once():
             repository.fail_task(task['id'], message)
     return True
 
+
+def run_benchmark_attempt(attempt_id):
+    from src.benchmark.evaluator import ScoringFailure
+    from src.benchmark.registry import adapter_for
+    from src.benchmark.results import saved_report, redact
+    from src.infrastructure.execution import execution_scope
+    from src.infrastructure.settings import research_settings
+
+    attempt = benchmark_store.get_attempt(attempt_id)
+    if not attempt or attempt['status'] != 'running':
+        return 1
+    batch = benchmark_store.get_run(attempt['run_id'], private=True)
+    config, credentials = batch['config'], batch['credentials']
+    adapter = adapter_for(config["dataset"]["id"])
+    monitor = benchmark_scheduler.Monitor(attempt_id, config['budget'])
+    task = next(row for row in benchmark_store.task_rows(batch['id']) if row['task_id'] == attempt['task_id'])
+    try:
+        if attempt['phase'] == 'generate':
+            configure_logging('worker')
+            with research_settings(credentials['research']), execution_scope(monitor):
+                if not run_once(attempt['research_id']):
+                    return 1
+            report = saved_report(batch['id'], task['task_id'])
+            if report:
+                row, diagnostics = adapter.report_record(task, report)
+                sources = {item.get('original_url') or item.get('paper_id') or item.get('id') for item in report['evidence']}
+                benchmark_store.finish(attempt_id, result={'article': row['article'], 'citation_diagnostics': diagnostics,
+                                                           'report_metrics': {'characters': len(report['content']),
+                                                                              'sources': len(sources)}})
+            return 0
+        report = saved_report(batch['id'], task['task_id'])
+        row, diagnostics = adapter.report_record(task, report)
+        result = adapter.score(attempt['phase'], task, row, diagnostics, config['judge'], credentials['judge'], monitor)
+        result = redact(result, credentials)
+        benchmark_store.finish(attempt_id, result=result, error=result.get('error'))
+    except benchmark_scheduler.BudgetReached:
+        return 75
+    except ScoringFailure as exc:
+        benchmark_store.finish(attempt_id, error=str(exc))
+    except Exception as exc:
+        logging.getLogger('tufa.worker').error('benchmark_failed attempt_id=%s type=%s', attempt_id, type(exc).__name__)
+        return 1
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tufa Scholar single worker")
     parser.add_argument("--check", action="store_true", help="Check storage and exit")
     parser.add_argument("--once", action="store_true", help="Process at most one task and exit")
+    parser.add_argument("--benchmark-attempt", nargs=2, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.benchmark_attempt:
+        attempt_id, parent_pid = args.benchmark_attempt
+        with benchmark_scheduler.child_lifetime(parent_pid):
+            raise SystemExit(run_benchmark_attempt(attempt_id))
     status = initialize_storage()
     if args.check:
         print(json.dumps({"status": "ready", "database": status}, ensure_ascii=False))
@@ -105,14 +164,15 @@ def main():
 
     configure_logging('worker')
     repository.interrupt_running_tasks()
+    benchmark_store.recover()
     if args.once:
-        run_once()
+        run_once() or benchmark_scheduler.run_once()
         return
     logging.getLogger('tufa.worker').info('worker_ready')
     try:
         stop = Event()
         while True:
-            if not run_once() and stop.wait(1):
+            if not run_once() and not benchmark_scheduler.run_once() and stop.wait(1):
                 break
     except KeyboardInterrupt:
         logging.getLogger('tufa.worker').info('worker_stopped')

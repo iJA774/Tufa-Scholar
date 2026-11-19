@@ -96,11 +96,20 @@ pnpm dev:web
 
 网页搜索工具也可独立调用，结果不自动导入论文库。网页正文读取限制公网地址和重定向；摘要和网页片段不能视作完整原文。报告正文按来源首次出现的顺序显示 `[1][2]` 等编号，同一来源复用编号。标题、已有出版信息和原文定位集中列在末尾的“参考文献”。完成任务后可下载同样格式的 Markdown 报告和逐条证据的 CSV 表。工具注册、参数和来源约束见 [工具说明](src/tools/README.md)。模型提示词 ID 和数据契约见 [提示词说明](docs/PROMPTS.md)。
 
+
+### Benchmark 评测
+
+在「设置 → Benchmark 评测」下载或导入原版 DeepResearch Bench，选择研究配置、随机样本或任务 ID，再按预算生成报告或运行官方 RACE 和 FACT。工作台支持运行进度、暂停和恢复、失败重试、历史对比和导出。Judge 和正文提取服务的配置、CLI 用法及指标口径见 [Benchmark 使用说明](docs/BENCHMARK.md)。
+
+
 ## API 入口
 
 | 方法与路径 | 功能 |
 |---|---|
 | `GET /health` | 健康与 SQLite/FTS5 检查 |
+| `GET /benchmark`、`GET /benchmark/dataset/tasks` | 锁定题库及评分器状态、预览原始题目 |
+| `GET/POST /benchmark/runs`、`POST /benchmark/runs/{id}/actions` | 批次历史、创建与运行控制 |
+| `GET /benchmark/runs/{id}/tasks/{task_id}`、`GET /benchmark/runs/{id}/export`、`POST /benchmark/compare` | 单题报告、结果导出及可比性检查 |
 | `GET/POST /projects` | 列出、创建项目 |
 | `GET/PUT /settings` | 读取配置状态或保存本机配置，不返回密钥原文 |
 | `POST /settings/models`、`GET /models` | 发现或列出模型 |
@@ -147,10 +156,11 @@ uv run --locked python -m unittest discover -s tests -q
 uv run --locked python -m scripts.verify_chat
 uv run --locked python -m scripts.verify_web_search
 uv run --locked python -m scripts.verify_conversion
+uv run --locked python -m scripts.verify_benchmark
 pnpm check:web
 pnpm build:web
 ```
 
-这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。`verify_conversion` 检查转换、分类、领域披露、FTS5 阅读和 Markdown 字符定位。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成。浏览器验收入口见 [前端说明](apps/web/README.md)。
+这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。`verify_benchmark` 默认从官方 GitHub 下载锁定题库和评分器，可用 `--assets` 指定已校验的版本目录。`verify_conversion` 检查转换、分类、领域披露、FTS5 阅读和 Markdown 字符定位。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成。浏览器验收入口见 [前端说明](apps/web/README.md)。
 
 排查研究请求时，可在 `TUFA_DATA_DIR/logs/worker.log` 按 `run_id` 查询模型调用、工具失败和报告校验。供应商用量缺失时日志显示 `na`。结构化响应诊断位于 `TUFA_DATA_DIR/diagnostics/`，可能包含用户材料。可在仓库根目录用 `uv run --locked python -m scripts.replay_diagnostic <诊断文件路径>` 离线校验当前提示词契约。

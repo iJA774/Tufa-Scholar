@@ -33,7 +33,7 @@ def _paper(db, paper):
 
 def list_projects():
     with connect_database() as db:
-        return _all(db, 'SELECT * FROM projects ORDER BY id')
+        return _all(db, 'SELECT id, name FROM projects WHERE id NOT IN (SELECT project_id FROM benchmark_runs) ORDER BY id')
 
 
 def create_project(name):
@@ -46,7 +46,7 @@ def create_project(name):
 def delete_project(project_id):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
-        if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
+        if not _one(db, 'SELECT id FROM projects WHERE id=? AND id NOT IN (SELECT project_id FROM benchmark_runs)', (project_id,)):
             return 'missing'
         if _one(db, "SELECT id FROM tasks WHERE project_id=? AND status='running' LIMIT 1", (project_id,)):
             return 'running'
@@ -64,7 +64,7 @@ def delete_project(project_id):
 
 def project_exists(project_id):
     with connect_database() as db:
-        return bool(_one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)))
+        return bool(_one(db, 'SELECT id FROM projects WHERE id=? AND id NOT IN (SELECT project_id FROM benchmark_runs)', (project_id,)))
 
 
 def list_conversations(project_id):
@@ -81,6 +81,7 @@ def list_all_conversations():
             SELECT c.id, c.project_id, c.title, c.pinned, MAX(m.created_at) AS updated_at
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id=c.id
+            WHERE c.project_id NOT IN (SELECT project_id FROM benchmark_runs)
             GROUP BY c.id
             ORDER BY c.pinned DESC, MAX(m.created_at) DESC, MAX(m.id) DESC, c.id DESC
         """)
@@ -99,12 +100,12 @@ def create_conversation(project_id, title):
 def update_conversation_pinned(conversation_id, pinned):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
-        db.execute('UPDATE conversations SET pinned=? WHERE id=?', (int(pinned), conversation_id))
+        db.execute('UPDATE conversations SET pinned=? WHERE id=? AND project_id NOT IN (SELECT project_id FROM benchmark_runs)', (int(pinned), conversation_id))
         conversation = _one(db, """
             SELECT c.id, c.project_id, c.title, c.pinned, MAX(m.created_at) AS updated_at
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id=c.id
-            WHERE c.id=?
+            WHERE c.id=? AND c.project_id NOT IN (SELECT project_id FROM benchmark_runs)
             GROUP BY c.id
         """, (conversation_id,))
         db.commit()
@@ -116,7 +117,7 @@ def update_conversation_pinned(conversation_id, pinned):
 def delete_conversation(conversation_id):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
-        if not _one(db, 'SELECT id FROM conversations WHERE id=?', (conversation_id,)):
+        if not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id NOT IN (SELECT project_id FROM benchmark_runs)', (conversation_id,)):
             return 'missing'
         if _one(db, "SELECT id FROM tasks WHERE conversation_id=? AND status IN ('pending','running') LIMIT 1", (conversation_id,)):
             return 'active'
@@ -318,10 +319,15 @@ def regenerate_chat_task(task_id, model_name):
         return result
 
 
-def claim_task():
+def claim_task(benchmark_task_id=None):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
-        task = _one(db, "SELECT * FROM tasks WHERE status='pending' ORDER BY id LIMIT 1")
+        if benchmark_task_id is None:
+            task = _one(db, """SELECT t.* FROM tasks t JOIN projects p ON p.id=t.project_id
+                WHERE t.status='pending' AND p.id NOT IN (SELECT project_id FROM benchmark_runs) ORDER BY t.id LIMIT 1""")
+        else:
+            task = _one(db, """SELECT t.* FROM tasks t JOIN projects p ON p.id=t.project_id
+                WHERE t.status='pending' AND p.id IN (SELECT project_id FROM benchmark_runs) AND t.id=?""", (benchmark_task_id,))
         if task:
             db.execute("UPDATE tasks SET status='running',stage='searching' WHERE id=?", (task['id'],))
             task['status'], task['stage'] = 'running', 'searching'
@@ -355,28 +361,33 @@ def interrupt_running_tasks():
 def create_question(project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None, research_mode='auto', research_depth='standard', prefer_primary_evidence=True, relevance_filter='standard', network_search=True, local_literature=True):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
-        if not _one(db, 'SELECT id FROM projects WHERE id=?', (project_id,)):
+        if not _one(db, 'SELECT id FROM projects WHERE id=? AND id NOT IN (SELECT project_id FROM benchmark_runs)', (project_id,)):
             return None
-        paper_ids = None
-        if source == 'collection':
-            if not _one(db, 'SELECT id FROM collections WHERE id=? AND project_id=?', (collection_id,project_id)):
-                return None
-            paper_ids = [r['paper_id'] for r in _all(db, 'SELECT paper_id FROM collection_papers WHERE collection_id=? ORDER BY paper_id', (collection_id,))]
-        if conversation_id is None:
-            conversation_id = db.execute('INSERT INTO conversations(project_id,title) VALUES (?,?)', (project_id,question[:80])).lastrowid
-        elif not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id=?', (conversation_id,project_id)):
-            return None
-        run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,collection_id,paper_ids,research_mode,research_depth,prefer_primary_evidence,relevance_filter) VALUES (?,?,?,?, 'pending','pending','chat',?,?,?,?,?,?)", (project_id,conversation_id,question,source,collection_id,json.dumps(paper_ids) if paper_ids is not None else None,research_mode,research_depth,int(prefer_primary_evidence),relevance_filter)).lastrowid
-        db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (model_name, reasoning_effort, run_id))
-        db.execute('UPDATE tasks SET network_search=?,local_literature=? WHERE id=?', (network_search, local_literature, run_id))
-        db.execute("INSERT INTO messages(conversation_id,role,content,run_id) VALUES (?,'user',?,?)", (conversation_id,question,run_id))
+        result = insert_question(db, project_id, conversation_id, question, source, collection_id, model_name, reasoning_effort, research_mode, research_depth, prefer_primary_evidence, relevance_filter, network_search, local_literature)
         db.commit()
-        return {'run_id':run_id,'conversation_id':conversation_id}
+        return result
+
+
+def insert_question(db, project_id, conversation_id, question, source, collection_id=None, model_name=None, reasoning_effort=None, research_mode='auto', research_depth='standard', prefer_primary_evidence=True, relevance_filter='standard', network_search=True, local_literature=True):
+    paper_ids = None
+    if source == 'collection':
+        if not _one(db, 'SELECT id FROM collections WHERE id=? AND project_id=?', (collection_id,project_id)):
+            return None
+        paper_ids = [r['paper_id'] for r in _all(db, 'SELECT paper_id FROM collection_papers WHERE collection_id=? ORDER BY paper_id', (collection_id,))]
+    if conversation_id is None:
+        conversation_id = db.execute('INSERT INTO conversations(project_id,title) VALUES (?,?)', (project_id,question[:80])).lastrowid
+    elif not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id=?', (conversation_id,project_id)):
+        return None
+    run_id = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,collection_id,paper_ids,research_mode,research_depth,prefer_primary_evidence,relevance_filter) VALUES (?,?,?,?, 'pending','pending','chat',?,?,?,?,?,?)", (project_id,conversation_id,question,source,collection_id,json.dumps(paper_ids) if paper_ids is not None else None,research_mode,research_depth,int(prefer_primary_evidence),relevance_filter)).lastrowid
+    db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (model_name, reasoning_effort, run_id))
+    db.execute('UPDATE tasks SET network_search=?,local_literature=? WHERE id=?', (network_search, local_literature, run_id))
+    db.execute("INSERT INTO messages(conversation_id,role,content,run_id) VALUES (?,'user',?,?)", (conversation_id,question,run_id))
+    return {'run_id':run_id,'conversation_id':conversation_id}
 
 
 def list_messages(conversation_id):
     with connect_database() as db:
-        if not _one(db, 'SELECT id FROM conversations WHERE id=?', (conversation_id,)):
+        if not _one(db, 'SELECT id FROM conversations WHERE id=? AND project_id NOT IN (SELECT project_id FROM benchmark_runs)', (conversation_id,)):
             return None
         rows = _all(db, 'SELECT * FROM messages WHERE conversation_id=? ORDER BY id', (conversation_id,))
         for row in rows:

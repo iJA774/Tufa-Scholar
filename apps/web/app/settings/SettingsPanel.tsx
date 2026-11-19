@@ -1,6 +1,7 @@
 "use client";
 
 import { type CSSProperties, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import Link from "next/link";
 import ModelControls from "../ModelControls";
 import { api, messageOf } from "../workspace/api";
 import { DEFAULT_PREFERENCES, type ReportFormat, type WorkspacePreferences } from "../workspace/preferences";
@@ -17,7 +18,7 @@ type SettingsPanelProps = {
   onNotice: (message: string) => void;
 };
 
-type PanelTab = "general" | "research" | "appearance" | "services" | "search" | "files";
+type PanelTab = "general" | "research" | "appearance" | "services" | "search" | "files" | "benchmark";
 const tabs: { id: PanelTab; label: string }[] = [
   { id: "general", label: "通用" },
   { id: "research", label: "研究偏好" },
@@ -25,6 +26,7 @@ const tabs: { id: PanelTab; label: string }[] = [
   { id: "services", label: "服务与模型" },
   { id: "search", label: "网页搜索" },
   { id: "files", label: "本地文档" },
+  { id: "benchmark", label: "Benchmark 评测" },
 ];
 
 const relevanceOptions = [
@@ -486,6 +488,10 @@ export default function SettingsPanel({
 
           {activeTab === "search" && <WebSearchSettings />}
 
+          {activeTab === "benchmark" && <section className={styles.card}>
+            <h2>Benchmark 评测</h2>
+            <Link className={styles.aboutLink} href="/benchmark">打开评测工作台 <span aria-hidden="true">↗</span></Link>
+          </section>}
           <div hidden={activeTab !== "files"}><LocalDocuments projectId={projectId} /></div>
           </main>
         </div>

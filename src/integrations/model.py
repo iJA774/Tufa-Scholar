@@ -1,4 +1,6 @@
 """OpenAI-compatible structured chat client."""
+from src.infrastructure.execution import numeric_usage, observer
+
 import json
 import logging
 import re
@@ -633,22 +635,8 @@ def _native_decision_from_stream(call_fragments, native_tools, finish_reason):
 
 def _usage_log_fields(usage):
     """Return only standard numeric usage fields, never provider response text."""
-    usage = usage if isinstance(usage, dict) else {}
-
-    def count(value):
-        return value if type(value) is int and value >= 0 else None
-
-    prompt_details = usage.get('prompt_tokens_details')
-    completion_details = usage.get('completion_tokens_details')
-    prompt_details = prompt_details if isinstance(prompt_details, dict) else {}
-    completion_details = completion_details if isinstance(completion_details, dict) else {}
-    values = {
-        'prompt_tokens': count(usage.get('prompt_tokens')),
-        'completion_tokens': count(usage.get('completion_tokens')),
-        'total_tokens': count(usage.get('total_tokens')),
-        'cached_tokens': count(prompt_details.get('cached_tokens')),
-        'reasoning_tokens': count(completion_details.get('reasoning_tokens')),
-    }
+    values = numeric_usage(usage)
+    del values["cost"]
     return ' '.join(f'{key}={value if value is not None else "na"}' for key, value in values.items())
 
 
@@ -838,34 +826,52 @@ def _disable_rejected_optional_parameter(response, request_body, config):
 def _post_structured(config, headers, request_body, *, on_stream, attempt, phase, secrets, native_tools=None):
     """Send one completion, retrying only explicit pre-response option rejections."""
     url = base_url(config['base_url']) + '/chat/completions'
-    for _ in range(len(COMPATIBLE_OPTIONAL_PARAMS) + 1):
-        if request_body.get('stream') is True:
-            with httpx.stream('POST', url, headers=headers, json=request_body, timeout=90) as response:
-                if _disable_rejected_optional_parameter(response, request_body, config):
-                    continue
-                if response.status_code in (400, 404, 413, 422):
-                    response.read()
-                response.raise_for_status()
-                content, usage, finish_reason, native_decision = _stream_response(
-                    response, on_stream, attempt, phase, secrets, native_tools,
+    monitor = observer()
+    rate_retries = 0
+    for _ in range(len(COMPATIBLE_OPTIONAL_PARAMS) + (3 if monitor else 1)):
+        call_id = monitor.begin("agent", phase) if monitor else None
+        started = time.monotonic()
+        response = None
+        usage = None
+        try:
+            if request_body.get('stream') is True:
+                with httpx.stream('POST', url, headers=headers, json=request_body, timeout=90) as response:
+                    if monitor and response.status_code == 429 and rate_retries < 2:
+                        rate_retries += 1
+                        time.sleep(1.5 ** rate_retries)
+                        continue
+                    if _disable_rejected_optional_parameter(response, request_body, config):
+                        continue
+                    if response.status_code in (400, 404, 413, 422):
+                        response.read()
+                    response.raise_for_status()
+                    content, usage, finish_reason, native_decision = _stream_response(
+                        response, on_stream, attempt, phase, secrets, native_tools,
+                    )
+                return response, content, usage, finish_reason, True, native_decision
+
+            response = httpx.post(url, headers=headers, json=request_body, timeout=90)
+            if monitor and response.status_code == 429 and rate_retries < 2:
+                rate_retries += 1
+                time.sleep(1.5 ** rate_retries)
+                continue
+            if _disable_rejected_optional_parameter(response, request_body, config):
+                continue
+            response.raise_for_status()
+            body = response.json()
+            usage = body.get('usage') if isinstance(body, dict) else None
+            choice = body['choices'][0]
+            finish_reason = choice.get('finish_reason')
+            if native_tools is not None:
+                native_decision = _native_decision_from_message(
+                    choice.get('message'), native_tools, finish_reason,
                 )
-            return response, content, usage, finish_reason, True, native_decision
+                return response, None, usage, finish_reason, False, native_decision
+            return response, choice['message']['content'], usage, finish_reason, False, None
 
-        response = httpx.post(url, headers=headers, json=request_body, timeout=90)
-        if _disable_rejected_optional_parameter(response, request_body, config):
-            continue
-        response.raise_for_status()
-        body = response.json()
-        usage = body.get('usage') if isinstance(body, dict) else None
-        choice = body['choices'][0]
-        finish_reason = choice.get('finish_reason')
-        if native_tools is not None:
-            native_decision = _native_decision_from_message(
-                choice.get('message'), native_tools, finish_reason,
-            )
-            return response, None, usage, finish_reason, False, native_decision
-        return response, choice['message']['content'], usage, finish_reason, False, None
-
+        finally:
+            if monitor:
+                monitor.end(call_id, started, response.status_code if response is not None else None, usage)
     # Reaching here means a provider kept rejecting options after all of them
     # were removed. Surface its last HTTP error rather than retrying generation.
     response.raise_for_status()

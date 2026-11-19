@@ -27,6 +27,7 @@ from src.persistence.storage import data_directory, initialize_storage
 from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack, clear_application_logs
 from apps.api.conversions import router as conversion_router, ConversionBodyLimit
 from apps.api.conversion_runner import ConversionRunner
+from apps.api.benchmarks import router as benchmark_router
 
 
 @asynccontextmanager
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title='Tufa Scholar', lifespan=lifespan)
 app.add_middleware(ConversionBodyLimit)
 app.include_router(conversion_router)
+app.include_router(benchmark_router)
 
 
 @app.middleware('http')
@@ -77,6 +79,8 @@ async def validation_error(request: Request, exc: RequestValidationError):
     # Pydantic error details can include input values, including submitted secrets.
     if request.url.path in ('/settings', '/settings/models'):
         return JSONResponse(status_code=422, content={'detail': '设置参数无效'})
+    if request.url.path.startswith('/benchmark'):
+        return JSONResponse(status_code=422, content={'detail': '评测参数无效'})
     return await request_validation_exception_handler(request, exc)
 
 
@@ -403,7 +407,7 @@ def search_history(project_id: int, q: str):
 @app.get('/reports/{report_id}')
 def report_details(report_id: int):
     report = repo.get_report(report_id)
-    if report is None:
+    if report is None or not repo.project_exists(report['project_id']):
         raise HTTPException(404, '报告不存在')
     report['content'] = numbered_references(report['content'], report['evidence'], legacy=True)
     return report
@@ -418,7 +422,7 @@ def report_markdown(report_id: int):
 @app.get('/reports/{report_id}/evidence.csv')
 def report_csv(report_id: int):
     report = repo.get_report(report_id)
-    if report is None:
+    if report is None or not repo.project_exists(report['project_id']):
         raise HTTPException(404, '报告不存在')
     output = io.StringIO(newline='')
     fields = ['id','paper_id','title','source_level','version_id','page','text','original_url','provider','retrieved_at','published_at','char_start','char_end','document_id']
@@ -518,7 +522,7 @@ def create_run(project_id: int, body: RunInput):
 @app.get('/runs/{run_id}')
 def get_run(run_id: int):
     task = repo.get_task(run_id)
-    if not task:
+    if not task or not repo.project_exists(task['project_id']):
         raise HTTPException(404, '任务不存在')
     result = task.get('result')
     if isinstance(result, dict) and result.get('evidence') and result.get('content'):
@@ -528,7 +532,8 @@ def get_run(run_id: int):
 
 @app.get('/runs/{run_id}/events')
 async def stream_research_events(run_id: int, request: Request, after: int = Query(0, ge=0, le=9223372036854775807)):
-    if not await asyncio.to_thread(repo.get_task, run_id):
+    task = await asyncio.to_thread(repo.get_task, run_id)
+    if not task or not await asyncio.to_thread(repo.project_exists, task['project_id']):
         raise HTTPException(404, '任务不存在')
     cursor = after
     last_id = request.headers.get('last-event-id', '')
@@ -563,7 +568,7 @@ async def stream_research_events(run_id: int, request: Request, after: int = Que
 @app.post('/runs/{run_id}/retry', status_code=201)
 def retry_run(run_id: int):
     task = repo.get_task(run_id)
-    if not task:
+    if not task or not repo.project_exists(task['project_id']):
         raise HTTPException(404, '任务不存在')
     if task['status'] not in ('failed', 'interrupted'):
         raise HTTPException(409, '只有失败或中断的任务可以重新执行')
@@ -573,7 +578,7 @@ def retry_run(run_id: int):
 @app.post('/runs/{run_id}/regenerate', status_code=201)
 def regenerate_answer(run_id: int, body: RegenerateInput | None = None):
     task = repo.get_task(run_id)
-    if not task:
+    if not task or not repo.project_exists(task['project_id']):
         raise HTTPException(404, '任务不存在')
     if task['kind'] != 'chat' or task['status'] not in ('succeeded', 'failed', 'interrupted'):
         raise HTTPException(409, '只有已结束的问答任务可以重新回答')

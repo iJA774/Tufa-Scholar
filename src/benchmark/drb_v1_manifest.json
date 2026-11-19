@@ -1,0 +1,21 @@
+{
+  "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+  "data/criteria_data/criteria.jsonl": "4dbd2451bc487647b3588193e52b00be1fbe5540174da3b3707db57197697edb",
+  "data/test_data/cleaned_data/reference.jsonl": "0d7887990f4c1c20aee2ffdd46b58543767efbf7bb8faf35799954ac4adbc802",
+  "deepresearch_bench_race.py": "644586de4037920e71027152e1674248bca125fbc88664a5bebd1d7f6953ad7a",
+  "prompt/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "prompt/clean_prompt.py": "648563efdd8d24e76bae4ce69f5c34ecda2f64134f59fa66906cfad9fee96e24",
+  "prompt/score_prompt_en.py": "7a63dac448e3ade2b577bcca5e455b46849930c1c2c0c664b287abdfa9b1b813",
+  "prompt/score_prompt_zh.py": "e8773c834d4351000243f5373ec9878703b8b557ee6c44efd0a0435d1fe26463",
+  "utils/__init__.py": "682a3f432e625f97dd6a623ae9c4ed32c5d2d871f659950eeaa07cda60a3ee35",
+  "utils/api.py": "1043bacd06c8abfb5cccae6fafc5541d06a4d394e530a28a71869c45b945b227",
+  "utils/clean_article.py": "a04c72a1c3be18eae33eee3f4cdccb319c14634531b39f6c667d9a9c0b1ac9cf",
+  "utils/deduplicate.py": "53d72b884a393e5c8a3c478c815b9b37dd7be0cb96e6bcb398ce2dded66c56ee",
+  "utils/extract.py": "82e07eb2f519dcf7d0c216caf8e1dbd29f5ce5b4d3614c65c93a099738389bc8",
+  "utils/io_utils.py": "5c929901d5654a166e441b623ae7d59e7c992148cd860e6cbf6a732b19cf5c31",
+  "utils/json_extractor.py": "6142892908cbd28d0a3894417b94bd24af7a058fa178790d557686d6f9705b0f",
+  "utils/score_calculator.py": "faca06831b10f456098e63a523fe4055a48b7715e651f4b5624bc9f62c28399d",
+  "utils/scrape.py": "fd320687fd5817a74d4de92cee6d38445b0faaf7c4c33655361048400c34462c",
+  "utils/stat.py": "7640c15323c51524da2d46eb166565aabdca08a1057786225fd8b51256f3daeb",
+  "utils/validate.py": "aa361407b77e0a7df8c1c8572173fea0b512c5aa4e77adb1131d0a88ed8d3a3f"
+}

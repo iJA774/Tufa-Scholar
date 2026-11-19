@@ -9,6 +9,7 @@
 | `apps/web/` | Next.js 开始页、研究工作台、设置、任务轮询与 API 代理。 |
 | `apps/api/` | FastAPI 请求校验、本机数据访问、报告与文件交付。 |
 | `apps/worker/` | 单进程顺序领取任务、准备研究输入、持久化阶段及提交结果。 |
+| `src/benchmark/` | 基准适配器、批次配置、阶段调度、官方评分和结果导出。 |
 | `src/agents/` | 七个科研工作流节点、研究调度与结果收束，以及独立文档分类节点。 |
 | `src/tools/` | 显式注册、发现、参数校验及按上下文执行科研工具。 |
 | `src/integrations/` | OpenAlex、OpenAI 兼容模型和网页搜索协议适配。 |
@@ -63,6 +64,48 @@ API 创建任务并返回 ID，单 worker 领取后准备范围数据和对话�
 `POST /runs/{id}/regenerate` 为已结束的问答创建新任务，使用当前模型设置，同时保留原问题、研究模式、来源及收藏夹成员快照、研究偏好和显式思考强度。原模型快照和旧报告不修改，不复制用户消息及研究事件。上下文止于原问题，排除该问题的旧回答与后续轮次。同一会话的活动任务检查与入队在同一写事务内完成；原有 `/retry` 仍只接受失败或中断任务并保留原模型。
 
 收藏夹问题在提交时固定项目内成员快照。研究分支运行和重试只使用此快照，不读取其他会话历史，也不做收藏夹外的检索；空集合应输出证据不足。快速探索不读取收藏夹资料。`local` 只用项目本地论文。来源边界由 worker 准备的研究输入和 `ToolContext` 共同落实。
+
+
+## Benchmark 评测
+
+```mermaid
+flowchart LR
+    Web["设置 / Benchmark 工作台"] --> API["FastAPI /benchmark"]
+    CLI["Benchmark CLI"] --> API
+    API --> Store[("SQLite 批次、阶段、尝试与调用")]
+    API --> Dataset["锁定题库与官方评分资产"]
+    Store --> Worker["单 worker · 普通研究优先"]
+    Worker --> Research["正常科研任务与 LangGraph"]
+    Research --> Reports[("正式报告、证据及活动")]
+    Worker --> Judge["DRB v1 RACE / FACT"]
+    Dataset --> Judge
+    Reports --> Adapter["引用适配与官方 JSONL"]
+    Adapter --> Judge
+    Judge --> Store
+    Reports --> API
+```
+
+```mermaid
+flowchart TD
+    Start["按预算确认创建批次"] --> Persist["固定题目、配置快照与 Git 版本"]
+    Persist --> Next{"普通科研队列空闲且批次可派发"}
+    Next -->|"研究待执行"| Generate["新会话 → 正常科研工作流 → 提交终稿"]
+    Next -->|"有待评分终稿"| Evaluate["选定的评分阶段 → 独立 Judge"]
+    Generate --> Checkpoint["提交阶段结果、安全检查点"]
+    Evaluate --> Checkpoint
+    Checkpoint -->|"暂停或预算到达"| Hold["等待继续"]
+    Checkpoint -->|"仍有适用阶段"| Next
+    Checkpoint -->|"阶段结束或停止"| Review["历史、详情、对比和导出"]
+    Hold -->|"继续"| Next
+```
+
+API 与 CLI 共用批次入口，SQLite 只负责短事务。每题入队时新建会话和用户消息，复用普通 `chat` 任务的输入、事件和报告提交。批次项目从普通项目和历史入口隐藏。Agent 只读取原始题目、本次会话和现有研究工具。已知基准发布地址从评测检索候选中筛除。官方标准和参考报告归评分阶段所有。
+
+调度每次只领取一个阶段。常驻 worker 在普通待处理队列为空时派发评测，使用同一 Python 环境的短生命周期子进程执行，并在阶段间重新检查普通队列。阶段状态和尝试保存在 `benchmark_runs`、`benchmark_tasks`、`benchmark_stages`、`benchmark_attempts` 和 `benchmark_calls`。子进程受阶段时限及父进程生命周期约束。重启时从已提交的报告和评分检查点恢复；正在执行的阶段可重新排队。阶段心跳用于限制异常关机后的累计耗时估算。
+
+每批默认 1 道、最多 5 道。任务上限可配至 100 道，阶段顺序执行。单阶段默认 1,800 秒，累计默认 7,200 秒，模型请求默认上限 500。时限、请求、已知 Token 和已知费用的上限共同控制后续调用。已有研究节点的预算见[工作流预算](#工作流预算)。Worker 在调用前检查已知用量，结束时写入供应商提供的数字。模型失败后的有限退避不改变评分算法。
+
+DRB v1 调用锁定上游的 RACE 清洗及算法，以及 FACT 的提取、去重、正文处理及支持性验证函数。Tufa 提供 Windows 可用的顺序执行、可配置的模型和正文服务传输层、文件校验、阶段结果入库及上游统计量聚合。原始报告和适配正文可在详情中检查。数据集和 API 使用说明见 [Benchmark 使用文档](BENCHMARK.md)。
 
 ## 科研工作流
 

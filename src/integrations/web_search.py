@@ -1,5 +1,7 @@
 """Direct, bounded adapters for the configured web search provider."""
 from datetime import datetime, timezone
+from src.infrastructure.execution import allowed_source, observed_retrieval
+
 import ipaddress
 import logging
 import os
@@ -230,6 +232,7 @@ class _Duckduckgo(Duckduckgo):
         return body
 
 
+@observed_retrieval("web_search")
 def search_web(query: str, limit: int = 5) -> list[dict]:
     """Search one configured provider; failures never expose upstream bodies or credentials."""
     started = time.monotonic()
@@ -306,6 +309,7 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
                         raise ValueError("invalid response")
                     item["extract"] = page.get("extract")
         results = _normalise(items, engine, limit, "abstract" if engine == "arxiv" else "web_snippet")
+        results = [item for item in results if allowed_source(item.get("url"))]
         logger.info('web_search engine=%s outcome=%s result_count=%d elapsed_ms=%d', engine, 'success' if results else 'empty', len(results), int((time.monotonic() - started) * 1000))
         return results
     except _ConfigError as exc:

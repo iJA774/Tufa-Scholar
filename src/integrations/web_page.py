@@ -1,4 +1,5 @@
 """Fetch public web pages without proxies or ambient credentials."""
+
 import http.client
 import ipaddress
 import logging
@@ -210,9 +211,18 @@ def _target(url):
 
 
 def fetch_page(url):
+    from src.infrastructure.execution import allowed_source, observe_retrieval
+
+    with observe_retrieval("web_page"):
+        return _fetch_page(url, allowed_source)
+
+
+def _fetch_page(url, allowed_source):
     started = time.monotonic()
     try:
         for _ in range(6):
+            if not allowed_source(url):
+                raise WebPageError(category="unsafe_url", reason="excluded_benchmark_source")
             parts, hostname, port, addresses = _target(url)
             url = urlunsplit((parts.scheme.lower(), f'[{hostname}]' if ':' in hostname else hostname, parts.path, parts.query, ''))
             connection_type = _PinnedHTTPS if parts.scheme.lower() == 'https' else _PinnedHTTP
