@@ -248,7 +248,17 @@ def create_task(project_id, conversation_id, query, source):
 
 def get_task(task_id):
     with connect_database() as db:
-        return _task(_one(db, 'SELECT * FROM tasks WHERE id=?', (task_id,)))
+        return _task(_one(db, '''SELECT t.*, c.total_tokens AS conversation_total_tokens
+            FROM tasks t LEFT JOIN conversations c ON c.id=t.conversation_id
+            WHERE t.id=?''', (task_id,)))
+
+
+def add_conversation_tokens(run_id, total):
+    with connect_database() as db:
+        db.execute('''UPDATE conversations SET total_tokens=COALESCE(total_tokens, 0)+?
+            WHERE id=(SELECT conversation_id FROM tasks WHERE id=? AND kind='chat' AND status='running')''',
+                   (total, run_id))
+        db.commit()
 
 
 def record_research_event(run_id, kind, data):
@@ -277,7 +287,10 @@ def list_tasks(project_id, conversation_id=None):
         if conversation_id is None:
             rows = _all(db, 'SELECT * FROM tasks WHERE project_id=? ORDER BY id DESC LIMIT 20', (project_id,))
         else:
-            rows = _all(db, 'SELECT * FROM tasks WHERE project_id=? AND conversation_id=? ORDER BY id DESC LIMIT 20', (project_id, conversation_id))
+            rows = _all(db, '''SELECT t.*, c.total_tokens AS conversation_total_tokens
+                FROM tasks t JOIN conversations c ON c.id=t.conversation_id
+                WHERE t.project_id=? AND t.conversation_id=? ORDER BY t.id DESC LIMIT 20''',
+                        (project_id, conversation_id))
         return [_task(row) for row in rows]
 
 

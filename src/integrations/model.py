@@ -6,6 +6,8 @@ import logging
 import re
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -52,7 +54,8 @@ DECISION_PROMPTS = frozenset({
 })
 UNSUPPORTED_REQUEST_PARAMS = OrderedDict()
 MAX_UNSUPPORTED_REQUEST_PARAMS = 256
-COMPATIBLE_OPTIONAL_PARAMS = ('stream', 'max_completion_tokens', 'reasoning_effort')
+COMPATIBLE_OPTIONAL_PARAMS = ('stream_options', 'stream', 'max_completion_tokens', 'reasoning_effort')
+_usage_callback = ContextVar('model_usage_callback', default=None)
 
 # Only root addresses of known OpenAI-compatible endpoints are completed.
 ROOT_PATHS = {
@@ -434,6 +437,8 @@ def _rejected_optional_parameter(response, request_body):
         error = body.get('error') if isinstance(body.get('error'), dict) else body
         parameter = error.get('param', body.get('param'))
         parameter = parameter.rsplit('.', 1)[-1].lower() if isinstance(parameter, str) else None
+        if parameter in ('stream_options', 'include_usage') and 'stream_options' in request_body:
+            return 'stream_options'
         # Retain the prior stream fallback contract, including providers that only
         # identify the rejected field in `param` and omit a useful message.
         if parameter == 'stream' and 'stream' in request_body:
@@ -481,6 +486,8 @@ def _rejected_optional_parameter(response, request_body):
             ))
         )
         if explicit_parameter_rejection:
+            if 'stream_options' in request_body and 'include_usage' in message:
+                return 'stream_options'
             for candidate in COMPATIBLE_OPTIONAL_PARAMS:
                 if candidate in request_body and candidate in message:
                     return candidate
@@ -490,6 +497,8 @@ def _rejected_optional_parameter(response, request_body):
             'unsupported', 'not supported', 'not support', 'unknown parameter',
             'unrecognized parameter', 'unexpected parameter', 'invalid parameter',
         )):
+            if 'stream_options' in request_body and 'stream_options' in message:
+                return 'stream_options'
             return 'stream'
     return None
 
@@ -640,6 +649,25 @@ def _usage_log_fields(usage):
     return ' '.join(f'{key}={value if value is not None else "na"}' for key, value in values.items())
 
 
+@contextmanager
+def track_token_usage(callback):
+    """Report measured usage once per response within the caller's task scope."""
+    token = _usage_callback.set(callback)
+    try:
+        yield
+    finally:
+        _usage_callback.reset(token)
+
+
+def _report_token_usage(usage):
+    callback = _usage_callback.get()
+    if callback is None or not isinstance(usage, dict):
+        return
+    total = numeric_usage(usage)['total_tokens']
+    if total is not None:
+        callback(total)
+
+
 def _emit_stream(callback, kind, data):
     """Send public model lifecycle events without letting observers break the call."""
     if callback is None:
@@ -660,6 +688,7 @@ def _stream_response(response, on_stream, attempt, phase, secrets=(), native_too
         response.read()
         body = response.json()
         usage = body.get('usage') if isinstance(body, dict) else None
+        _report_token_usage(usage)
         choice = body['choices'][0]
         if native_tools is not None:
             decision = _native_decision_from_message(
@@ -795,6 +824,8 @@ def _stream_response(response, on_stream, attempt, phase, secrets=(), native_too
         # fails; the caller will report failure and must not retry this request.
         flush(final=True)
         raise
+    finally:
+        _report_token_usage(usage)
     flush(final=True)
     if native_tools is not None:
         if finish_reason is None and not stream_terminated:
@@ -819,6 +850,8 @@ def _disable_rejected_optional_parameter(response, request_body, config):
         request_body.pop('reasoning_effort', None)
     else:
         request_body.pop(rejected, None)
+        if rejected == 'stream':
+            request_body.pop('stream_options', None)
     _remember_unsupported_parameter(config, rejected)
     return True
 
@@ -860,6 +893,7 @@ def _post_structured(config, headers, request_body, *, on_stream, attempt, phase
             response.raise_for_status()
             body = response.json()
             usage = body.get('usage') if isinstance(body, dict) else None
+            _report_token_usage(usage)
             choice = body['choices'][0]
             finish_reason = choice.get('finish_reason')
             if native_tools is not None:
@@ -940,6 +974,8 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 _emit_stream(on_stream, 'model.started', {'attempt': attempt, 'phase': phase})
             if stream_request:
                 request_body['stream'] = True
+                if not _parameter_is_known_unsupported(config, 'stream_options'):
+                    request_body['stream_options'] = {'include_usage': True}
             response, content, usage, finish_reason, streamed, native_decision = _post_structured(
                 config,
                 headers,

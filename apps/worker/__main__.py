@@ -15,7 +15,7 @@ from src.tools import ToolContext, ToolRegistry
 from src.persistence.storage import initialize_storage
 from src.infrastructure.logging_setup import configure_logging, safe_stack
 from src.infrastructure.diagnostics import diagnostic_scope
-from src.integrations.model import ModelServiceError, StructuredOutputError
+from src.integrations.model import ModelServiceError, StructuredOutputError, track_token_usage
 
 
 def run_once(benchmark_task_id=None):
@@ -28,6 +28,7 @@ def run_once(benchmark_task_id=None):
     try:
         if task.get('kind') == 'chat':
             from src.agents.literature import run
+            run_id = task['id']
             research = {key: task.get(key) for key in (
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode',
                 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
@@ -39,7 +40,10 @@ def run_once(benchmark_task_id=None):
                 repository.record_research_event(task['id'], kind, data)
 
             tags = {'suppress_artifacts': True} if benchmark_task_id is not None else {}
-            with diagnostic_scope(run_id=task['id'], project_id=task['project_id'], **tags):
+            with (
+                diagnostic_scope(run_id=run_id, project_id=task['project_id'], **tags),
+                track_token_usage(lambda total: repository.add_conversation_tokens(run_id, total)),
+            ):
                 content, evidence = run(
                     research, history=history,
                     on_stage=lambda stage: repository.update_stage(task['id'], stage),

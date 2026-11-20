@@ -18,6 +18,7 @@ type WorkspacePageProps = {
   initialSettingsOpen?: boolean;
   onSettingsClose?: () => void;
 };
+const tokenNumberFormat = new Intl.NumberFormat("zh-CN");
 
 function timestamp(value: string | null) {
   if (!value) return 0;
@@ -44,6 +45,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
   const [retryProjects, setRetryProjects] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<number>();
+  const [tokenUsage, setTokenUsage] = useState<{ id: number; total: number | null }>();
   const [preferences, setPreferences] = useState<WorkspacePreferences>(DEFAULT_PREFERENCES);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
@@ -85,6 +87,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
 
   const activeProject = projects.find(project => project.id === projectId);
   const activeConversation = conversations.find(conversation => conversation.id === conversationId);
+  const totalTokens = tokenUsage?.id === conversationId ? tokenUsage?.total : undefined;
 
   useEffect(() => {
     mounted.current = true;
@@ -319,6 +322,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
   const createNewStudy = useCallback(() => {
     conversationIdRef.current = undefined;
     setConversationId(undefined);
+    setTokenUsage(undefined);
     setNewStudyKey(key => key + 1);
     setHistorySearch("");
     historyOpenSource.current = "manual";
@@ -351,6 +355,18 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
     }
     conversationIdRef.current = id;
     setConversationId(id);
+  }, []);
+
+  const onTokenUsage = useCallback((id: number, total: number | null) => {
+    if (conversationIdRef.current !== id) return;
+    setTokenUsage(previous => {
+      if (previous?.id === id) {
+        if (previous.total === total) return previous;
+        // The task feed and polling can return snapshots in either order.
+        if (previous.total !== null && (total === null || total < previous.total)) return previous;
+      }
+      return { id, total };
+    });
   }, []);
 
   const onHistoryUpdated = useCallback(() => {
@@ -402,6 +418,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
       if (conversationIdRef.current === conversation.id) {
         conversationIdRef.current = undefined;
         setConversationId(undefined);
+        setTokenUsage(undefined);
         setNewStudyKey(key => key + 1);
         setPageError("");
       }
@@ -475,10 +492,14 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
         <svg className={`${styles.icon} ${styles.brandChevron}`} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
       </button>
       <div className={styles.headerActions}>
-        <button className={styles.settingsButton} type="button" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}>
+        <button className={styles.settingsButton} type="button" aria-label="设置" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}>
           <svg className={styles.icon} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.3a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6Z" /><path d="M19.1 13.6a7.6 7.6 0 0 0 0-3.2l1.7-1.3-1.7-3-2 .7a7.8 7.8 0 0 0-2.8-1.6L14 3h-4l-.3 2.2A7.8 7.8 0 0 0 7 6.8l-2-.7-1.8 3 1.7 1.3a7.6 7.6 0 0 0 0 3.2l-1.7 1.3 1.8 3 2-.7a7.8 7.8 0 0 0 2.7 1.6L10 21h4l.3-2.2a7.8 7.8 0 0 0 2.8-1.6l2 .7 1.7-3-1.7-1.3Z" /></svg>
           <span>设置</span>
         </button>
+        {conversationId !== undefined && <output className={styles.sessionUsage} title="累计记录的输入和输出 Token，包含重新回答和重试。更新前或模型服务未上报的用量可能缺失。">
+          <span>会话 Token</span>
+          <strong>{typeof totalTokens === "number" ? tokenNumberFormat.format(totalTokens) : totalTokens === null ? "暂无记录" : "—"}</strong>
+        </output>}
       </div>
     </header>
 
@@ -579,6 +600,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
       onModeChange={mode => updatePreference("mode", mode)}
       onEnsureProject={ensureProject}
       onConversationChange={onConversationChange}
+      onTokenUsage={onTokenUsage}
       onNewStudy={createNewStudy}
       onHistoryUpdated={onHistoryUpdated}
       onError={reportError}

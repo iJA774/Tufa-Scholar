@@ -1087,7 +1087,9 @@ class ModelTests(unittest.TestCase):
                 'usage': {'prompt_tokens': 100, 'completion_tokens': 5, 'total_tokens': 105},
             },
         )
-        with patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
+        measured = []
+        with model_client.track_token_usage(measured.append), \
+             patch('src.integrations.model.settings.model_config', return_value={'base_url': 'https://example.invalid/v1', 'model': 'test'}), \
              patch('src.integrations.model.httpx.post', return_value=response) as post, \
              patch('src.integrations.model.diagnostic_context', return_value={'run_id': 9}), \
              self.assertLogs('src.integrations.model', level='INFO') as logs:
@@ -1102,19 +1104,23 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(output.count('prompt_tokens=100'), 2)
         self.assertEqual(output.count('completion_tokens=5'), 2)
         self.assertEqual(output.count('total_tokens=105'), 2)
+        self.assertEqual(measured, [105, 105])
 
     def test_streaming_reads_only_sse_content_and_coalesces_small_chunks(self):
         request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
         events = [
             {'choices': [{'delta': {'reasoning_content': 'private reasoning', 'content': '{"ans'}}]},
             {'choices': [{'delta': {'reasoning_content': 'more private reasoning', 'content': 'wer":"'}}]},
-            {'choices': [{'delta': {'content': 'ok"}'}}], 'usage': {'prompt_tokens': 11, 'completion_tokens': 4, 'total_tokens': 15}},
+            {'choices': [{'delta': {'content': 'ok"}'}}]},
+            {'choices': [], 'usage': {'prompt_tokens': 11, 'completion_tokens': 4}},
         ]
         payload = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events) + 'data: [DONE]\n\n'
         response = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=payload)
         observed = []
+        measured = []
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test', 'api_key': 'private-key'}
-        with patch('src.integrations.model.settings.model_config', return_value=config), \
+        with model_client.track_token_usage(measured.append), \
+             patch('src.integrations.model.settings.model_config', return_value=config), \
              patch('src.integrations.model.httpx.stream', return_value=nullcontext(response)) as stream, \
              self.assertLogs('src.integrations.model', level='INFO') as logs:
             result = structured('literature/researcher', {'phase': 'act', 'question': 'private prompt'}, Output,
@@ -1123,7 +1129,8 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result.answer, 'ok')
         body = stream.call_args.kwargs['json']
         self.assertTrue(body['stream'])
-        self.assertNotIn('stream_options', body)
+        self.assertEqual(body['stream_options'], {'include_usage': True})
+        self.assertEqual(measured, [15])
         self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.completed'])
         self.assertEqual(''.join(data['text'] for kind, data in observed if kind == 'model.delta'), '{"answer":"ok"}')
         self.assertTrue(all(data['attempt'] == 1 and data['phase'] == 'act' for _, data in observed))
@@ -1166,7 +1173,28 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result.answer, 'ok')
         self.assertEqual(stream.call_count, 1)
         self.assertNotIn('stream', post.call_args.kwargs['json'])
+        self.assertNotIn('stream_options', post.call_args.kwargs['json'])
         self.assertEqual([kind for kind, _ in observed], ['model.started', 'model.delta', 'model.completed'])
+
+    def test_usage_option_rejection_keeps_streaming(self):
+        request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
+        rejection = httpx.Response(400, request=request, json={
+            'error': {'message': 'stream_options is not supported', 'param': 'stream_options'},
+        })
+        sent = []
+
+        def stream(*args, json, **kwargs):
+            sent.append(dict(json))
+            return nullcontext(rejection if 'stream_options' in json else self.response())
+
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.stream', side_effect=stream):
+            result = structured('runtime/dispatcher', {}, Output, on_stream=lambda *_: None)
+            self.assertEqual(result.answer, 'ok')
+            structured('runtime/dispatcher', {}, Output, on_stream=lambda *_: None)
+        self.assertEqual([body['stream'] for body in sent], [True, True, True])
+        self.assertEqual(['stream_options' in body for body in sent], [True, False, False])
 
     def test_streaming_redacts_known_key_even_when_split_across_sse_chunks(self):
         request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
