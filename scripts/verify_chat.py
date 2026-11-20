@@ -91,6 +91,11 @@ def main():
                 pattern = re.compile(rf'task_stage run_id={run_id} stage=([a-z_]+)')
                 return [match.group(1) for match in pattern.finditer(log_path.read_text(encoding='utf-8', errors='replace'))]
 
+            def reported_tokens(run_id):
+                log_path = Path(temporary.name) / 'logs' / 'worker.log'
+                pattern = rf'model_call (?:completed|invalid) run_id={run_id} [^\n]*\btotal_tokens=(\d+)'
+                return sum(int(value) for value in re.findall(pattern, log_path.read_text(encoding='utf-8')))
+
             project = call('POST', '/projects', json={'name': 'Isolated chat acceptance'})['id']
             pdf = make_pdf()
             imported = call(
@@ -109,6 +114,7 @@ def main():
             failed = wait(pending['run_id'])
             assert failed['status'] == 'failed' and '配置模型' in failed.get('error', ''), failed
             failed_detail = call('GET', f"/runs/{pending['run_id']}")
+            assert failed_detail['conversation_total_tokens'] is None
             assert failed_detail['research_mode'] == 'deep', failed_detail
             preferences = {
                 'research_depth': 'light',
@@ -146,6 +152,8 @@ def main():
             assert cited['source_level'] == 'local_markdown' and cited['char_end'] > cited['char_start'], cited
             assert cited['paper_id'] == imported['id'], cited
             assert completed['stage'] == 'completed'
+            initial_usage = reported_tokens(retry['id'])
+            assert initial_usage > 0 and completed['conversation_total_tokens'] == initial_usage
             retry_stages = stages(retry['id'])
             assert retry_stages[-1:] == ['reporter'], retry_stages
             assert retry_stages[:2] == ['dispatcher', 'planner'] and 'background_investigator' not in retry_stages, retry_stages
@@ -205,6 +213,7 @@ def main():
             assert direct_task['status'] == 'succeeded', direct_task
             assert direct_task['stage'] == 'completed'
             assert direct_task['result']['evidence'] == []
+            assert direct_task['conversation_total_tokens'] == reported_tokens(direct['run_id']) > 0
             roles = [
                 line.split('运行节点标识：', 1)[1].splitlines()[0].strip()
                 for item in direct_requests
@@ -238,11 +247,18 @@ def main():
             regenerated_task = wait(regenerated['id'])
             assert regenerated_task['status'] == 'succeeded', regenerated_task
             assert regenerated_task['result']['evidence']
+            regeneration_usage = reported_tokens(regenerated['id'])
+            assert regeneration_usage > 0
+            total_usage = initial_usage + regeneration_usage
+            assert regenerated_task['conversation_total_tokens'] == total_usage
+            history_runs = call('GET', f"/projects/{project}/runs", params={'conversation_id': pending['conversation_id']})
+            assert all(run['conversation_total_tokens'] == total_usage for run in history_runs)
+            assert call('GET', f"/runs/{direct['run_id']}")['conversation_total_tokens'] == direct_task['conversation_total_tokens']
             assert all(request['model'] == 'fixture-replacement' for request in fixture.model_requests[before:])
             messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
             assert [message['role'] for message in messages] == ['user', 'assistant', 'assistant']
             assert client.get(f'/reports/{report_id}/markdown').status_code == 200
-            print('Simulated model: API/worker, retry and regeneration, direct answer, Markdown evidence, report and empty collection passed.')
+            print('Simulated model: API/worker, retry and regeneration, cumulative session tokens, direct answer, Markdown evidence, report and empty collection passed.')
             print('Cloud model and real-provider quality were not exercised.')
     finally:
         try:
