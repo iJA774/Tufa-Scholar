@@ -72,14 +72,44 @@ try {
     foreach ($role in @('api', 'worker', $webRole)) {
         $children += Start-OwnedChild $role
     }
-    Write-Host 'Web: http://127.0.0.1:3000  API: http://127.0.0.1:8000'
-    while ($true) {
+
+    function Assert-ServicesRunning {
         foreach ($child in $children) {
             $child.Refresh()
             if ($child.HasExited) {
                 throw "A service exited (PID $($child.Id), exit code $($child.ExitCode)). See logs in $logDir."
             }
         }
+    }
+
+    $webUrl = 'http://127.0.0.1:3000'
+    Write-Host 'Waiting for the web application and API proxy...'
+    $startup = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($path in @('/', '/workspace', '/api/health')) {
+        do {
+            Assert-ServicesRunning
+            if ($startup.Elapsed.TotalSeconds -ge 120) {
+                throw "The web application did not become ready at $path. See logs in $logDir."
+            }
+            $ready = $false
+            try {
+                $response = Invoke-WebRequest -Uri "$webUrl$path" -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0
+                $ready = $response.StatusCode -eq 200
+            } catch {
+                # The service can be listening before Next.js has compiled the route.
+            }
+            if (-not $ready) { Start-Sleep -Milliseconds 500 }
+        } until ($ready)
+    }
+    Assert-ServicesRunning
+    Write-Host "Web: $webUrl  API: $env:TUFA_API_URL"
+    try {
+        Start-Process $webUrl
+    } catch {
+        Write-Warning 'Could not open the default browser. Open the Web link above.'
+    }
+    while ($true) {
+        Assert-ServicesRunning
         Start-Sleep -Seconds 1
     }
 } catch {

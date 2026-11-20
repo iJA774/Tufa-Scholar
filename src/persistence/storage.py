@@ -62,6 +62,8 @@ def initialize_storage() -> dict:
         connection.execute("CREATE INDEX IF NOT EXISTS document_tags_reverse ON document_tags(tag, path)")
         if 'pinned' not in {row[1] for row in connection.execute('PRAGMA table_info(conversations)')}:
             connection.execute('ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0')
+        if 'total_tokens' not in {row[1] for row in connection.execute('PRAGMA table_info(conversations)')}:
+            connection.execute('ALTER TABLE conversations ADD COLUMN total_tokens INTEGER')
         if 'pages_indexed' not in {row[1] for row in connection.execute('PRAGMA table_info(paper_versions)')}:
             connection.execute('ALTER TABLE paper_versions ADD COLUMN pages_indexed INTEGER NOT NULL DEFAULT 0')
         connection.execute('CREATE TABLE IF NOT EXISTS paper_pages (version_id INTEGER NOT NULL REFERENCES paper_versions(id), page INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(version_id, page))')

@@ -275,6 +275,7 @@ type Props = {
   onModeChange: (mode: ResearchMode) => void;
   onEnsureProject: () => Promise<number>;
   onConversationChange: (id: number, projectId: number) => void;
+  onTokenUsage: (id: number, total: number | null) => void;
   onNewStudy: () => void;
   onHistoryUpdated: () => void;
   onError: (message: string) => void;
@@ -297,6 +298,7 @@ export default function ResearchChat({
   onModeChange,
   onEnsureProject,
   onConversationChange,
+  onTokenUsage,
   onNewStudy,
   onHistoryUpdated,
   onError,
@@ -327,6 +329,12 @@ export default function ResearchChat({
   const progressCloseButton = useRef<HTMLButtonElement>(null);
   const activeRun = run && ["queued", "pending", "running"].includes(run.status);
   const hasConversation = conversationId !== undefined;
+  const totalTokens = run ? run.conversation_total_tokens : null;
+  const usageConversationId = run?.conversation_id ?? loadedConversationId;
+  useEffect(() => {
+    if (conversationId === undefined || loadedConversationId !== conversationId || usageConversationId !== conversationId) return;
+    if (totalTokens !== undefined) onTokenUsage(conversationId, totalTokens);
+  }, [conversationId, loadedConversationId, usageConversationId, totalTokens, onTokenUsage]);
   const historyRunCandidate = isDeepResearchRun(run) ? undefined
     : runs.find(item => item.id !== run?.id && isDeepResearchRun(item))
       ?? runs.find(item => item.id !== run?.id && item.research_mode === "auto");
