@@ -487,11 +487,11 @@ export default function SettingsPanel({
           </div>}
 
           {activeTab === "search" && <WebSearchSettings />}
-
           {activeTab === "benchmark" && <section className={styles.card}>
             <h2>Benchmark 评测</h2>
             <Link className={styles.aboutLink} href="/benchmark">打开评测工作台 <span aria-hidden="true">↗</span></Link>
           </section>}
+
           <div hidden={activeTab !== "files"}><LocalDocuments projectId={projectId} /></div>
           </main>
         </div>
