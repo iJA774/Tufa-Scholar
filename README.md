@@ -25,7 +25,7 @@ TUFA 是在本机运行的科研 Agent。用它查文献、做综述，或带上
 
 ### 研究报告与引用
 
-[![AI Agent 研究报告的证据表、编号引用和参考文献](assets/screenshots/report.png)](assets/screenshots/report.png)
+[![AI Agent 研究报告的正文、编号引用和本地 Markdown 证据定位](assets/screenshots/report.png)](assets/screenshots/report.png)
 
 ### Benchmark 评测工作台
 
@@ -68,7 +68,7 @@ pnpm install --frozen-lockfile
 
 1. 打开「网络搜索」并提交问题。想直接进入研究流程，可以选择「深度研究」。
 2. 在「活动」看 TUFA 如何从学术检索展开研究，再提取证据、整理主题。
-3. 打开「报告」，从证据表和编号引用回到具体文献。这次报告归纳了 Agent 架构、Agentic RAG 和安全治理等方向。你可以下载 Markdown 报告和 CSV 证据表，继续阅读或整理。
+3. 打开「报告」，沿着编号引用找到对应论文或本地文档片段。截图中的报告讨论了智能体的自主性、工具使用和长时程执行。你可以下载 Markdown 报告和 CSV 证据表，继续阅读或整理。
 
 ## 适用范围
 
