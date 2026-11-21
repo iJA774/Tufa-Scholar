@@ -10,12 +10,14 @@ import threading
 import time
 from pathlib import Path
 from src.literature.conversion.converter import process_file
+from src.literature.conversion.models import PARSE_TIMEOUT
+from apps.api.pdf_import import publish_snapshot, markdown_source_matches
 from src.persistence import conversions as store, repository as repo
 from src.persistence.storage import data_directory
 
 
 class ConversionRunner:
-    def __init__(self, timeout=45):
+    def __init__(self, timeout=PARSE_TIMEOUT):
         documents = data_directory() / 'documents'
         conversions = documents / 'conversions'
         for path in (documents, conversions):
@@ -275,7 +277,16 @@ class ConversionRunner:
                     with path.open('rb') as source:
                         source_digest = sha256()
                         for chunk in iter(lambda: source.read(256 * 1024), b''): source_digest.update(chunk)
-                    paper_id = repo.link_existing_version(batch['project_id'], source_digest.hexdigest())
+                    pdf_digest = source_digest.hexdigest()
+                    if not markdown_source_matches(markdown, pdf_digest):
+                        continue
+                    from src.persistence.storage import connect_database
+                    with connect_database() as db:
+                        exists = repo.existing_version(db, pdf_digest)
+                    if exists:
+                        snapshot = publish_snapshot(path, pdf_digest)
+                        repo.update_version_path(pdf_digest, snapshot)
+                        paper_id = repo.link_existing_version(batch['project_id'], pdf_digest)
                     if paper_id: break
                 except OSError:
                     continue
@@ -288,7 +299,7 @@ class ConversionRunner:
         if batch.get('local_originals'):
             canonical = data_directory() / 'documents' / 'conversions' / Path(item['output'])
             plain = (data_directory() / 'documents' / 'conversions' / Path(item['path'])).with_suffix('.md')
-            if canonical.is_file() or plain.is_file():
+            if (canonical.is_file() or plain.is_file()) and not item.get('retry_import'):
                 self._change_item(batch_id, file_id, state='skipped', code='already_converted', message='已有同名 Markdown，已跳过。')
                 source.unlink(missing_ok=True)
                 return
@@ -319,11 +330,17 @@ class ConversionRunner:
                 if not sidecar.exists():
                     self._change_item(batch_id, file_id, state='failed', code='converter_exit', message='转换进程异常退出或磁盘写入失败。', elapsed=elapsed)
                     return
-                result = json.loads(sidecar.read_text(encoding='utf-8'))
+                try:
+                    result = json.loads(sidecar.read_text(encoding='utf-8'))
+                    if not isinstance(result, dict) or not isinstance(result.get('ok'), bool):
+                        raise ValueError('invalid result')
+                except (OSError, UnicodeError, ValueError):
+                    self._change_item(batch_id, file_id, state='failed', code='converter_exit', message='转换进程异常退出或磁盘写入失败。', elapsed=elapsed)
+                    return
                 if not result['ok']:
                     self._change_item(batch_id, file_id, state='skipped' if result.get('skipped') else 'failed', code=result['code'], message=result['message'], elapsed=elapsed)
                     return
-                if batch.get('local_originals'):
+                if batch.get('local_originals') and not item.get('retry_import'):
                     destination = data_directory() / 'documents' / 'conversions' / Path(item['output'])
                     if not destination.resolve().is_relative_to((data_directory() / 'documents' / 'conversions').resolve()):
                         raise OSError('unsafe output directory')
@@ -360,22 +377,7 @@ class ConversionRunner:
 
     def import_pdf(self, project_id, item, source, result):
         if not repo.project_exists(project_id): raise ValueError('project missing')
-        original = data_directory() / 'documents' / 'originals' / '.store' / f'{result["digest"]}.pdf'
-        if original.parent.is_symlink() or os.path.isjunction(original.parent):
-            raise OSError('unsafe original storage')
-        original.parent.mkdir(parents=True, exist_ok=True)
-        # Exclusive create never overwrites an existing original.
-        created = False
-        try:
-            with original.open('xb') as target:
-                created = True
-                with source.open('rb') as incoming:
-                    shutil.copyfileobj(incoming, target)
-        except FileExistsError:
-            pass
-        except OSError:
-            if created: original.unlink(missing_ok=True)
-            raise
+        original = publish_snapshot(source, result['digest'])
         paper = repo.save_paper(project_id, {'title': result['title'], 'source': 'upload'}, {
             'filename': Path(item['path']).name, 'digest': result['digest'], 'path': str(original),
             'text': '\n\n'.join(result['pages']), 'pages': result['pages'], 'text_status': 'text_available'})

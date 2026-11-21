@@ -7,8 +7,6 @@ import json
 import logging
 import os
 import time
-from hashlib import sha256
-from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
@@ -17,7 +15,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
-from pypdf import PdfReader
 
 from src.persistence import repository as repo
 from src.agents.report import numbered_references
@@ -25,6 +22,7 @@ from src.infrastructure import settings
 from src.integrations.model import discover
 from src.persistence.storage import data_directory, initialize_storage
 from src.infrastructure.logging_setup import configure_logging, close_logging, safe_stack, clear_application_logs
+from apps.api.pdf_import import parse_upload
 from apps.api.conversions import router as conversion_router, ConversionBodyLimit
 from apps.api.conversion_runner import ConversionRunner
 from apps.api.benchmarks import router as benchmark_router
@@ -308,31 +306,16 @@ def save_paper(project_id: int, body: PaperInput):
 
 
 @app.post('/projects/{project_id}/papers/import', status_code=201)
-async def import_paper(project_id: int, file: UploadFile = File(...), title: str | None = Form(None), doi: str | None = Form(None), arxiv_id: str | None = Form(None)):
+def import_paper(project_id: int, file: UploadFile = File(...), title: str | None = Form(None), doi: str | None = Form(None), arxiv_id: str | None = Form(None)):
     require_project(project_id)
-    content = await file.read()
-    if not content.startswith(b'%PDF-'):
-        raise HTTPException(422, '请上传有效的 PDF 文件')
-    try:
-        reader = PdfReader(BytesIO(content))
-        pages = [(page.extract_text() or '').strip() for page in reader.pages]
-        text = '\n'.join(pages).strip()
-        pdf_title = str(reader.metadata.title or '').strip() if reader.metadata else ''
-    except Exception as exc:
-        raise HTTPException(422, '无法解析 PDF 文件') from exc
-    digest = sha256(content).hexdigest()
+    digest, path, parsed = parse_upload(file, title)
+    pages = parsed['pages']
+    text = '\n'.join(pages).strip()
+    pdf_title = parsed['title']
     from src.persistence.storage import connect_database
     with connect_database() as db:
         duplicate = bool(repo.existing_version(db, digest))
-    path = data_directory() / 'documents' / 'originals' / '.store' / f'{digest}.pdf'
-    if any(p.is_symlink() or os.path.isjunction(p) for p in (path.parent.parent.parent, path.parent.parent, path.parent)):
-        raise HTTPException(422, '原文存储目录包含不安全的链接。')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_bytes(content)
     metadata = {'title': (title or pdf_title or Path(file.filename or '文献.pdf').stem).strip(), 'doi': doi, 'arxiv_id': arxiv_id, 'source': 'upload'}
-    if not metadata['title']:
-        raise HTTPException(422, '文献标题不能为空')
     try:
         result = repo.save_paper(project_id, metadata, {'filename': Path(file.filename or 'paper.pdf').name, 'digest': digest, 'path': str(path), 'text': text, 'pages': pages, 'text_status': 'text_available' if text else 'no_extractable_text'})
     except ValueError as exc:

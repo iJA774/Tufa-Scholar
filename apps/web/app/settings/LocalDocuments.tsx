@@ -12,9 +12,10 @@ const storageKey = "tufa-conversion-batch";
 const batchStartedEvent = "tufa-conversion-batch-started";
 const finished = new Set(["completed", "cancelled", "interrupted"]);
 const labels: Record<string, string> = { waiting: "等待上传", uploading: "上传中", uploaded: "等待转换", running: "转换中", succeeded: "成功", partial: "部分转换", failed: "失败", skipped: "跳过", cancelled: "已取消" };
-export default function LocalDocuments({ projectId }: { projectId?: number }) {
+export default function LocalDocuments({ projectId, onEnsureProject }: { projectId?: number; onEnsureProject: () => Promise<number> }) {
   const previewAbort = useRef<AbortController | null>(null);
   const mounted = useRef(false);
+  const starting = useRef(false);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [batch, setBatch] = useState<Batch | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,15 +73,18 @@ export default function LocalDocuments({ projectId }: { projectId?: number }) {
   };
 
   const convert = async () => {
-    if (active) return;
+    if (active || starting.current) return;
+    starting.current = true;
     setBusy(true); setError(""); setPreview(null); setPreviewLoading("");
     previewAbort.current?.abort();
     try {
-      const created = await api<Batch>("/conversion-batches/prepare", json({ project_id: projectId ?? null }));
+      const targetProjectId = projectId ?? await onEnsureProject();
+      if (!mounted.current) return;
+      const created = await api<Batch>("/conversion-batches/prepare", json({ project_id: targetProjectId }));
       try { localStorage.setItem(storageKey, created.id); } catch { /* Session still works without storage. */ }
       window.dispatchEvent(new CustomEvent(batchStartedEvent, { detail: created }));
     } catch (cause) { if (mounted.current) setError(messageOf(cause)); }
-    finally { if (mounted.current) setBusy(false); }
+    finally { starting.current = false; if (mounted.current) setBusy(false); }
   };
 
   const clear = async () => {

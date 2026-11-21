@@ -608,6 +608,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
 
     {settingsOpen && <SettingsPanel
       projectId={activeProject?.id}
+      onEnsureProject={ensureProject}
       onClose={closeSettings}
       preferences={preferences}
       onPreferencesChange={updatePreferences}
