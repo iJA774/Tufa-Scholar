@@ -593,6 +593,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
       researchDepth={preferences.researchDepth}
       preferPrimaryEvidence={preferences.preferPrimaryEvidence}
       relevanceFilter={preferences.relevanceFilter}
+      reportFormat={preferences.reportFormat}
       enterToSend={preferences.enterToSend}
       modelChoice={preferences.modelChoice}
       ambient={preferences.glow}

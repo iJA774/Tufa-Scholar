@@ -72,9 +72,10 @@ class ChatApiTests(unittest.TestCase):
             'question': 'q', 'research_mode': 'fast',
         })
         self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(c.post(f'/projects/{project}/questions', json={'question': 'q', 'report_format': 'invalid'}).status_code, 422)
 
         created = c.post(f'/projects/{project}/questions', json={
-            'question': 'quick answer', 'research_mode': 'quick',
+            'question': 'quick answer', 'research_mode': 'quick', 'report_format': 'explainer',
         })
         self.assertEqual(created.status_code, 201)
         task = repo.get_task(created.json()['run_id'])
@@ -84,11 +85,13 @@ class ChatApiTests(unittest.TestCase):
         repo.fail_task(task['id'], 'failed')
         retry = c.post(f"/runs/{task['id']}/retry").json()
         self.assertEqual(retry['research_mode'], 'quick')
+        self.assertEqual(retry['report_format'], 'explainer')
         self.assertEqual(repo.claim_task()['id'], retry['id'])
 
         old_client = c.post(f'/projects/{project}/questions', json={'question': 'legacy request'})
         self.assertEqual(old_client.status_code, 201)
         self.assertEqual(repo.get_task(old_client.json()['run_id'])['research_mode'], 'auto')
+        self.assertEqual(repo.get_task(old_client.json()['run_id'])['report_format'], 'academic')
 
     def test_global_conversations_are_flat_sorted_and_keep_project_ids(self):
         c = self.client
@@ -202,8 +205,8 @@ class ChatApiTests(unittest.TestCase):
                 initialize_storage()
                 from src.persistence.storage import connect_database
                 with connect_database() as migrated:
-                    row = migrated.execute('SELECT query, source, status, stage, research_mode, research_depth, prefer_primary_evidence, relevance_filter FROM tasks WHERE id=1').fetchone()
-                    self.assertEqual(tuple(row), ('q', 'auto', 'pending', 'pending', 'auto', 'standard', 1, 'standard'))
+                    row = migrated.execute('SELECT query, source, status, stage, research_mode, research_depth, prefer_primary_evidence, relevance_filter, report_format FROM tasks WHERE id=1').fetchone()
+                    self.assertEqual(tuple(row), ('q', 'auto', 'pending', 'pending', 'auto', 'standard', 1, 'standard', 'academic'))
                     message = migrated.execute('SELECT content FROM messages WHERE id=1').fetchone()
                     self.assertEqual(message[0], 'legacy message')
                     conversation = migrated.execute('SELECT project_id, title, pinned FROM conversations WHERE id=1').fetchone()

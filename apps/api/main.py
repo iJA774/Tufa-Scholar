@@ -146,6 +146,7 @@ class QuestionInput(BaseModel):
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=64)
     source: Literal['auto', 'all', 'local', 'openalex', 'collection', 'web'] = 'auto'
     research_mode: Literal['auto', 'deep', 'quick'] = 'auto'
+    report_format: Literal['academic', 'exploratory', 'brief', 'explainer'] = 'academic'
     research_depth: Literal['light', 'standard', 'deep'] = 'standard'
     prefer_primary_evidence: StrictBool = True
     network_search: StrictBool = True
@@ -356,7 +357,7 @@ def ask_question(project_id: int, body: QuestionInput):
         research_depth=body.research_depth,
         prefer_primary_evidence=body.prefer_primary_evidence,
         relevance_filter=body.relevance_filter,
-        network_search=body.network_search, local_literature=body.local_literature,
+        network_search=body.network_search, local_literature=body.local_literature, report_format=body.report_format,
     )
     if result is None:
         raise HTTPException(404, '项目或对话不存在')

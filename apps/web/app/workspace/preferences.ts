@@ -3,7 +3,7 @@ import type { ResearchMode } from "./types";
 export type ModelChoice = { model_name: string };
 export type ResearchDepth = "light" | "standard" | "deep";
 export type RelevanceFilter = "relaxed" | "standard" | "strict";
-export type ReportFormat = "academic" | "exploratory";
+export type ReportFormat = "academic" | "exploratory" | "brief" | "explainer";
 export type WorkspacePreferences = {
   mode: ResearchMode;
   researchDepth: ResearchDepth;
@@ -39,7 +39,7 @@ export function readWorkspacePreferences(): WorkspacePreferences {
       researchDepth: stored?.researchDepth === "light" || stored?.researchDepth === "deep" ? stored.researchDepth : "standard",
       preferPrimaryEvidence: typeof stored?.preferPrimaryEvidence === "boolean" ? stored.preferPrimaryEvidence : DEFAULT_PREFERENCES.preferPrimaryEvidence,
       relevanceFilter: stored?.relevanceFilter === "relaxed" || stored?.relevanceFilter === "strict" ? stored.relevanceFilter : "standard",
-      reportFormat: stored?.reportFormat === "exploratory" ? "exploratory" : "academic",
+      reportFormat: stored?.reportFormat === "academic" || stored?.reportFormat === "exploratory" || stored?.reportFormat === "brief" || stored?.reportFormat === "explainer" ? stored.reportFormat : "academic",
       enterToSend: typeof stored?.enterToSend === "boolean" ? stored.enterToSend : DEFAULT_PREFERENCES.enterToSend,
       glow: typeof stored?.glow === "boolean" ? stored.glow : DEFAULT_PREFERENCES.glow,
       grid: typeof stored?.grid === "boolean" ? stored.grid : DEFAULT_PREFERENCES.grid,
