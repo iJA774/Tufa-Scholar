@@ -9,7 +9,7 @@ import { useRunEvents } from "../hooks/useRunEvents";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import { api, json, messageOf } from "./api";
 import type { Message, ResearchMode, Run, Subtask } from "./types";
-import type { ModelChoice, ResearchDepth, RelevanceFilter } from "./preferences";
+import type { ModelChoice, ReportFormat, ResearchDepth, RelevanceFilter } from "./preferences";
 import { webSourceLabel } from "./sourceLabels";
 import HeroEmblem from "./HeroEmblem";
 import ResearchPanel from "./ResearchPanel";
@@ -268,6 +268,7 @@ type Props = {
   researchDepth: ResearchDepth;
   preferPrimaryEvidence: boolean;
   relevanceFilter: RelevanceFilter;
+  reportFormat: ReportFormat;
   enterToSend: boolean;
   modelChoice: ModelChoice;
   ambient: boolean;
@@ -291,6 +292,7 @@ export default function ResearchChat({
   researchDepth,
   preferPrimaryEvidence,
   relevanceFilter,
+  reportFormat,
   enterToSend,
   modelChoice,
   ambient,
@@ -578,6 +580,7 @@ export default function ResearchChat({
           research_depth: researchDepth,
           prefer_primary_evidence: preferPrimaryEvidence,
           relevance_filter: relevanceFilter,
+          report_format: reportFormat,
           model_name: modelChoice.model_name.trim() || undefined,
         }), signal: controller.signal },
       );

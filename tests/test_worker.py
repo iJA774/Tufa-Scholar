@@ -33,7 +33,7 @@ class WorkerTests(unittest.TestCase):
                 list_papers.assert_not_called()
             self.assertEqual(observed[0][2], 'dispatcher')
             self.assertEqual([m['content'] for m in observed[0][1]], ['first question'])
-            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'})
+            self.assertEqual(set(observed[0][0]), {'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode', 'report_format', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'})
             self.assertEqual(observed[0][0]['research_mode'], 'auto')
             self.assertEqual(repository.get_task(first['run_id'])['status'], 'succeeded')
             self.assertEqual([n['task'] for n in repository.get_task(first['run_id'])['subtasks']], ['topic'])
@@ -63,7 +63,7 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
             initialize_storage()
             project = repository.create_project('mode passthrough')['id']
-            task = repository.create_question(project, None, 'question', 'local', research_mode='deep')
+            task = repository.create_question(project, None, 'question', 'local', research_mode='deep', report_format='brief')
             received = []
 
             def agent(research, *, history, on_stage, on_subtask, on_event):
@@ -73,6 +73,7 @@ class WorkerTests(unittest.TestCase):
             with patch('src.agents.literature.run', side_effect=agent):
                 self.assertTrue(run_once())
             self.assertEqual(received[0][0]['research_mode'], 'deep')
+            self.assertEqual(received[0][0]['report_format'], 'brief')
             self.assertEqual(repository.get_task(task['run_id'])['research_mode'], 'deep')
 
     def test_subtasks_survive_failure_and_retry_starts_empty(self):

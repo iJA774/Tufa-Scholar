@@ -49,6 +49,8 @@ const depthDescriptions: Record<WorkspacePreferences["researchDepth"], string> =
 const reportFormatOptions: { value: ReportFormat; label: string }[] = [
   { value: "academic", label: "学术综述" },
   { value: "exploratory", label: "探索发现" },
+  { value: "brief", label: "决策简报" },
+  { value: "explainer", label: "通俗解读" },
 ];
 
 function PreferenceSegments<T extends string>({ label, name, options, value, warningValue, onChange }: {
@@ -164,7 +166,7 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
       className={styles.reportFormatTrigger}
       type="button"
       role="combobox"
-      aria-label="报告格式"
+      aria-label="回答风格"
       aria-haspopup="listbox"
       aria-expanded={open}
       aria-controls={menuId}
@@ -181,7 +183,7 @@ function ReportFormatPicker({ value, onChange }: { value: ReportFormat; onChange
       className={styles.reportFormatMenu}
       popover="auto"
       role="listbox"
-      aria-label="报告格式"
+      aria-label="回答风格"
       onToggle={event => setOpen(event.newState === "open")}
     >
       {reportFormatOptions.map((option, index) => <div
@@ -448,7 +450,7 @@ export default function SettingsPanel({
             </div>
 
             <div className={`${styles.settingControl} ${styles.settingControlBordered} ${styles.reportFormatRow}`}>
-              <span><strong>报告格式</strong><small>暂不生效 · 终稿按当前工作流生成。</small></span>
+              <span><strong>回答风格</strong><small>用于新问题的回答和研究终稿。</small></span>
               <ReportFormatPicker value={preferences.reportFormat} onChange={value => updatePreference("reportFormat", value)} />
             </div>
           </section>}

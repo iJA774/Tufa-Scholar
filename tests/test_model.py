@@ -822,7 +822,7 @@ class ModelTests(unittest.TestCase):
     def test_reporter_prompt_follows_mainline_and_marks_partial_evidence(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
         with patch('src.integrations.model.settings.model_config', return_value=config):
-            for mode, expected, other in [('paper', '实验设计', '调查报告形式'), ('web', '调查报告形式', '学术论文为主线')]:
+            for mode, expected, other in [('paper', '以研究论文及相关原始材料作为主要证据', '围绕问题核查事实、时间'), ('web', '围绕问题核查事实、时间', '以研究论文及相关原始材料作为主要证据')]:
                 with self.subTest(mode=mode), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
                     structured('literature/reporter', {'evidence_omitted_count': 1}, Output, template_context=self.context('reporter', mode))
                 system, user = post.call_args.kwargs['json']['messages']

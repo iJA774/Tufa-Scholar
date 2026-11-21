@@ -408,13 +408,16 @@ def _available_modes(research):
 def _model_template_context(state, search_mode, node_role, available_tools):
     research = state["research"]
     catalog = _catalog_for_mode(research, search_mode) if available_tools is None and search_mode in ("web", "paper") else (available_tools or [])
-    return {
+    context = {
         "search_mode": search_mode,
         "research_mode": research.get("research_mode", "auto"),
         "available_tools": catalog,
         "node_role": node_role,
         "local_capable": search_mode == "paper" and research["source"] in {"local", "collection", "all", "auto"} and research.get("local_literature", True),
     }
+    if node_role in ("dispatcher", "reporter"):
+        context["report_format"] = research.get("report_format", "academic")
+    return context
 
 
 def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", available_tools=None, native_tools=None):
@@ -2540,6 +2543,8 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
     missing = required - set(research)
     if missing:
         raise ValueError("research input is missing required fields")
+    if research.get("report_format", "academic") not in ("academic", "exploratory", "brief", "explainer"):
+        raise ValueError("invalid report_format")
     if research.get("research_mode", "auto") not in {"auto", "deep", "quick"}:
         raise ValueError("research_mode must be auto, deep, or quick")
     if research.get("research_depth", "standard") not in DEPTH_BUDGETS:
