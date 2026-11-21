@@ -10,9 +10,9 @@ TUFA（Traceable Unified Fact-finding Agent）是在本机运行的科研助手�
 
 | 启动页 | 深度研究工作区 | 报告与引用 |
 | --- | --- | --- |
-| ![TUFA 启动页和开始使用入口](assets/screenshots/launch.jpg) | ![研究工作区显示研究问题和活动](assets/screenshots/research.jpg) | ![报告显示编号引用、参考文献和下载入口](assets/screenshots/report.jpg) |
+| ![TUFA 启动页和开始使用入口](assets/screenshots/launch.jpg) | ![研究工作区显示研究问题和活动](assets/screenshots/research.jpg) | ![AI Agent 研究报告展示证据表、编号引用和参考文献](assets/screenshots/report.png) |
 
-截图来自实际界面。研究活动和报告使用基于下方论文案例准备的演示数据。
+截图来自实际界面。研究活动使用下方 Transformer 案例的演示数据，报告截图展示另一次关于 AI Agent 研究方向的问答。
 
 ## 核心功能
 
