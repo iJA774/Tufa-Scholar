@@ -1,6 +1,6 @@
 # 项目状态
 
-本文只记录可用能力、限制和验证边界。设计流程见 [ARCHITECTURE.md](ARCHITECTURE.md)，当前开发任务见 [DEVELOPMENT.md](DEVELOPMENT.md)，安装与常用验收入口见 [README](../README.md)。
+本文只记录可用能力、限制和验证边界。设计流程见 [ARCHITECTURE.md](ARCHITECTURE.md)，当前开发任务见 [DEVELOPMENT.md](DEVELOPMENT.md)，安装见 [README](../README.md)，常用验收入口见 [开发指南](DEVELOPMENT.md#验证)。
 
 ## 已实现的基础能力
 
@@ -10,7 +10,7 @@
 - 网页搜索支持 DuckDuckGo、Tavily、InfoQuest、Brave、Serper、arXiv、Searx 和 Wikipedia。公开网页与 PDF 读取包含公网地址校验、重定向检查、分页提取和错误脱敏；详见 [WEB_SEARCH.md](WEB_SEARCH.md)。
 - 提问框支持独立切换“网络搜索”和“本地文献”，按钮亮起时启用相应来源。任务保留提交时的开关状态。
 - 本机设置、环境变量优先、手动填写默认模型或提问模型；接口和运行日志不回显密钥。前端研究工作台与设置页、单机启动脚本和任务进度轮询已存在。
-- 设置的“本地文档”可在 Windows 资源管理器打开固定原文目录，离线批量转换 PDF、DOCX、TXT，支持进度、取消、预览、单文件及 ZIP 下载。成功转换的 PDF 加入提交时的项目文献库，保留原文哈希和原页定位。DOCX/TXT 支持转换和下载。格式限制见 [README](../README.md#本地文档转换-markdown)。
+- 设置的“本地文档”可在 Windows 资源管理器打开固定原文目录，离线批量转换 PDF、DOCX、TXT，支持进度、取消、预览、单文件及 ZIP 下载。成功转换的 PDF 加入提交时的项目文献库，保留原文哈希和原页定位。DOCX/TXT 支持转换和下载。格式限制见 [本地文档指南](DOCUMENTS.md#支持格式)。
 - “预处理”在同一批次完成 Markdown 转换、独立 `preprocesser` 分类与项目 FTS5 分块索引。分类包含多个研究领域、主题标签和 20 字以内的描述，模型可在通用设置中覆盖。
 - “清除已保存的文档”清理所有项目的 Markdown 产物、转换批次、分类关系和 Markdown 索引。原文与 PDF 文献库保留。
 - 本地研究先披露领域，再展示选中领域的标题、标签和短描述。researcher 主动选择并读取 Markdown，项目和收藏夹快照约束可见范围，报告引用使用 Markdown 字符区间。
@@ -54,4 +54,4 @@ Tavily 的本机代理连接失败可通过一次直连重试恢复。活动记�
 - 没有向量检索、模型语义重排、OCR、引用扩展或历史报告修订版本链。检索排名是词项与来源排序启发式，不保证语义相关性最优。
 - 图片型、加密或无法提取文本的 PDF 不能提供按页证据；动态渲染网页可能无法读取。网页搜索摘要和截取片段不等同全文。
 
-验证命令及适用范围见 [README](../README.md#验证)。
+验证命令及适用范围见 [开发指南](DEVELOPMENT.md#验证)。

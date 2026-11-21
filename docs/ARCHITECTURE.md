@@ -1,6 +1,6 @@
 # 本地科研智能体架构
 
-本项目面向单机单用户运行，使用本机 SQLite 和单 worker。本文记录模块边界和当前目标工作流；实际能力及尚未验证范围见 [STATUS.md](STATUS.md)，安装和验收命令见 [README](../README.md)。
+本项目面向单机单用户运行，使用本机 SQLite 和单 worker。本文记录模块边界和当前目标工作流；实际能力及尚未验证范围见 [STATUS.md](STATUS.md)，安装见 [README](../README.md)，验收命令见 [开发指南](DEVELOPMENT.md#验证)。
 
 ## 运行与模块边界
 
@@ -36,7 +36,7 @@ Next.js `/` 是独立开始页，只提供“开始使用”和 GitHub 两个入
 
 ## 任务与持久化
 
-文档转换使用独立 `conversion_batches` 清单与状态。设置入口显式触发 API 从 `TUFA_DATA_DIR/documents/originals/` 读取原文，新结果写入 `TUFA_DATA_DIR/documents/conversions/`。目录打开接口和固定目录转换接口均由服务端确定路径。API 协调线程顺序运行最多一个解析子进程，超时或取消时终止进程。批次文件采用服务端生成的 ID 存储，原文相对路径用于展示和 ZIP 条目。API 生命周期将遗留的非终态批次标为中断。转换限制见 [README](../README.md#本地文档转换-markdown)。
+文档转换使用独立 `conversion_batches` 清单与状态。设置入口显式触发 API 从 `TUFA_DATA_DIR/documents/originals/` 读取原文，新结果写入 `TUFA_DATA_DIR/documents/conversions/`。目录打开接口和固定目录转换接口均由服务端确定路径。API 协调线程顺序运行最多一个解析子进程，超时或取消时终止进程。批次文件采用服务端生成的 ID 存储，原文相对路径用于展示和 ZIP 条目。API 生命周期将遗留的非终态批次标为中断。转换限制见 [本地文档指南](DOCUMENTS.md#批次下载与限制)。
 
 设置入口在输出目录保留与原文相同的相对目录结构，已有同名 Markdown 视为完成。PDF 文献库使用按内容哈希保存的原文快照，证据版本的内容独立于用户后续对待转换文件的编辑或删除。
 
