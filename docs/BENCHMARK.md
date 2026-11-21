@@ -72,6 +72,24 @@ uv run --locked python -m scripts.run_benchmark export --run-id RUN_ID --format 
 | GAIA | 保留任务附件、权限及数据分割，采用其答案规范 |
 | DeepSearchQA | 保存答案项和查找来源，按其规则比较多项答案及完整性 |
 
+## HTTP API
+
+启动后可在 [FastAPI 交互式文档](http://127.0.0.1:8000/docs) 查看评测路由的请求与响应结构。
+
+| 方法与路径 | 功能 |
+| --- | --- |
+| `GET /benchmark`、`GET /benchmark/dataset/tasks` | 锁定题库及评分器状态、预览原始题目 |
+| `GET/POST /benchmark/runs`、`POST /benchmark/runs/{id}/actions` | 批次历史、创建与运行控制 |
+| `GET /benchmark/runs/{id}/tasks/{task_id}`、`GET /benchmark/runs/{id}/export`、`POST /benchmark/compare` | 单题报告、结果导出及可比性检查 |
+
+## 评测验收
+
+在仓库根目录运行以下命令。脚本使用隔离数据目录和模拟上游，默认从官方 GitHub 下载锁定题库和评分器。已有校验过的资产目录可用 `--assets` 指定。
+
+```powershell
+uv run --locked python -m scripts.verify_benchmark
+```
+
 ## 维护入口
 
 | 路径 | 职责 |
