@@ -5,7 +5,7 @@ from io import BytesIO
 from statistics import median
 import pdfplumber
 from pypdf import PdfReader
-from .models import Converted, ConversionError
+from .models import Converted, ConversionError, MAX_PDF_PAGES
 from .word import table
 
 
@@ -48,7 +48,7 @@ def convert(data):
         reader = PdfReader(BytesIO(data))
         if reader.is_encrypted:
             raise ConversionError('encrypted_pdf', 'PDF 已加密，请先使用合法密码解密后再转换。')
-        if len(reader.pages) > 200:
+        if len(reader.pages) > MAX_PDF_PAGES:
             raise ConversionError('page_limit', 'PDF 超过单文件 200 页限制。')
         with pdfplumber.open(BytesIO(data)) as doc:
             extracted = [p.extract_words(extra_attrs=['size']) for p in doc.pages]

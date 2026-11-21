@@ -15,7 +15,7 @@
 | `PATCH /conversations/{conversation_id}` | 设置 `pinned` 布尔值，返回更新后的会话 |
 | `DELETE /conversations/{conversation_id}` | 删除该会话、消息、报告及其任务。若有待处理或正在运行的任务则返回 409 |
 | `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
-| `POST /projects/{project_id}/papers/import` | 上传 PDF |
+| `POST /projects/{project_id}/papers/import` | 上传 PDF；大小、页数和解析资源限制见 [文档指南](DOCUMENTS.md)，解析繁忙返回 503 |
 | `POST /conversion-batches/open-originals` | 在资源管理器打开本机原文目录 |
 | `POST /conversion-batches/prepare` | 转换和分类，并为传入的 `project_id` 建立本地 Markdown 检索索引 |
 | `POST /conversion-batches/clear` | 发送 JSON `{"confirm": true}` 清除已保存的预处理产物和记录 |
