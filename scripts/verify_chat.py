@@ -264,6 +264,55 @@ def main():
             assert [message['role'] for message in messages] == ['user', 'assistant', 'assistant']
             assert client.get(f'/reports/{report_id}/markdown').status_code == 200
             print('Simulated model: API/worker, retry and regeneration, cumulative session tokens, direct answer, Markdown evidence, report and empty collection passed.')
+
+            # Reporter-only regeneration keeps the input from the first report,
+            # even after later messages and research runs in the same conversation.
+            original_request = next(request for request in retry_model_requests
+                                    if '运行节点标识：reporter' in request['messages'][0]['content'])
+            original_report = call('GET', f'/reports/{report_id}')
+            assert messages[1]['metadata']['can_regenerate_report'] is True
+            assert messages[1]['metadata']['report_model'] == 'fixture-selected'
+            assert messages[1]['metadata']['report_format'] == 'brief'
+            original_header = '\n'.join(original_report['content'].splitlines()[:3])
+            assert '决策简报' in original_header and 'fixture-selected' in original_header
+            assert client.post(f"/reports/{direct_task['result']['report_id']}/regenerate", json={}).status_code == 409
+
+            def generate_fixed_report(source_id, fields, expected_model):
+                model_start = len(fixture.model_requests)
+                search_start = len(fixture.search_requests)
+                pending_report = call('POST', f'/reports/{source_id}/regenerate', json=fields)
+                task = wait(pending_report['id'])
+                assert task['status'] == 'succeeded', task
+                assert task['report_source_id'] == report_id
+                assert stages(task['id']) == ['reporter'], stages(task['id'])
+                requests = fixture.model_requests[model_start:]
+                assert len(requests) == 1, len(requests)
+                assert requests[0]['model'] == expected_model
+                assert requests[0]['messages'][1] == original_request['messages'][1]
+                assert len(fixture.search_requests) == search_start
+                assert task['result']['evidence'] == original_report['evidence']
+                return task['result']['report_id'], requests[0]['messages'][0]['content']
+
+            variant_id, variant_prompt = generate_fixed_report(
+                report_id, {'report_format': 'exploratory', 'model_name': 'fixture-alternative'}, 'fixture-alternative',
+            )
+            original_prompt = original_request['messages'][0]['content']
+            assert '### 探索发现' in variant_prompt and '### 决策简报' not in variant_prompt
+            assert variant_prompt.split('## 报告风格', 1)[0] == original_prompt.split('## 报告风格', 1)[0]
+            assert variant_prompt.split('## 输出', 1)[1] == original_prompt.split('## 输出', 1)[1]
+            default_id, default_prompt = generate_fixed_report(variant_id, {'report_format': 'brief'}, 'fixture-selected')
+            assert default_prompt == original_prompt
+            assert len({report_id, variant_id, default_id}) == 3
+            assert call('GET', f'/reports/{report_id}') == original_report
+            variant_download = client.get(f'/reports/{variant_id}/markdown')
+            variant_download.raise_for_status()
+            variant_header = '\n'.join(variant_download.text.splitlines()[:3])
+            assert '探索发现' in variant_header and 'fixture-alternative' in variant_header
+            messages = call('GET', f"/conversations/{pending['conversation_id']}/messages")
+            assert [message['role'] for message in messages] == ['user', 'assistant', 'assistant', 'assistant', 'assistant']
+            assert [message['metadata']['report_id'] for message in messages[-2:]] == [variant_id, default_id]
+            assert messages[-2]['metadata']['report_original_model'] == 'fixture-selected'
+            print('Fixed-evidence reports: original Reporter input, model and style selection, independent reports and downloads passed.')
             print('Cloud model and real-provider quality were not exercised.')
     finally:
         try:

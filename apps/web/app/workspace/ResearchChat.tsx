@@ -203,6 +203,7 @@ const deepResearchNodes = new Set(["background_investigator", "planner", "superv
 
 function isDeepResearchRun(run?: Run, events: RunEvent[] = []) {
   if (!run) return false;
+  if (run.report_source_id != null) return true;
   if (run.research_mode === "deep") return true;
   if (run.research_mode !== "auto") return false;
   if (run.stage && deepResearchNodes.has(run.stage)) return true;
@@ -315,6 +316,8 @@ export default function ResearchChat({
   const [run, setRun] = useState<Run>();
   const [loadedConversationId, setLoadedConversationId] = useState<number>();
   const [researchPanelOpen, setResearchPanelOpen] = useState(false);
+  const [selectedPanelRunId, setSelectedPanelRunId] = useState<number>();
+  const [reportDraft, setReportDraft] = useState<{ messageId: number; format: ReportFormat; model: string }>();
   const [runs, setRuns] = useState<Run[]>([]);
   const [historyRuns, setHistoryRuns] = useState<Record<number, Run>>({});
   const [busy, setBusy] = useState("");
@@ -359,11 +362,11 @@ export default function ResearchChat({
     fetchRun: (id, signal) => api<Run>(`/runs/${id}`, { signal }),
     onRunUpdate: updateFromEventStream,
   });
-  const panelRun = isDeepResearchRun(run, liveEvents) ? run : runs.find(item => {
+  const panelRun = (selectedPanelRunId === run?.id ? run : runs.find(item => item.id === selectedPanelRunId) ?? (selectedPanelRunId ? historyRuns[selectedPanelRunId] : undefined)) ?? (isDeepResearchRun(run, liveEvents) ? run : runs.find(item => {
     if (item.id === run?.id) return false;
     const events = item.id === historyRunCandidate?.id ? historyEvents : [];
     return isDeepResearchRun(item, events);
-  });
+  }));
   const progressRun = hasConversation && loadedConversationId === conversationId ? panelRun : undefined;
   const progressReport = progressRun ? [...messages].reverse().find(message => message.role === "assistant" && message.run_id === progressRun.id && message.metadata?.report_id !== undefined) : undefined;
   const progressEvents = progressRun?.id === run?.id
@@ -427,6 +430,8 @@ export default function ResearchChat({
     actionController.current?.abort();
     actionController.current = null;
     requestedHistoryRuns.current.clear();
+    setReportDraft(undefined);
+    setSelectedPanelRunId(undefined);
     if (retainingSubmittedConversation) {
       setLoadedConversationId(conversationId);
       setLoadingConversation(false);
@@ -458,6 +463,7 @@ export default function ResearchChat({
       setRuns(nextRuns);
       const nextRun = nextRuns.find(item => item.conversation_id === conversationId);
       setRun(nextRun);
+      setSelectedPanelRunId(undefined);
       setLoadedConversationId(conversationId);
       const shouldOpenPanel = !!nextRun
         && isDeepResearchRun(nextRun)
@@ -595,6 +601,7 @@ export default function ResearchChat({
       setMessages(nextMessages);
       setRuns(nextRuns);
       setRun(nextRun);
+      setSelectedPanelRunId(undefined);
       setLoadedConversationId(submitted.conversation_id);
       const autoDeepActive = nextRun.research_mode === "auto"
         && ["queued", "pending", "running"].includes(nextRun.status)
@@ -622,6 +629,7 @@ export default function ResearchChat({
     void api<Run>(`/runs/${run.id}/retry`, { method: "POST", signal: controller.signal }).then(next => {
       if (selectionEpoch.current !== marker) return;
       setRun(next);
+      setSelectedPanelRunId(undefined);
       setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
       const autoDeepActive = next.research_mode === "auto"
         && ["queued", "pending", "running"].includes(next.status)
@@ -639,6 +647,34 @@ export default function ResearchChat({
     });
   };
 
+  const regenerateReport = async (event: FormEvent, message: Message) => {
+    event.preventDefault();
+    const reportId = message.metadata?.report_id;
+    if (!reportId || !reportDraft || reportDraft.messageId !== message.id || busy || activeRun || loadingConversation || projectLoading || actionController.current) return;
+    const marker = selectionEpoch.current;
+    const controller = new AbortController();
+    actionController.current = controller;
+    setBusy(`report:${reportId}`);
+    try {
+      const next = await api<Run>(`/reports/${reportId}/regenerate`, {
+        ...json({ report_format: reportDraft.format, model_name: reportDraft.model.trim() || undefined }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || selectionEpoch.current !== marker) return;
+      setReportDraft(undefined);
+      setSelectedPanelRunId(undefined);
+      setRun(next);
+      setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
+      setResearchPanelOpen(true);
+      onHistoryUpdated();
+    } catch (error) {
+      if (!controller.signal.aborted && selectionEpoch.current === marker) onError(messageOf(error));
+    } finally {
+      if (actionController.current === controller) actionController.current = null;
+      if (selectionEpoch.current === marker) setBusy("");
+    }
+  };
+
   const regenerate = async (runId: number) => {
     if (busy || activeRun || loadingConversation || actionController.current) return;
     const marker = selectionEpoch.current;
@@ -652,6 +688,7 @@ export default function ResearchChat({
       });
       if (controller.signal.aborted || selectionEpoch.current !== marker) return;
       setRun(next);
+      setSelectedPanelRunId(undefined);
       setRuns(previous => [next, ...previous.filter(item => item.id !== next.id)]);
       setResearchPanelOpen(isDeepResearchRun(next));
       onHistoryUpdated();
@@ -745,7 +782,64 @@ export default function ResearchChat({
               {message.metadata?.report_id && <div className={styles.reportLinks}>
                 <a href={`/api/reports/${message.metadata.report_id}/markdown`}>下载研究报告</a>
                 <a href={`/api/reports/${message.metadata.report_id}/evidence.csv`}>下载证据表</a>
+                {message.role === "assistant" && messageRun && (message.metadata.can_regenerate_report === true || isDeepResearchRun(messageRun)) && <button
+                  className={styles.regenerateButton}
+                  type="button"
+                  disabled={loadingConversation || projectLoading}
+                  onClick={() => { setSelectedPanelRunId(messageRun.id); openProgressPanel(); }}
+                >查看报告</button>}
               </div>}
+              {message.role === "assistant" && message.metadata?.report_id && message.metadata.can_regenerate_report === true && <>
+                <div className={styles.questionActions}>
+                  <button
+                    id={`report-regenerate-trigger-${message.id}`}
+                    className={styles.regenerateButton}
+                    type="button"
+                    disabled={!!busy || !!activeRun || loadingConversation || projectLoading}
+                    aria-expanded={reportDraft?.messageId === message.id}
+                    aria-controls={reportDraft?.messageId === message.id ? `report-regenerate-form-${message.id}` : undefined}
+                    title="使用已保存的证据重新生成报告"
+                    onClick={() => setReportDraft(current => current?.messageId === message.id ? undefined : {
+                      messageId: message.id,
+                      format: message.metadata?.report_format ?? "academic",
+                      model: message.metadata?.report_original_model || message.metadata?.report_model || "",
+                    })}
+                  >固定证据重新生成</button>
+                </div>
+                {reportDraft?.messageId === message.id && <form
+                  id={`report-regenerate-form-${message.id}`}
+                  className={styles.reportRegenerateForm}
+                  onSubmit={event => void regenerateReport(event, message)}
+                  onKeyDown={event => {
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    setReportDraft(undefined);
+                    document.getElementById(`report-regenerate-trigger-${message.id}`)?.focus();
+                  }}
+                >
+                  <label>回答风格<select value={reportDraft.format} onChange={event => setReportDraft({ ...reportDraft, format: event.target.value as ReportFormat })}>
+                    <option value="academic">学术综述</option>
+                    <option value="exploratory">探索发现</option>
+                    <option value="brief">决策简报</option>
+                    <option value="explainer">通俗解读</option>
+                  </select></label>
+                  <label>模型 ID<input
+                    value={reportDraft.model}
+                    maxLength={300}
+                    placeholder={message.metadata.report_original_model || message.metadata.report_model || "原报告模型"}
+                    onChange={event => setReportDraft({ ...reportDraft, model: event.target.value })}
+                  /></label>
+                  <div className={styles.reportRegenerateActions}>
+                    <button className={styles.regenerateButton} type="button" onClick={() => {
+                      setReportDraft(undefined);
+                      document.getElementById(`report-regenerate-trigger-${message.id}`)?.focus();
+                    }}>取消</button>
+                    <button className={styles.regenerateButton} type="submit" disabled={!!busy || !!activeRun || loadingConversation || projectLoading}>
+                      {busy === `report:${message.metadata.report_id}` ? "正在提交…" : "生成报告"}
+                    </button>
+                  </div>
+                </form>}
+              </>}
             </div>
           </article>;
         })}

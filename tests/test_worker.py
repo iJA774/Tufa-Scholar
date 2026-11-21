@@ -19,7 +19,7 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('worker agent')['id']
             first = repository.create_question(project, None, 'first question', 'local')
             observed = []
-            def agent(research, *, history, on_stage, on_subtask, on_event):
+            def agent(research, *, history, on_stage, on_subtask, on_event, on_report_snapshot=None):
                 on_stage('dispatcher')
                 on_event('node.started', {'node': 'planner'})
                 on_subtask({'index': 1, 'source': 'paper', 'task': 'topic', 'status': 'no_evidence', 'findings': [], 'gap': '缺少材料', 'sources': []})
@@ -66,7 +66,7 @@ class WorkerTests(unittest.TestCase):
             task = repository.create_question(project, None, 'question', 'local', research_mode='deep', report_format='brief')
             received = []
 
-            def agent(research, *, history, on_stage, on_subtask, on_event):
+            def agent(research, *, history, on_stage, on_subtask, on_event, on_report_snapshot=None):
                 received.append((research, history))
                 return 'answer', []
 
@@ -102,7 +102,7 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('scope')['id']
             task = repository.create_question(project, None, 'question', 'local')
             ids = []
-            def agent(research, *, history, on_stage, on_subtask, on_event):
+            def agent(research, *, history, on_stage, on_subtask, on_event, on_report_snapshot=None):
                 self.assertNotIn('id', research)
                 ids.append(record_failure(kind='test', payload={}, schema={}))
                 raise RuntimeError('failure')

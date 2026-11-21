@@ -913,7 +913,7 @@ def _post_structured(config, headers, request_body, *, on_stream, attempt, phase
     raise RuntimeError('模型服务无法处理请求参数')
 
 
-def structured(prompt_id, payload, schema, *, model_options=None, template_context=None, on_stream=None, native_tools=None):
+def structured(prompt_id, payload, schema, *, model_options=None, template_context=None, on_stream=None, native_tools=None, frozen_prompt=None, capture_report=None):
     config = settings.model_config()
     if model_options and model_options.get('model_name'):
         config = dict(config, model=model_options['model_name'])
@@ -945,10 +945,21 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         if _parameter_is_known_unsupported(config, parameter):
             options.pop(parameter, None)
     validation_feedback = None
+    frozen_prompts = None
+    if capture_report is not None:
+        now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')
+        frozen_prompts = {style: _render_prompt(prompt_id, {**(template_context or {}), 'report_format': style}, json_schema, now, native_tools=native_tools)
+                          for style in ('academic', 'exploratory', 'brief', 'explainer')}
+        capture_report({'prompts': frozen_prompts, 'model': config['model']})
     for attempt in (1, 2):
         attempt_started = time.monotonic()
         now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')
-        prompt = _render_prompt(prompt_id, template_context, json_schema, now, native_tools=native_tools)
+        if frozen_prompt is not None:
+            prompt = frozen_prompt
+        elif frozen_prompts is not None:
+            prompt = frozen_prompts[(template_context or {}).get('report_format', 'academic')]
+        else:
+            prompt = _render_prompt(prompt_id, template_context, json_schema, now, native_tools=native_tools)
         messages = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': payload_json}]
         if validation_feedback is not None:
             messages.append({'role': 'user', 'content': json.dumps({'validation_feedback': validation_feedback}, ensure_ascii=False, separators=(',', ':'))})

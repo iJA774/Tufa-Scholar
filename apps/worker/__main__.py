@@ -1,6 +1,7 @@
 """Single worker that executes retrieval jobs in order."""
 
 import argparse
+import html
 import json
 import logging
 import re
@@ -33,24 +34,47 @@ def run_once(benchmark_task_id=None):
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode',
                 'report_format', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
             )}
-            history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
             def on_event(kind, data):
                 if benchmark_task_id is not None:
                     data = {**data, 'timestamp': time.time()}
                 repository.record_research_event(task['id'], kind, data)
 
             tags = {'suppress_artifacts': True} if benchmark_task_id is not None else {}
+            snapshot_box = []
+            stages = []
+            def stage_changed(stage):
+                stages.append(stage)
+                repository.update_stage(task['id'], stage)
             with (
                 diagnostic_scope(run_id=run_id, project_id=task['project_id'], **tags),
                 track_token_usage(lambda total: repository.add_conversation_tokens(run_id, total)),
             ):
-                content, evidence = run(
-                    research, history=history,
-                    on_stage=lambda stage: repository.update_stage(task['id'], stage),
-                    on_subtask=lambda note: repository.record_subtask(task['id'], note),
-                    on_event=on_event,
-                )
-            repository.finish_chat_task(task['id'], content, evidence)
+                if task.get('report_source_id'):
+                    from src.agents.literature import replay_report
+                    snapshot = repository.get_report_snapshot(task['report_source_id'])
+                    if snapshot is None:
+                        raise ValueError('报告快照不存在')
+                    content, evidence = replay_report(snapshot, task['report_format'], task['model_name'],
+                                                      on_stage=stage_changed, on_event=on_event)
+                    report_model = task['model_name']
+                else:
+                    history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
+                    kwargs = dict(history=history, on_stage=stage_changed,
+                                  on_subtask=lambda note: repository.record_subtask(task['id'], note), on_event=on_event)
+                    if benchmark_task_id is None:
+                        kwargs['on_report_snapshot'] = snapshot_box.append
+                    content, evidence = run(research, **kwargs)
+                    snapshot = snapshot_box[0] if snapshot_box else None
+                    report_model = snapshot['model'] if snapshot else None
+            if benchmark_task_id is None and 'reporter' in stages:
+                if report_model:
+                    label = {'academic': '学术综述', 'exploratory': '探索发现', 'brief': '决策简报', 'explainer': '通俗解读'}[task['report_format']]
+                    safe_model = html.escape(re.sub(r'[\r\n]+', ' ', report_model))
+                    safe_model = re.sub(r'([\\`*_\[\]<>])', r'\\\1', safe_model)
+                    content = f'**回答风格：** {label}  \n**报告模型：** {safe_model}\n\n' + content
+                else:
+                    content = '**报告状态：** 终稿未生成，以下为降级内容。\n\n' + content
+            repository.finish_chat_task(task['id'], content, evidence, snapshot=snapshot if not task.get('report_source_id') else None, report_model=report_model)
         else:
             result = ToolRegistry().invoke('search_papers', {'query': task['query']}, context=ToolContext(task['project_id'], task['source']))
             repository.finish_task(task["id"], result)

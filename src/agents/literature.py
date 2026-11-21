@@ -280,6 +280,10 @@ class State(TypedDict, total=False):
     final_rejections: list
     report_fallback: bool
     _event_context: object
+    _capture_report: bool
+    _report_capture_data: dict
+    _report_capture_result: object
+    _frozen_prompt: str
 
 
 class _EventContext:
@@ -424,8 +428,14 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
     research = state["research"]
     template_context = _model_template_context(state, search_mode, node_role, available_tools)
     context = state.get("_event_context")
+    extra = {}
+    if node_role == "reporter" and state.get("_capture_report"):
+        extra["capture_report"] = state["_report_capture_data"].update
+    if node_role == "reporter" and state.get("_frozen_prompt"):
+        extra["frozen_prompt"] = state["_frozen_prompt"]
     if not context:
         call_options = {"model_options": research, "template_context": template_context}
+        call_options.update(extra)
         if native_tools is not None:
             call_options["native_tools"] = native_tools
         return structured(prompt_id, payload, schema, **call_options)
@@ -464,6 +474,7 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
         "template_context": template_context,
         "on_stream": on_stream,
     }
+    call_options.update(extra)
     if native_tools is not None:
         call_options["native_tools"] = native_tools
     return structured(prompt_id, payload, schema, **call_options)
@@ -2319,6 +2330,9 @@ def _reporter(state, on_stage):
         prefer_primary_evidence=state.get("research", {}).get("prefer_primary_evidence", True),
         errors=state.get("errors", []),
     )
+    capture = {}
+    if state.get("_capture_report"):
+        state["_report_capture_data"] = capture
     errors = list(state.get("errors", []))
     checked = None
     suggestion = "请稍后重试，或更换模型后重试。"
@@ -2372,9 +2386,14 @@ def _reporter(state, on_stage):
             caveats.append("本次没有可核查证据，相关判断仍待验证。")
         if len(all_evidence) > len(working):
             caveats.append("累计证据超出终稿上下文预算，本报告基于其中部分证据。")
+        base_caveats = list(caveats)
         if checked["rejected"]:
             caveats.append("部分内容因引用无效或格式不安全而省略。")
         report = _publish_report(checked, caveats)
+        if capture:
+            state["_report_capture_result"] = {**capture, "payload": payload, "working": working,
+                "allowed": list(allowed) if allowed is not None else None, "caveats": base_caveats,
+                "research": {key: state["research"].get(key) for key in ("query", "project_id", "source", "research_depth", "reasoning_effort")}}
         rejected = report["rejected"]
         _log_report_validation(
             input_evidence_count=len(working),
@@ -2398,6 +2417,7 @@ def _reporter(state, on_stage):
         "final_evidence": report["evidence"],
         "final_rejections": rejected,
         "report_fallback": fallback,
+        "_report_capture_result": state.get("_report_capture_result"),
         "errors": errors,
         "last_completed": "reporter",
     }
@@ -2535,7 +2555,7 @@ def _safe_history(history, source):
     return list(history or [])
 
 
-def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
+def run(research, *, history, on_stage=None, on_subtask=None, on_event=None, on_report_snapshot=None):
     """Run the research graph and return the final Markdown and cited evidence."""
     if not isinstance(research, dict):
         raise TypeError("research must be a dict")
@@ -2579,12 +2599,39 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
         "warnings": [],
         "prepared_round": 0,
     }
+    if on_report_snapshot is not None:
+        initial["_capture_report"] = True
     if on_event is not None:
         initial["_event_context"] = _EventContext(on_event)
     graph = _graph(on_stage, on_subtask)
     result = graph.invoke(initial, config={"recursion_limit": 40})
+    if on_report_snapshot is not None and result.get("_report_capture_result"):
+        on_report_snapshot(result["_report_capture_result"])
     if result.get("content") is None:
         _emit_event(initial, "report.fallback", {"node": "reporter", "message": "研究流程未能形成完整报告。", "suggestion": "请稍后重试，或降低研究深度后重试。"})
         fallback = _reporter_fallback(result)
         return fallback["content"], fallback["evidence"]
     return result["content"], result.get("final_evidence", result.get("evidence", []))
+
+
+def replay_report(snapshot, report_format, model_name, *, on_stage=None, on_event=None):
+    """Generate from the immutable Reporter input, without entering the research graph."""
+    research = {**snapshot['research'], 'report_format': report_format, 'model_name': model_name}
+    state = {'research': research, '_frozen_prompt': snapshot['prompts'][report_format]}
+    if on_event is not None:
+        state['_event_context'] = _EventContext(on_event)
+    _emit(on_stage, 'reporter')
+    def generate(current):
+        result = _model(current, 'literature/reporter', snapshot['payload'], None, node_role='reporter', available_tools=[])
+        checked = validate_markdown(result, snapshot['working'], allowed_paper_ids=snapshot['allowed'], citation_only=True)
+        if not checked['has_body']:
+            raise ValueError('报告模型未生成可用正文')
+        caveats = list(snapshot['caveats'])
+        if checked['rejected']:
+            caveats.append('部分内容因引用无效或格式不安全而省略。')
+        report = _publish_report(checked, caveats)
+        _log_report_validation(input_evidence_count=len(snapshot['working']), final_evidence_count=len(report['evidence']),
+                               rejected_claim_count=len(checked['rejected']), fallback_rejected_count=0, fallback_reason='none')
+        return {'content': report['content'], 'final_evidence': report['evidence']}
+    result = _run_node_with_events(state, 'reporter', generate)
+    return result['content'], result['final_evidence']

@@ -310,7 +310,7 @@ def retry_task(task_id):
 
     with connect_database() as db:
         cur = db.execute("INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,origin_run_id,collection_id,paper_ids,research_mode,research_depth,prefer_primary_evidence,relevance_filter) VALUES (?,?,?,?,'pending','pending',?,?,?,?,?,?,?,?)", (task['project_id'],task['conversation_id'],task['query'],task['source'],task['kind'],task.get('origin_run_id') or task_id,task.get('collection_id'),json.dumps(task['paper_ids']) if task.get('paper_ids') is not None else None,task.get('research_mode') or 'auto',task.get('research_depth') or 'standard',int(task.get('prefer_primary_evidence', True)),task.get('relevance_filter') or 'standard'))
-        db.execute('UPDATE tasks SET model_name=?,reasoning_effort=? WHERE id=?', (task.get('model_name'),task.get('reasoning_effort'),cur.lastrowid))
+        db.execute('UPDATE tasks SET model_name=?,reasoning_effort=?,report_source_id=? WHERE id=?', (task.get('model_name'),task.get('reasoning_effort'),task.get('report_source_id'),cur.lastrowid))
         db.execute('UPDATE tasks SET network_search=?,local_literature=?,report_format=? WHERE id=?', (task['network_search'], task['local_literature'], task.get('report_format') or 'academic', cur.lastrowid))
         db.commit()
         return get_task(cur.lastrowid)
@@ -446,7 +446,7 @@ def task_history(task_id):
         return list(reversed(rows))
 
 
-def finish_chat_task(task_id, content, evidence):
+def finish_chat_task(task_id, content, evidence, *, snapshot=None, report_model=None):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
         task = _one(db, "SELECT * FROM tasks WHERE id=? AND kind='chat' AND status='running'", (task_id,))
@@ -458,7 +458,15 @@ def finish_chat_task(task_id, content, evidence):
                 raise ValueError('证据不属于所选收藏夹')
         encoded = json.dumps(evidence, ensure_ascii=False)
         report_id = db.execute('INSERT INTO reports(project_id,conversation_id,run_id,content,evidence) VALUES (?,?,?,?,?)', (task['project_id'],task['conversation_id'],task_id,content,encoded)).lastrowid
-        metadata = {'report_id':report_id,'evidence':evidence}
+        source_id = task['report_source_id']
+        if snapshot:
+            db.execute('INSERT INTO reporter_snapshots(report_id,snapshot) VALUES (?,?)', (report_id, json.dumps(snapshot, ensure_ascii=False)))
+        metadata = {'report_id':report_id,'evidence':evidence, 'can_regenerate_report': bool(snapshot or source_id)}
+        if snapshot or source_id:
+            metadata.update(report_format=task['report_format'], report_model=report_model)
+        if source_id:
+            original = _one(db, 'SELECT snapshot FROM reporter_snapshots WHERE report_id=?', (source_id,))
+            metadata.update(report_source_id=source_id, report_original_model=json.loads(original['snapshot'])['model'])
         db.execute("INSERT INTO messages(conversation_id,role,content,run_id,metadata) VALUES (?,'assistant',?,?,?)", (task['conversation_id'],content,task_id,json.dumps(metadata,ensure_ascii=False)))
         result = {'report_id':report_id,'content':content,'evidence':evidence}
         db.execute("UPDATE tasks SET status='succeeded',stage='completed',result=?,error=NULL WHERE id=?", (json.dumps(result,ensure_ascii=False),task_id))
@@ -546,3 +554,36 @@ def index_version_pages(version_id, pages):
             db.executemany('INSERT INTO paper_pages(version_id,page,text) VALUES (?,?,?)', ((version_id, n, text) for n, text in enumerate(pages, 1)))
             db.execute('UPDATE paper_versions SET pages_indexed=1 WHERE id=?', (version_id,))
         db.commit()
+
+
+def get_report_snapshot(report_id):
+    with connect_database() as db:
+        row = _one(db, 'SELECT snapshot FROM reporter_snapshots WHERE report_id=?', (report_id,))
+        return json.loads(row['snapshot']) if row else None
+
+
+def regenerate_report_task(report_id, report_format=None, model_name=None):
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        report = _one(db, """SELECT r.*, t.report_source_id, t.report_format, t.source, t.query,
+                          t.reasoning_effort, t.paper_ids, t.collection_id
+                          FROM reports r JOIN tasks t ON t.id=r.run_id
+                          WHERE r.id=? AND r.project_id NOT IN (SELECT project_id FROM benchmark_runs)""", (report_id,))
+        if not report:
+            return None
+        source_id = report['report_source_id'] or report_id
+        saved = _one(db, 'SELECT snapshot FROM reporter_snapshots WHERE report_id=?', (source_id,))
+        if not saved:
+            raise ValueError('报告没有可用于重新生成的快照')
+        if _one(db, "SELECT id FROM tasks WHERE conversation_id=? AND status IN ('pending','running')", (report['conversation_id'],)):
+            raise ValueError('当前对话仍有任务正在处理，请等待完成后重新生成')
+        snapshot = json.loads(saved['snapshot'])
+        cur = db.execute("""INSERT INTO tasks(project_id,conversation_id,query,source,status,stage,kind,
+                         report_source_id,report_format,model_name,reasoning_effort,paper_ids,collection_id)
+                         VALUES (?,?,?,?,'pending','pending','chat',?,?,?,?,?,?)""",
+                         (report['project_id'], report['conversation_id'], report['query'], report['source'], source_id,
+                          report_format or report['report_format'], model_name or snapshot['model'], report['reasoning_effort'],
+                          report['paper_ids'], report['collection_id']))
+        result = _task(_one(db, 'SELECT * FROM tasks WHERE id=?', (cur.lastrowid,)))
+        db.commit()
+        return result

@@ -144,6 +144,11 @@ class RegenerateInput(BaseModel):
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
 
 
+class ReportRegenerateInput(BaseModel):
+    report_format: Literal['academic', 'exploratory', 'brief', 'explainer'] | None = None
+    model_name: str | None = Field(default=None, min_length=1, max_length=300)
+
+
 class QuestionInput(BaseModel):
     question: str = Field(min_length=1)
     model_name: str | None = Field(default=None, min_length=1, max_length=300)
@@ -395,6 +400,20 @@ def report_details(report_id: int):
         raise HTTPException(404, '报告不存在')
     report['content'] = numbered_references(report['content'], report['evidence'], legacy=True)
     return report
+
+
+@app.post('/reports/{report_id}/regenerate', status_code=201)
+def regenerate_report(report_id: int, body: ReportRegenerateInput | None = None):
+    model_name = body.model_name.strip() if body and body.model_name else None
+    if body and body.model_name and not model_name:
+        raise HTTPException(422, '模型名称不能为空')
+    try:
+        result = repo.regenerate_report_task(report_id, body.report_format if body else None, model_name)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    if result is None:
+        raise HTTPException(404, '报告不存在或无法重新生成')
+    return result
 
 
 @app.get('/reports/{report_id}/markdown')

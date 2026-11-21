@@ -159,7 +159,9 @@ def main():
             assert dense_task['status'] == 'succeeded', dense_task
             assert dense_task['result']['evidence'] and '92%' in dense_task['result']['content']
             dense_report = dense_task['result']['content']
-            assert dense_report.startswith('# 准确率核查\n'), dense_report
+            header, body = dense_report.split('\n\n', 1)
+            assert '学术综述' in header and 'fixture-web' in header, header
+            assert body.startswith('# 准确率核查\n'), body
             assert '## 核查结果' in dense_report
             assert '## 关键点' not in dense_report
             assert '](' in dense_report
