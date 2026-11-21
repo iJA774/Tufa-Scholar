@@ -59,6 +59,21 @@ jobs:
           git push origin HEAD:refs/heads/benchmark
           echo 'Merged main into benchmark.' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Close resolved sync issue
+        if: steps.sync.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search '"Benchmark sync failed" in:title' --limit 100 --json number,title --jq '.[] | select(.title == "Benchmark sync failed: main -> benchmark") | .number')
+          if [ -n "$existing" ]; then
+            while IFS= read -r issue; do
+              gh issue close "$issue" --reason completed \
+                --comment "main -> benchmark 同步已恢复成功。Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            done <<< "$existing"
+          fi
       - name: Notify maintainers on failure
         if: failure()
         shell: bash
