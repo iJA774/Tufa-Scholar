@@ -1,160 +1,80 @@
 # Tufa Scholar
 
-本地单用户科研助手，提供项目与对话、文献检索和导入、证据定位、科研问答与报告导出。架构与研究预算见 [架构文档](docs/ARCHITECTURE.md)，当前能力见 [项目状态](docs/STATUS.md)，设计取舍与技术债见 [开发文档](docs/DEVELOPMENT.md)。
+**从科研问题到可回查的证据。**
 
-## 安装
+TUFA 是在本机运行的科研 Agent。用它查文献、做综述，或带上你自己的资料做专题研究。你可以看着它规划、检索和读原文，再顺着报告里的引用回到证据。
 
-- Python 3.13 与 uv：根目录 `pyproject.toml`、`uv.lock` 管理 API、worker 和 `src/` 共用环境。
-- Node.js 22.14 或兼容版本与 pnpm 11.25.0：pnpm workspace 和 `pnpm-lock.yaml` 管理前端。
-- SQLite 由 Python 提供，无需单独部署数据库、Docker 或 Conda。
+[快速开始](#快速开始) · [看一次研究](#使用示例) · [项目文档](#项目文档)
 
-在仓库根目录执行：
+## 核心功能
+
+- **看得到研究是怎么做的。** 在工作区跟进研究计划、文献检索和证据审查。有缺口时，TUFA 可以继续查资料。
+- **让自己的资料参与研究。** 批量整理 PDF、DOCX 和 TXT，自动生成研究领域、标签和简介。TUFA 先看目录，再按需阅读相关正文。
+- **按问题选来源。** 结合本地文献、OpenAlex 和网页搜索，也可以只查自己的资料。
+- **从结论回到原文。** 用编号引用找到 PDF 页码、本地文档片段或来源网页。研究报告可导出为 Markdown，证据可导出为 CSV。
+
+## 界面展示
+
+<img src="assets/screenshots/launch.jpg" alt="TUFA 启动页" width="640">
+
+### 深度研究工作区
+
+[![AI Agent 研究的学术检索、规划和证据提取过程](assets/screenshots/research.jpg)](assets/screenshots/research.jpg)
+
+### 研究报告与引用
+
+[![AI Agent 研究报告的正文、编号引用和本地 Markdown 证据定位](assets/screenshots/report.png)](assets/screenshots/report.png)
+
+## 快速开始
+
+### 安装
+
+准备 Git、Python 3.13、uv、Node.js 22.14 和 pnpm 11.25.0，然后在 Windows PowerShell 中运行以下命令。
 
 ```powershell
+git clone https://github.com/iJA774/Tufa-Scholar.git
+cd Tufa-Scholar
 uv sync --locked
 pnpm install --frozen-lockfile
 ```
 
-## 配置与启动
+### 配置与启动
 
-API 和 worker 必须使用同一个 `TUFA_DATA_DIR`。未设置时数据写到仓库根目录 `data/`，该目录由 Git 忽略。验收脚本使用隔离临时目录，不要把临时数据库放入已有用户数据目录。
-
-模型可在设置页配置 OpenAI 兼容 Base URL、密钥和默认模型名。也可在运行 API/worker 的环境设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`，这些环境变量优先。本机设置保存在 `TUFA_DATA_DIR/research.db`，密钥以明文保存在该本机数据库，接口只返回配置状态和来源。提问模型可手动填写，任务和重试保留提交的模型。工作流按研究深度及节点选择默认思考强度。深度研究需要服务支持结构化输出和原生 Function Calling。
-
-网页搜索默认 DuckDuckGo，可在设置页切换 Tavily、InfoQuest、Brave、Serper、arXiv、Searx 或 Wikipedia；各引擎的配置和证据层级见 [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md)。搜索引擎密钥可通过本机设置或相应环境变量提供。
-
-推荐在仓库根目录启动：
+在仓库根目录启动。启动器使用 3000 和 8000 端口。按 Ctrl+C 停止。
 
 ```powershell
 .\start.ps1
 ```
 
-默认先构建前端，再启动生产模式 API、单 worker 和前端；构建失败时不启动服务。开发模式使用 `.\start.ps1 -Dev`。启动器只管理本次启动的进程树，按 `Ctrl+C` 停止。3000、8000 端口必须空闲。
+1. 打开 [本机首页](http://127.0.0.1:3000)，点击「开始使用」。
+2. 在「设置 → 服务与模型」填入 OpenAI 兼容服务的 Base URL、API Key 和模型 ID。深度研究请选择支持结构化输出和函数调用的模型。
+3. 提问即可开始。想加入自己的资料时，从「设置 → 本地文档」打开原文目录，放入文件后点击「预处理」。
 
-首页、研究工作区和 API 代理都可访问后，PowerShell 才会打印前端链接，并用默认浏览器打开首页。
+研究记录默认存放在本机 `data/` 目录。研究和文档分类会将所需内容发送给你配置的模型服务。手动启动、环境变量和排障见 [开发指南](docs/DEVELOPMENT.md#运行与诊断)。
 
-也可在三个 PowerShell 终端分别运行：
+## 使用示例
 
-```powershell
-# API
-uv run --locked uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
-```
+> 2026 年 AI Agent 领域有哪些值得关注的研究方向？
 
-```powershell
-# 单 worker；API 与 worker 使用相同 TUFA_DATA_DIR
-uv run --locked python -m apps.worker
-```
+1. 打开「网络搜索」并提交问题。想直接进入研究流程，可以选择「深度研究」。
+2. 在「活动」看 TUFA 如何从学术检索展开研究，再提取证据、整理主题。
+3. 打开「报告」，沿着编号引用找到对应论文或本地文档片段。截图中的报告讨论了智能体的自主性、工具使用和长时程执行。你可以下载 Markdown 报告和 CSV 证据表，继续阅读或整理。
 
-```powershell
-# 前端
-pnpm dev:web
-```
+## 适用范围
 
-打开 [前端首页](http://127.0.0.1:3000)、[API 健康检查](http://127.0.0.1:8000/health) 或 [API 文档](http://127.0.0.1:8000/docs)。前端默认代理到 `http://127.0.0.1:8000`。worker 顺序处理任务；重启时遗留运行中任务会标记为中断，可在界面或 API 重试。不要同时运行多个 worker。`uv run --locked python -m apps.worker --once` 最多处理一个任务后退出，`--check` 只检查存储并退出。
+TUFA 面向本机单人研究。文本型 PDF 可以直接读，扫描件先做 OCR，加密 PDF 先解密。更多格式支持和现阶段能力见 [本地文档指南](docs/DOCUMENTS.md#支持格式)与 [项目状态](docs/STATUS.md)。
 
-## 使用
+## 项目文档
 
-打开首页后点击“开始使用”进入研究工作区；GitHub 入口会在新标签页打开 [Tufa Scholar 仓库](https://github.com/iJA774/Tufa-Scholar)。首页不依赖 API。研究工作区使用本机 `/api` 代理。将光标移到左上角标志可展开研究历史，移出标志和抽屉会收起。悬浮在会话上时，可用右侧“…”置顶、解除置顶或删除。置顶状态保存在本机；删除需确认，且有待处理或正在运行任务的会话暂不能删除。打开历史时工作区切换至其所属项目。
+| 文档 | 内容 |
+| --- | --- |
+| [本地文档指南](docs/DOCUMENTS.md) | 导入、预处理和原文定位 |
+| [网页搜索](docs/WEB_SEARCH.md) | 搜索引擎与服务配置 |
+| [项目状态](docs/STATUS.md) | 已实现能力与后续方向 |
+| [API 指南](docs/API.md) | HTTP 接口和调用示例 |
+| [架构](docs/ARCHITECTURE.md) | 工作流、来源范围与研究预算 |
+| [开发指南](docs/DEVELOPMENT.md) · [仓库协作规则](AGENTS.md) | 本地开发、诊断与验证 |
 
-在提问框的模式菜单中选择“自动”“深度研究”或“快速探索”。默认使用自动档，由模型选择直接回答或进入研究流程。深度研究无条件进入研究流程，快速探索直接回答并跳过检索工具。设置中的“通用”可选择研究模式及发送快捷键，也可手动填写提问模型 ID 和文档分类模型 ID。通用页底部的“重置所有设置”会恢复默认模式、发送快捷键、研究偏好和外观。服务配置和模型设置保留。
+## 许可证
 
-在“研究偏好”中可选择轻量、标准或深入的研究档位，以及是否优先使用原始证据和相关性过滤强度。研究档位决定预算、自动思考强度和提前结束条件。手动选择思考强度时优先使用该值。偏好随新提问提交，重试沿用原任务的模式和偏好。报告格式目前只保存在前端，终稿仍按现有工作流生成。
-
-提问框内的“网络搜索”和“本地文献”默认点亮。关闭“网络搜索”会停用网页和 OpenAlex 检索及远程原文读取，进入研究时会直接开始规划。关闭“本地文献”会停用项目文献库检索。开关状态随每次提问保存，重试和重新回答沿用原任务状态。
-
-从侧边历史打开会话后，可点击原问题下方的“重新回答”，无需重新输入。已完成、报告降级、失败或中断的问题均可重新回答。新任务使用当前的提问模型或服务默认模型，保留原问题、来源范围、收藏夹成员快照和研究偏好；旧回答与报告继续保留。同一会话有待处理或运行中的任务时，需等待其结束。原有“重新执行”仍沿用失败任务保存的模型配置。
-
-工作区右上角“设置”下方显示当前会话累计记录的输入和输出 Token。研究进行时随模型响应更新，继续提问、重新回答及重试的用量都会累加。更新前的历史用量和服务未返回的用量可能缺失。
-
-深度研究先搜索和筛选背景资料，再规划并收集证据，最后生成报告。右侧“活动”可查看计划、审查、搜索结果与工具操作。支持流式响应的模型会边生成边显示 Markdown 草稿。任务失败或终稿降级时，工作区顶部会显示可关闭的原因和处理建议。降级后保存最近一份通过引用检查的研究草稿或当前证据缺口。快速探索的回答预览显示在聊天区。
-
-点击“设置”会在当前工作区上方打开设置卡片。在“服务与模型”和“网页搜索”中保存配置。“本地文档”可打开原文目录并运行预处理。“关于”在新标签页打开项目的 GitHub 仓库。
-
-### 本地文档转换 Markdown
-
-在“设置 → 本地文档”点击“打开目录”，Windows 资源管理器会打开 `TUFA_DATA_DIR/documents/originals/`，默认是项目下的 `data/documents/originals/`。将原文放入该目录，在“本地文献预处理”中点击“预处理”。同一批次会先在本机将原文转换为 Markdown，随后分类并为当前项目建立索引。
-
-自动识别并转换 PDF、DOCX 和 TXT。PDF 尝试保留字号标题、双栏阅读顺序和有边框表格，逐页写入 `<!-- page:N -->`；DOCX 保留标题、段落、列表、表格、粗斜体及安全链接，图片用位置标记代替。TXT 自动识别 UTF-8/BOM、UTF-16 和部分常见编码，检测失败时可先将原文件另存为 UTF-8。旧版 DOC 请先另存为 DOCX；扫描 PDF 需要先提取文本，加密 PDF 需要先解密。复杂版式、合并表格、公式和浮动对象仍可能不完整，请核对原文。
-
-进度和单文件状态来自服务端，可取消批次、逐个预览与下载，结束后下载保留相对目录结构的 ZIP。同名不同格式采用包含原扩展名的输出名，特殊冲突加稳定哈希；不会覆盖原文件。ZIP 附带转换清单和页码/字符偏移元数据（偏移按下载 Markdown 的 Unicode 字符计数）。预览最多显示 64,000 字符，完整内容通过下载获取。
-
-转换成功的 PDF 自动加入提交时的项目文献库，通过原文哈希关联已有论文和版本。研究员使用预处理后索引的 PDF、DOCX 和 TXT 的 Markdown 结果。已有 PDF 文件与原页证据仍可从历史报告查看。
-
-每批最多 100 文件 / 200 MiB，单文件 20 MiB、PDF 200 页、Markdown 8 MiB。批次优先处理待转换文件，超出一批时可再次点击转换。最多 4 个未结束批次、1 个 ZIP 打包，独立转换执行器一次运行一个解析子进程，每文件 45 秒、768 MiB 内存上限。关闭设置后转换继续执行，重新打开可读取最近批次。API 关闭或重启会结束遗留转换任务。
-
-设置页生成的 Markdown 保存在 `TUFA_DATA_DIR/documents/conversions/` 下对应的相对目录中，例如 `originals/topic/paper.pdf` 对应 `conversions/topic/paper.pdf.md`。同一相对目录下已有 `paper.pdf.md` 或 `paper.md` 时按已转换跳过。需要重新转换时，可先移走已有的同名 Markdown。
-
-新批次的下载文件和元数据保存在 `documents/conversions/.batches/` 下。临时输入副本在批次结束、取消或恢复时清理。导入文献库的 PDF 快照按内容哈希保存在 `documents/originals/.store/`。历史文献和批次仍可通过原入口读取。
-
-预处理也会为已有 Markdown 补做分类和索引。待分类文档发送给已配置的模型服务，模型生成一个或多个研究领域、标签和 20 字以内的内容描述。调用模型前按内容哈希查询 SQLite，已有的分类直接复用。原文和 Markdown 都会保留。
-
-分类失败时，批次会显示具体失败阶段。重新点击“预处理”可使用已有 Markdown 继续分类，无需重新转换。运行日志可按批次 ID 和文件 ID 查询分类结果与错误类型。
-
-“清除已保存的文档”会清空所有项目的本地 Markdown、转换批次及下载文件、预处理分类和全文索引。原始文件、PDF 原文快照、文献库和历史报告保留。确认前请等待转换、分类或下载结束。清除后可从原文重新预处理。
-
-分类默认使用服务的主模型。在“设置 → 通用”填写文档分类模型 ID 可单独覆盖，清空保存可恢复跟随主模型。`TUFA_PREPROCESSER_MODEL` 优先于这一设置。
-
-启用“本地文献”后，研究员先看到当前范围内有哪些研究领域。选定领域后，按页查看文献标题、标签和短描述。正文只在研究员主动调用 Markdown 阅读工具时提供。工具用 SQLite FTS5 选取相关片段，报告记录 Markdown 字符位置。
-
-已有文献和通过本机 API 导入的 PDF 按项目保存，新研究沿用当前项目。PDF 按可提取文本取证并保留版本与页码，图片型或加密 PDF 可能无法取证，重复文件按内容摘要去重。
-
-网页搜索工具也可独立调用，结果不自动导入论文库。网页正文读取限制公网地址和重定向；摘要和网页片段不能视作完整原文。报告正文按来源首次出现的顺序显示 `[1][2]` 等编号，同一来源复用编号。标题、已有出版信息和原文定位集中列在末尾的“参考文献”。完成任务后可下载同样格式的 Markdown 报告和逐条证据的 CSV 表。工具注册、参数和来源约束见 [工具说明](src/tools/README.md)。模型提示词 ID 和数据契约见 [提示词说明](docs/PROMPTS.md)。
-
-## API 入口
-
-| 方法与路径 | 功能 |
-|---|---|
-| `GET /health` | 健康与 SQLite/FTS5 检查 |
-| `GET/POST /projects` | 列出、创建项目 |
-| `GET/PUT /settings` | 读取配置状态或保存本机配置，不返回密钥原文 |
-| `POST /settings/models`、`GET /models` | 发现或列出模型 |
-| `GET/POST /projects/{project_id}/conversations` | 列出、创建对话 |
-| `GET /conversations` | 跨项目平铺列出历史会话，置顶优先，其余按更新时间倒序，返回 `project_id` 与 `pinned` |
-| `PATCH /conversations/{conversation_id}` | 设置 `pinned` 布尔值，返回更新后的会话 |
-| `DELETE /conversations/{conversation_id}` | 删除该会话、消息、报告及其任务；若有待处理或正在运行的任务则返回 409 |
-| `GET/POST /projects/{project_id}/papers` | 列出、保存论文元数据 |
-| `POST /projects/{project_id}/papers/import` | 上传 PDF |
-| `POST /conversion-batches/open-originals` | 在资源管理器打开本机原文目录 |
-| `POST /conversion-batches/prepare` | 转换和分类，并为传入的 `project_id` 建立本地 Markdown 检索索引 |
-| `POST /conversion-batches/clear` | 发送 JSON `{"confirm": true}` 清除已保存的预处理产物和记录 |
-| `POST /conversion-batches/from-originals` | 从固定原文目录创建并启动转换批次，传入当前 `project_id` 时导入转换成功的 PDF |
-| `POST /conversion-batches/preprocess` | 发送 JSON `{}` 启动已转换 Markdown 的分析与分类批次 |
-| `POST /conversion-batches` | 创建转换清单（相对路径、大小、可选项目和 TXT 编码） |
-| `POST /conversion-batches/{id}/files/{file_id}` | 单文件 multipart 上传；服务端生成物理文件名 |
-| `POST /conversion-batches/{id}/start`、`POST /conversion-batches/{id}/cancel` | 显式开始或取消批次 |
-| `GET /conversion-batches/{id}` | 实际单文件状态、数量、错误码和耗时 |
-| `GET /conversion-batches/{id}/files/{file_id}/preview`、`.../markdown` | 有限文本预览或单个 Markdown 下载 |
-| `GET /conversion-batches/{id}/zip` | 已结束批次打包下载，含定位元数据与清单 |
-| `GET /projects/{project_id}/web-search?q=...` | 独立网页搜索 |
-| `POST /projects/{project_id}/questions` | 提交科研问题 |
-| `GET /runs/{run_id}`、`POST /runs/{run_id}/retry` | 查询或重试任务 |
-| `POST /runs/{run_id}/regenerate` | 重新回答已结束的问题；可传 `model_name`，缺省使用当前服务默认模型，环境变量优先 |
-| `GET /runs/{run_id}/events?after=0` | 订阅研究事件，按事件 ID 续读 |
-| `GET /conversations/{conversation_id}/messages` | 查询对话消息和证据 |
-| `GET /reports/{report_id}/markdown`、`GET /reports/{report_id}/evidence.csv` | 下载报告或证据表 |
-
-提问示例，`source` 可为 `auto`、`local`、`openalex`、`all`、`web` 或 `collection`；`research_mode` 可为 `auto`、`deep` 或 `quick`：
-
-```powershell
-$body = @{ question = 'Attention Is All You Need'; source = 'local'; research_mode = 'deep' } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/projects/1/questions' -ContentType 'application/json' -Body $body
-```
-
-可选任务参数包括 `research_depth`（`light|standard|deep`，默认 `standard`）、`prefer_primary_evidence`（JSON 布尔值，默认 `true`）和 `relevance_filter`（`relaxed|standard|strict`，默认 `standard`）。`network_search` 和 `local_literature` 均为 JSON 布尔值，默认 `true`。各档位预算见[架构文档](docs/ARCHITECTURE.md#工作流预算)。
-
-## 验证
-
-在仓库根目录按改动范围运行。
-
-```powershell
-uv run --locked python -m unittest discover -s tests -q
-uv run --locked python -m scripts.verify_chat
-uv run --locked python -m scripts.verify_web_search
-uv run --locked python -m scripts.verify_conversion
-pnpm check:web
-pnpm build:web
-```
-
-这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。`verify_conversion` 检查转换、分类、领域披露、FTS5 阅读和 Markdown 字符定位。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成。浏览器验收入口见 [前端说明](apps/web/README.md)。
-
-排查研究请求时，可在 `TUFA_DATA_DIR/logs/worker.log` 按 `run_id` 查询模型调用、工具失败和报告校验。供应商用量缺失时日志显示 `na`。结构化响应诊断位于 `TUFA_DATA_DIR/diagnostics/`，可能包含用户材料。可在仓库根目录用 `uv run --locked python -m scripts.replay_diagnostic <诊断文件路径>` 离线校验当前提示词契约。
+项目采用 [MIT 许可证](LICENSE)。研究面板的第三方来源及许可见 [前端说明](apps/web/README.md)。
