@@ -39,15 +39,16 @@ class ConversionDownload(FileResponse):
 
 
 class ConversionBodyLimit:
-    """Bound chunked bodies before multipart spooling, only on the new endpoints."""
+    """Bound document request bodies and concurrent multipart spooling."""
     def __init__(self, app):
         self.app = app
         self.upload_slots = threading.BoundedSemaphore(2)
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] != 'http' or scope['method'] != 'POST' or not scope['path'].startswith('/conversion-batches'):
+        direct_pdf = bool(re.fullmatch(r'/projects/[^/]+/papers/import', scope.get('path', '')))
+        if scope['type'] != 'http' or scope['method'] != 'POST' or not (scope['path'].startswith('/conversion-batches') or direct_pdf):
             return await self.app(scope, receive, send)
-        limit = FORM_LIMIT if '/files/' in scope['path'] else 128*1024
+        limit = FORM_LIMIT if direct_pdf or '/files/' in scope['path'] else 128*1024
         headers = dict(scope.get('headers', []))
         try:
             length = int(headers.get(b'content-length', b'0'))
@@ -63,7 +64,7 @@ class ConversionBodyLimit:
             used += len(message.get('body', b''))
             if used > limit: raise HTTPException(413, '上传请求超过大小限制。')
             return message
-        is_upload = '/files/' in scope['path']
+        is_upload = direct_pdf or '/files/' in scope['path']
         if is_upload and not self.upload_slots.acquire(blocking=False):
             from starlette.responses import JSONResponse
             return await JSONResponse({'detail': '同时最多上传两个文件，请稍后重试。'}, 429)(scope, receive, send)
@@ -364,19 +365,40 @@ def _convert_originals_locked(spec: LocalBatchSpec, request: Request, *, combine
             if not output_path.resolve().is_relative_to((data_directory() / 'documents' / 'conversions').resolve()):
                 runner._change_item(batch['id'], item['id'], state='failed', code='unsafe_output', message='输出目录包含不安全的链接。')
                 continue
-            if (output_path.is_file() and not output_path.is_symlink()) or (plain_path.is_file() and not plain_path.is_symlink()):
+            already = (output_path.is_file() and not output_path.is_symlink()) or (plain_path.is_file() and not plain_path.is_symlink())
+            retry_import = False
+            if already:
                 paper_id = None
                 if spec.project_id and item['format'] == 'pdf' and item['size'] <= MAX_FILE:
                     try:
+                        from apps.api.pdf_import import publish_snapshot, markdown_source_matches
                         digest = sha256()
                         with path.open('rb') as source:
                             for chunk in iter(lambda: source.read(256 * 1024), b''):
                                 digest.update(chunk)
-                        paper_id = repo.link_existing_version(spec.project_id, digest.hexdigest())
-                    except OSError:
-                        pass
-                runner._change_item(batch['id'], item['id'], state='skipped', code='already_converted', message='已有同名 Markdown，已跳过。', paper_id=paper_id)
-                continue
+                        # An existing Markdown document can only be linked to this PDF
+                        # when its converter metadata identifies the same source bytes.
+                        existing_md = output_path if output_path.is_file() else plain_path
+                        with existing_md.open('r', encoding='utf-8') as md:
+                            header = md.read(8192)
+                        matches = markdown_source_matches(header, digest.hexdigest())
+                        from src.persistence.storage import connect_database
+                        with connect_database() as db:
+                            exists = repo.existing_version(db, digest.hexdigest())
+                        if exists:
+                            snapshot = publish_snapshot(path, digest.hexdigest())
+                            repo.update_version_path(digest.hexdigest(), snapshot)
+                            if matches:
+                                paper_id = repo.link_existing_version(spec.project_id, digest.hexdigest())
+                        elif matches:
+                            retry_import = True
+                            expected_digest = digest.hexdigest()
+                    except (OSError, UnicodeError):
+                        runner._change_item(batch['id'], item['id'], state='failed', code='import_failed', message='原文快照保存失败，请重试。')
+                        continue
+                if not retry_import:
+                    runner._change_item(batch['id'], item['id'], state='skipped', code='already_converted', message='已有同名 Markdown，已跳过。', paper_id=paper_id)
+                    continue
             target = runner.directory(batch['id']) / (item['id'] + '.input')
             try:
                 digest = sha256()
@@ -388,7 +410,8 @@ def _convert_originals_locked(spec: LocalBatchSpec, request: Request, *, combine
                         digest.update(chunk)
                         out.write(chunk)
                 if size != item['size']: raise ValueError('file changed')
-                runner._change_item(batch['id'], item['id'], state='uploaded', digest=digest.hexdigest())
+                if retry_import and digest.hexdigest() != expected_digest: raise ValueError('file changed')
+                runner._change_item(batch['id'], item['id'], state='uploaded', digest=digest.hexdigest(), retry_import=retry_import)
             except (OSError, ValueError):
                 target.unlink(missing_ok=True)
                 runner._change_item(batch['id'], item['id'], state='failed', code='read_failed', message='无法读取文件或文件已改变。')

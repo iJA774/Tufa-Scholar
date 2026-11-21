@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 
 VERSION = '1'
 MAX_FILE = 20 * 1024 * 1024
+MAX_PDF_PAGES = 200
+PARSE_TIMEOUT = 45
 MAX_OUTPUT = 8 * 1024 * 1024
 MAX_FILES = 100
 MAX_BATCH = 200 * 1024 * 1024

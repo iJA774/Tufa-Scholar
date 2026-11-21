@@ -11,6 +11,7 @@ import styles from "./SettingsPanel.module.css";
 
 type SettingsPanelProps = {
   projectId?: number;
+  onEnsureProject: () => Promise<number>;
   onClose: () => void;
   preferences: WorkspacePreferences;
   onPreferencesChange: (next: WorkspacePreferences) => void;
@@ -231,6 +232,7 @@ function SettingsHelp({ label, children }: { label: string; children: ReactNode 
 
 export default function SettingsPanel({
   projectId,
+  onEnsureProject,
   onClose,
   preferences,
   onPreferencesChange,
@@ -486,7 +488,7 @@ export default function SettingsPanel({
 
           {activeTab === "search" && <WebSearchSettings />}
 
-          <div hidden={activeTab !== "files"}><LocalDocuments projectId={projectId} /></div>
+          <div hidden={activeTab !== "files"}><LocalDocuments projectId={projectId} onEnsureProject={onEnsureProject} /></div>
           </main>
         </div>
         <footer className={`${styles.footer} ${activeTab === "research" ? styles.footerResearch : ""}`}>

@@ -181,6 +181,8 @@ def save_paper(project_id, metadata, version=None, collection_id=None):
             cur = db.execute('INSERT INTO paper_versions(paper_id,filename,digest,path,text,text_status,pages_indexed) VALUES (?,?,?,?,?,?,?)', (paper_id,version['filename'],version['digest'],version['path'],version['text'],version['text_status'],int('pages' in version)))
             if 'pages' in version:
                 db.executemany('INSERT INTO paper_pages(version_id,page,text) VALUES (?,?,?)', ((cur.lastrowid, n, text) for n, text in enumerate(version['pages'], 1)))
+        elif version:
+            db.execute('UPDATE paper_versions SET path=? WHERE digest=?', (version['path'], version['digest']))
         row = _one(db, 'SELECT * FROM papers WHERE id=?', (paper_id,))
         full_text = ' '.join(v['text'] for v in _all(db, 'SELECT text FROM paper_versions WHERE paper_id=?', (paper_id,)))
         db.execute('DELETE FROM paper_fts WHERE rowid=?', (paper_id,))
@@ -191,6 +193,13 @@ def save_paper(project_id, metadata, version=None, collection_id=None):
 
 def existing_version(db, digest):
     return _one(db, 'SELECT id FROM paper_versions WHERE digest=?', (digest,))
+
+
+def update_version_path(digest, path):
+    """Point only the matching version at an already verified snapshot."""
+    with connect_database() as db:
+        db.execute('UPDATE paper_versions SET path=? WHERE digest=?', (str(path), digest))
+        db.commit()
 
 
 def link_existing_version(project_id, digest):
