@@ -59,7 +59,9 @@ def install_scorer(dataset_id: str = datasets.DATASET):
 
 
 @router.get("/runs")
-def history():
+def history(compact: bool = False):
+    if compact:
+        return results.compact_history()
     return [command(results.snapshot, run_id, True) for run_id in store.run_ids()]
 
 

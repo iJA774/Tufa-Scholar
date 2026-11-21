@@ -1,5 +1,6 @@
 """State, isolation, data contracts and export regression tests for DRB v1."""
 
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import io
@@ -166,6 +167,12 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(summary["fact"]["effective_citations"], 1)
             self.assertEqual(summary["coverage"], {"race": .5, "fact": 0})
             self.assertEqual(summary["model"]["agent"]["usage"]["total_tokens"], 50)
+            compact = self.client.get("/benchmark/runs?compact=true").json()[0]["summary"]
+            self.assertEqual(compact["race"]["overall_score"], summary["race"]["overall_score"])
+            self.assertEqual(compact["fact"]["citation_accuracy"], summary["fact"]["citation_accuracy"])
+            historical = results.snapshot(id, history=True)["summary"]
+            for key in historical:
+                self.assertEqual(historical[key], summary[key], key)
             self.assertIsNone(summary["model"]["agent"]["usage"]["cost"])
             self.action(id, "retry", authorize=True, metrics=["fact"])
             again = self.start()
@@ -226,6 +233,72 @@ class BenchmarkTests(unittest.TestCase):
         other, _ = self.create(ids=[3])
         response = self.client.post("/benchmark/compare", json={"ids": [id, other["id"]]})
         self.assertIn("测试样本不同", response.json()["warnings"])
+
+    def test_history_and_exports_avoid_unneeded_details(self):
+        run, _ = self.create(ids=[1, 2, 3], budget={"max_requests": 500})
+        run_id = run["id"]
+        for _ in range(3):
+            attempt = self.start()
+            for index in range(40):
+                call = db.begin_call(attempt["id"], "agent", "research", run["config"]["budget"])
+                db.end_call(call, .1, 200 if index else 500, {"total_tokens": 2})
+            self.save(attempt)
+        expected = results.snapshot(run_id)
+        expected_summary = {key: value for key, value in expected["summary"].items()
+                            if key not in ("node_mean_seconds", "language", "topic", "failures")}
+        # The list route used by the workbench executes the same bounded set of
+        # queries regardless of run count and does not scan events or calls.
+        self.create(ids=[1])
+        statements = []
+        connect = db.connect_database
+        @contextmanager
+        def traced_connection():
+            with connect() as connection:
+                connection.set_trace_callback(statements.append)
+                yield connection
+        with patch.object(db, "connect_database", side_effect=traced_connection), \
+             patch.object(results, "snapshot", side_effect=AssertionError("full snapshot loaded")):
+            compact = self.client.get("/benchmark/runs?compact=true")
+        self.assertEqual(compact.status_code, 200)
+        self.assertEqual(len(compact.json()), 2)
+        select_sql = [sql.lower() for sql in statements if sql.lstrip().lower().startswith("select")]
+        self.assertEqual(len(select_sql), 3)
+        self.assertFalse(any("research_events" in sql or "benchmark_calls" in sql for sql in select_sql))
+        row = next(row for row in compact.json() if row["id"] == run_id)
+        self.assertEqual(row["summary"]["samples"], expected_summary["samples"])
+        with patch.object(results, "snapshot", side_effect=AssertionError("full snapshot loaded")), \
+             patch.object(results, "activity", side_effect=AssertionError("event details loaded")), \
+             patch.object(db, "calls", side_effect=AssertionError("call details loaded")), \
+             patch.object(results, "task_detail", side_effect=AssertionError("task detail loaded")):
+            statements.clear()
+            with patch.object(db, "connect_database", side_effect=traced_connection):
+                markdown = self.client.get(f"/benchmark/runs/{run_id}/export?format=md")
+            self.assertEqual(markdown.status_code, 200)
+            self.assertFalse(any("benchmark_calls" in sql.lower() or "research_events" in sql.lower() for sql in statements))
+            statements.clear()
+            with patch.object(db, "connect_database", side_effect=traced_connection):
+                csv_response = self.client.get(f"/benchmark/runs/{run_id}/export?format=csv")
+            self.assertEqual(csv_response.status_code, 200)
+            sql = " ".join(statements).lower()
+            self.assertNotIn("research_events", sql)
+            self.assertNotIn("t.prompt", sql)
+            self.assertIn("c.role in ('agent','judge')", sql)
+        archive_response = self.client.get(f"/benchmark/runs/{run_id}/export?format=zip")
+        with ZipFile(io.BytesIO(archive_response.content)) as archive:
+            self.assertEqual(markdown.content, archive.read("summary.md"))
+            self.assertEqual(csv_response.content, archive.read("scores.csv"))
+        with patch.object(results, "activity", side_effect=AssertionError("event details loaded")), \
+             patch.object(db, "calls", side_effect=AssertionError("call details loaded")), \
+             patch.object(results, "task_detail", side_effect=AssertionError("task detail loaded")):
+            history = self.client.get("/benchmark/runs")
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(next(row for row in history.json() if row["id"] == run_id)["summary"], expected_summary)
+            markdown = self.client.get(f"/benchmark/runs/{run_id}/export?format=md")
+            self.assertEqual(markdown.status_code, 200)
+            raw = self.client.get(f"/benchmark/runs/{run_id}/export?format=jsonl")
+            self.assertEqual(len(datasets.read_jsonl(raw.content)), 3)
+        with patch.object(results, "task_detail", side_effect=AssertionError("task detail loaded")):
+            self.assertEqual(self.client.get(f"/benchmark/runs/{run_id}/export?format=csv").status_code, 200)
 
     def test_invalid_api_input_does_not_echo_credentials(self):
         response = self.client.post("/benchmark/runs", json={"authorize": False,

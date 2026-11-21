@@ -88,6 +88,51 @@ def run_ids():
         return [r[0] for r in db.execute("SELECT id FROM benchmark_runs ORDER BY created DESC")]
 
 
+def compact_history_rows():
+    """One read transaction and a fixed number of queries for the history list."""
+    with reader() as db:
+        db.execute("BEGIN")
+        runs = db.execute("SELECT id,name,status,created,config,credentials FROM benchmark_runs ORDER BY created DESC").fetchall()
+        counts = db.execute("SELECT run_id,COUNT(*) AS samples FROM benchmark_tasks GROUP BY run_id").fetchall()
+        scores = db.execute("""SELECT a.run_id,a.phase,
+            AVG(json_extract(a.result, '$.metrics.overall_score')) AS overall,
+            SUM(json_extract(a.result, '$.metrics.supported')) AS supported,
+            SUM(json_extract(a.result, '$.metrics.determinate')) AS determinate,
+            SUM(json_extract(a.result, '$.metrics.reports_with_extracted_citations')) AS cited
+            FROM benchmark_attempts a WHERE a.phase IN ('race','fact') AND a.result IS NOT NULL
+              AND a.id=(SELECT MAX(b.id) FROM benchmark_attempts b WHERE b.run_id=a.run_id
+                       AND b.task_id=a.task_id AND b.phase=a.phase AND b.result IS NOT NULL)
+            GROUP BY a.run_id,a.phase""").fetchall()
+    for run in runs:
+        decode(run, "config", "credentials")
+    return runs, counts, scores
+
+
+def export_projection(run_id, *, tokens=False):
+    """Read task columns and scoring metrics required by Markdown or CSV."""
+    with reader() as db:
+        db.execute("BEGIN")
+        run = get_run(run_id, private=True, session=db)
+        if not run:
+            raise KeyError(run_id)
+        task_columns = "t.language,t.topic," if tokens else ""
+        elapsed_column = "(SELECT ended-started FROM benchmark_attempts a WHERE a.run_id=t.run_id AND a.task_id=t.task_id AND phase='generate' ORDER BY id DESC LIMIT 1)" if tokens else "NULL"
+        tasks = db.execute(f"""SELECT t.task_id,{task_columns}
+            (SELECT status FROM benchmark_stages s WHERE s.run_id=t.run_id AND s.task_id=t.task_id AND phase='generate') AS generate,
+            (SELECT status FROM benchmark_stages s WHERE s.run_id=t.run_id AND s.task_id=t.task_id AND phase='race') AS race,
+            (SELECT status FROM benchmark_stages s WHERE s.run_id=t.run_id AND s.task_id=t.task_id AND phase='fact') AS fact,
+            {elapsed_column} AS elapsed
+            FROM benchmark_tasks t WHERE t.run_id=? ORDER BY t.position""", (run_id,)).fetchall()
+        scores = db.execute("""SELECT a.task_id,a.phase,json_extract(a.result,'$.metrics') AS metrics
+            FROM benchmark_attempts a WHERE a.run_id=? AND a.phase<>'generate' AND a.result IS NOT NULL
+            AND a.id=(SELECT MAX(b.id) FROM benchmark_attempts b WHERE b.run_id=a.run_id
+                      AND b.task_id=a.task_id AND b.phase=a.phase AND b.result IS NOT NULL)""", (run_id,)).fetchall()
+        usage = db.execute("""SELECT a.task_id,c.role,SUM(json_extract(c.usage,'$.total_tokens')) AS total_tokens
+            FROM benchmark_attempts a JOIN benchmark_calls c ON c.attempt_id=a.id
+            WHERE a.run_id=? AND c.role IN ('agent','judge') GROUP BY a.task_id,c.role""", (run_id,)).fetchall() if tokens else []
+    return run, tasks, scores, usage
+
+
 def run_phases(config):
     return (GENERATE, *config["available_metrics"])
 
