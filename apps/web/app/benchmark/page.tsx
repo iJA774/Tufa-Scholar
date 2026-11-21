@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { active, count, date, feedback, post, request, states, type Comparison, type Installation, type Query, type Run, type TaskDetail } from "./api";
+import { active, count, date, feedback, post, request, states, type Comparison, type HistoryRow, type Installation, type Query, type Run, type TaskDetail } from "./api";
 import { NewRun, Questions } from "./forms";
 import { ComparisonPanel, RunPanel, TaskPanel } from "./results";
 import styles from "./benchmark.module.css";
@@ -10,7 +10,7 @@ import styles from "./benchmark.module.css";
 export default function BenchmarkPage() {
   const [setting, setSetting] = useState<Installation | null>(null);
   const [queries, setQueries] = useState<Query[]>([]);
-  const [history, setHistory] = useState<Run[]>([]);
+  const [history, setHistory] = useState<HistoryRow[]>([]);
   const [runId, setRunId] = useState("");
   const [run, setRun] = useState<Run | null>(null);
   const [taskId, setTaskId] = useState<number | null>(null);
@@ -29,7 +29,7 @@ export default function BenchmarkPage() {
     async function load() {
       try {
         const [info, runs] = await Promise.all([
-          request<Installation>("", { signal }), request<Run[]>("/runs", { signal }),
+          request<Installation>("", { signal }), request<HistoryRow[]>("/runs?compact=true", { signal }),
         ]);
         if (signal.aborted) return;
         setSetting(info);

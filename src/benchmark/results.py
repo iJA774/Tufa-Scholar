@@ -123,7 +123,96 @@ def quality(tasks):
             "p95_seconds": elapsed[ceil(0.95 * len(elapsed)) - 1] if elapsed else None}
 
 
+def compact_history():
+    runs, counts, score_rows = store.compact_history_rows()
+    samples = {row["run_id"]: row["samples"] for row in counts}
+    scores = {(row["run_id"], row["phase"]): row for row in score_rows}
+    result = []
+    for run in runs:
+        credentials = run.pop("credentials")
+        config = run.pop("config")
+        race = scores.get((run["id"], "race")) if "race" in config["available_metrics"] else None
+        fact = scores.get((run["id"], "fact")) if "fact" in config["available_metrics"] else None
+        run["config"] = {"research": {"model_name": config["research"]["model_name"]}}
+        run["summary"] = {"samples": samples.get(run["id"], 0),
+                          "race": {"overall_score": race["overall"]} if race else None,
+                          "fact": {"citation_accuracy": fact["supported"] / fact["determinate"] if fact["determinate"] else None} if fact else None}
+        result.append(redact(run, credentials))
+    return result
+
+
+def projected_export(run_id, *, tokens=False):
+    run, tasks, score_rows, usage_rows = store.export_projection(run_id, tokens=tokens)
+    scores = {(row["task_id"], row["phase"]): json.loads(row["metrics"]) for row in score_rows}
+    usage = {(row["task_id"], row["role"]): row["total_tokens"] for row in usage_rows}
+    for task in tasks:
+        task["scores"] = {phase: scores[task["task_id"], phase] for phase in run["config"]["available_metrics"]
+                          if (task["task_id"], phase) in scores}
+        task["performance"] = {"elapsed": task.pop("elapsed")}
+        if tokens:
+            task["usage"] = {role: {"usage": {"total_tokens": usage.get((task["task_id"], role))}}
+                             for role in ("agent", "judge")}
+    run["summary"] = quality(tasks)
+    run["tasks"] = tasks
+    credentials = run.pop("credentials")
+    return redact(run, credentials)
+
+
+def history_snapshot(run_id):
+    """Keep the history summary contract without materializing event and call details."""
+    with store.reader() as db:
+        db.execute("BEGIN")
+        run = store.get_run(run_id, private=True, session=db)
+        if not run:
+            raise KeyError(run_id)
+        rows = db.execute("""SELECT t.task_id,
+            (SELECT status FROM benchmark_stages s WHERE s.run_id=t.run_id AND s.task_id=t.task_id AND phase='generate') AS generate,
+            (SELECT status FROM benchmark_stages s WHERE s.run_id=t.run_id AND s.task_id=t.task_id AND phase='race') AS race,
+            (SELECT status FROM benchmark_stages s WHERE s.run_id=t.run_id AND s.task_id=t.task_id AND phase='fact') AS fact,
+            (SELECT ended-started FROM benchmark_attempts a WHERE a.run_id=t.run_id AND a.task_id=t.task_id AND phase='generate' ORDER BY id DESC LIMIT 1) AS elapsed,
+            (SELECT error FROM benchmark_attempts a WHERE a.run_id=t.run_id AND a.task_id=t.task_id AND phase='generate' AND ended IS NOT NULL ORDER BY id DESC LIMIT 1) AS error,
+            EXISTS(SELECT 1 FROM research_events e WHERE e.run_id=(SELECT research_id FROM benchmark_attempts a WHERE a.run_id=t.run_id AND a.task_id=t.task_id AND phase='generate' ORDER BY id DESC LIMIT 1) AND e.kind='report.fallback') AS fallback
+            FROM benchmark_tasks t WHERE t.run_id=? ORDER BY t.position""", (run_id,)).fetchall()
+        score_rows = db.execute("""SELECT task_id,phase,json_extract(result,'$.metrics') AS metrics
+            FROM benchmark_attempts a WHERE run_id=? AND phase<>'generate' AND result IS NOT NULL
+            AND id=(SELECT MAX(a2.id) FROM benchmark_attempts a2 WHERE a2.run_id=a.run_id
+                    AND a2.task_id=a.task_id AND a2.phase=a.phase AND a2.result IS NOT NULL) ORDER BY id""", (run_id,)).fetchall()
+        attempt_summary = db.execute("""SELECT COALESCE(SUM(COALESCE(ended, ?)-started),0) AS elapsed,
+            COUNT(*) AS count, COUNT(DISTINCT task_id || ':' || phase) AS unique_count
+            FROM benchmark_attempts WHERE run_id=?""", (datetime.now(timezone.utc).timestamp(), run_id)).fetchone()
+        keys = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens", "cost")
+        aggregates = ", ".join(f"SUM(json_extract(c.usage, '$.{key}')) AS {key}, COUNT(json_extract(c.usage, '$.{key}')) AS {key}_coverage" for key in keys)
+        calls = db.execute(f"""SELECT c.role, COUNT(*) AS requests,
+            SUM(CASE WHEN c.status IS NULL OR c.status=0 OR c.status>=400 THEN 1 ELSE 0 END) AS errors,
+            SUM(CASE WHEN c.role='retrieval' AND c.status IS NULL THEN 1 ELSE 0 END) AS search_errors,
+            {aggregates} FROM benchmark_calls c JOIN benchmark_attempts a ON a.id=c.attempt_id
+            WHERE a.run_id=? GROUP BY c.role""", (run_id,)).fetchall()
+    credentials = run.pop("credentials")
+    scores = {(row["task_id"], row["phase"]): json.loads(row["metrics"]) for row in score_rows}
+    tasks = [{**row, "scores": {phase: scores[row["task_id"], phase] for phase in run["config"]["available_metrics"]
+                              if (row["task_id"], phase) in scores},
+              "performance": {"elapsed": row["elapsed"]}} for row in rows]
+    summary = quality(tasks)
+    call_by_role = {row["role"]: row for row in calls}
+    model = {}
+    for role in ("agent", "judge", "reader"):
+        row = call_by_role.get(role)
+        model[role] = {"requests": row["requests"] if row else 0,
+                       "errors": row["errors"] if row else 0,
+                       "usage": {key: row[key] if row else None for key in keys},
+                       "usage_coverage": {key: row[key + "_coverage"] if row else 0 for key in keys}}
+    summary.update(elapsed_seconds=attempt_summary["elapsed"],
+                   timeout_rate=sum(row["error"] == "timeout" for row in rows) / len(rows),
+                   fallback_rate=sum(row["fallback"] for row in rows) / len(rows),
+                   retries=attempt_summary["count"] - attempt_summary["unique_count"],
+                   model=model, search_errors=sum(row["search_errors"] for row in calls))
+    run["summary"] = summary
+    return redact(run, credentials)
+
+
 def snapshot(run_id, history=False):
+    if history:
+        return history_snapshot(run_id)
     with store.reader() as db:
         db.execute("BEGIN")
         run = store.get_run(run_id, private=True, session=db)
@@ -225,17 +314,43 @@ def compare(ids):
     return {"runs": runs, "warnings": list(dict.fromkeys(warnings))}
 
 
+def raw_records(run_id):
+    with store.reader() as db:
+        db.execute("BEGIN")
+        run = store.get_run(run_id, private=True, session=db)
+        if not run:
+            raise KeyError(run_id)
+        tasks = store.task_rows(run_id, session=db)
+        rows = db.execute("""SELECT a.task_id,r.content,r.evidence,a.result AS benchmark_result
+            FROM benchmark_attempts a JOIN tasks t ON t.id=a.research_id
+            JOIN reports r ON r.run_id=t.id WHERE a.run_id=? AND t.status='succeeded'
+            AND a.id=(SELECT MAX(a2.id) FROM benchmark_attempts a2 JOIN tasks t2 ON t2.id=a2.research_id
+                      JOIN reports r2 ON r2.run_id=t2.id WHERE a2.run_id=a.run_id AND a2.task_id=a.task_id
+                      AND t2.status='succeeded')""", (run_id,)).fetchall()
+    reports = {row["task_id"]: store.decode(row, "evidence", "benchmark_result") for row in rows}
+    adapter = adapter_for(run["config"]["dataset"]["id"])
+    records = []
+    for task in tasks:
+        report = reports.get(task["task_id"])
+        if report:
+            cached = report["benchmark_result"]
+            article = cached["article"] if cached else adapter.report_record(task, report)[0]["article"]
+            records.append({"id": task["task_id"], "prompt": task["prompt"], "article": article})
+    return redact(records, run["credentials"])
+
+
 def exports(run_id, kind):
-    run = snapshot(run_id)
-    details = [task_detail(run_id, task["task_id"]) for task in run["tasks"]]
-    records = [{"id": item["task"]["task_id"], "prompt": item["task"]["prompt"], "article": item["report"]["adapted"]}
-               for item in details if item["report"] is not None]
     if kind == "jsonl":
-        return "application/x-ndjson", jsonl(records).encode()
-    run["details"] = details
-    full = json.dumps(run, ensure_ascii=False, indent=2, allow_nan=False).encode()
-    if kind == "json":
-        return "application/json", full
+        return "application/x-ndjson", jsonl(raw_records(run_id)).encode()
+    run = projected_export(run_id, tokens=(kind == "csv")) if kind in ("md", "csv") else snapshot(run_id)
+    if kind in ("json", "zip"):
+        details = [task_detail(run_id, task["task_id"]) for task in run["tasks"]]
+        records = [{"id": item["task"]["task_id"], "prompt": item["task"]["prompt"], "article": item["report"]["adapted"]}
+                   for item in details if item["report"] is not None]
+        run["details"] = details
+        full = json.dumps(run, ensure_ascii=False, indent=2, allow_nan=False).encode()
+        if kind == "json":
+            return "application/json", full
     metadata = run["config"]
     created = datetime.fromtimestamp(run["created"], timezone.utc).isoformat()
     summary = run["summary"]

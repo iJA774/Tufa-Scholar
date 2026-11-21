@@ -24,6 +24,10 @@ export type Run = { id: string; name: string; status: string; reason: string | n
   config: { research: { model_name: string }; judge: Judge; budget: Budget; metrics: Metric[]; task_ids: number[]; dataset: Dataset; software: { commit: string | null; dirty: boolean | null } };
   summary: Summary; tasks?: Row[]; activity?: Activity[];
 };
+export type HistoryRow = Pick<Run, "id" | "name" | "status" | "created"> & {
+  config: { research: { model_name: string } };
+  summary: { samples: number; race: Record<string, number> | null; fact: { citation_accuracy: number | null } | null };
+};
 export type TaskDetail = { task: Row; report: { content: string; adapted: string; evidence: unknown[]; citation_diagnostics: unknown } | null;
   attempts: { phase: Metric; status: string; error: string | null; result?: { metrics?: Record<string, number>;
     details?: { status: string; fact: string; url: string }[] } }[];
