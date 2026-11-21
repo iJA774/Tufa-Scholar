@@ -1,6 +1,6 @@
 # 设计取舍与技术债
 
-本文记录维护代码时需要知道的设计选择。当前能力见 [项目状态](STATUS.md)，节点、接口和预算见 [架构文档](ARCHITECTURE.md)，命令见 [README](../README.md#验证)。
+本文记录维护代码时需要知道的设计选择。当前能力见 [项目状态](STATUS.md)，节点、接口和预算见 [架构文档](ARCHITECTURE.md)，安装见 [README](../README.md#快速开始)。
 
 ## Windows 启动器命令解析
 
@@ -115,6 +115,50 @@ Dispatcher 和背景调查的结构化回复仍使用 `json_repair` 尝试恢复
 ## 验收边界
 
 隔离脚本通过实际 API 和 worker 验证任务闭环，模型与搜索可由本地模拟服务提供。浏览器 fixture 验证界面和交互，真实服务验收验证协议、权限、限流和质量。维护时按改动分别验证这三层，具体结果随对应提交或评审记录保留。
+
+## 运行与诊断
+
+依赖安装和默认启动见 [快速开始](../README.md#快速开始)。仓库根目录可用 `.\start.ps1 -Dev` 启动开发模式，默认模式会先构建前端。
+
+API 和 worker 必须共用 `TUFA_DATA_DIR`。缺省使用仓库根目录的 `data/`。运行验收时使用隔离数据目录。可在 API 和 worker 环境设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL`，环境变量优先于服务设置。本机设置的密钥以明文保存在数据目录的 `research.db` 中。
+
+也可在仓库根目录的三个 PowerShell 终端分别运行：
+
+```powershell
+# API
+uv run --locked uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+```
+
+```powershell
+# 单 worker；API 与 worker 使用相同 TUFA_DATA_DIR
+uv run --locked python -m apps.worker
+```
+
+```powershell
+# 前端
+pnpm dev:web
+```
+
+前端默认代理到 `http://127.0.0.1:8000`。可访问 [健康检查](http://127.0.0.1:8000/health) 或 [交互式 API 文档](http://127.0.0.1:8000/docs)。手动启动时仅运行一个 worker。`uv run --locked python -m apps.worker --once` 最多处理一项任务后退出，`--check` 只检查存储。
+
+排查研究请求时，可在 `TUFA_DATA_DIR/logs/worker.log` 按 `run_id` 查询模型调用、工具失败和报告校验。供应商用量缺失时日志显示 `na`。结构化响应诊断位于 `TUFA_DATA_DIR/diagnostics/`，可能包含用户材料。可在仓库根目录用 `uv run --locked python -m scripts.replay_diagnostic <诊断文件路径>` 离线校验当前提示词契约。
+
+## 验证
+
+在仓库根目录按改动范围运行。
+
+```powershell
+uv run --locked python -m unittest discover -s tests -q
+uv run --locked python -m scripts.verify_chat
+uv run --locked python -m scripts.verify_web_search
+uv run --locked python -m scripts.verify_conversion
+pnpm check:web
+pnpm build:web
+```
+
+这些 `verify_*` 命令使用临时 SQLite、实际本地 API/worker 和模拟上游。`verify_conversion` 检查转换、分类、领域披露、FTS5 阅读和 Markdown 字符定位。仅运行转换单测可用 `uv run --locked python -m unittest tests.test_document_conversion -q`。固定合成样本由 `tests/conversion_fixtures.py` 生成。浏览器验收入口见 [前端说明](../apps/web/README.md)。
+
+Benchmark 分支的评测入口见 [评测验收](BENCHMARK.md#评测验收)。
 
 ## DeepResearch Bench v1
 

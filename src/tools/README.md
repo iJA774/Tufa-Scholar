@@ -73,6 +73,6 @@ registry.invoke("text_length", {"text": "科研"}, context=context)
 
 重复名称被拒绝。`registry.py` 显式接入搜索、外部取证、网页读取和本地 Markdown 工具，算法位于 `src/literature/` 和 `src/integrations/`。新工具应声明适用来源并遵守上下文。提示词位于 `src/prompts/`，模型编排和引用核验由研究工作流负责。
 
-从仓库根目录运行 `uv run --locked python -m unittest tests.test_tools -v` 验证工具入口。跨层回归及实际 API/worker 验收命令见 [根 README](../../README.md#验证)。
+从仓库根目录运行 `uv run --locked python -m unittest tests.test_tools -v` 验证工具入口。跨层回归及实际 API/worker 验收命令见 [开发指南](../../docs/DEVELOPMENT.md#验证)。
 
 `read_web_page` 读取公网 HTTP(S) 网页，返回清理后的 Markdown 开头片段。地址和每次跳转均检查公网 DNS，连接固定已验证 IP，HTTPS 校验原域名。支持 HTML、纯文本和公开 PDF 的可提取文本。PDF 最多提取前 50 页、20 万字符，按页标注，图片型或加密文件不可读取。网页正文片段以 `content_offset` 交给取证时，结果保留绝对字符范围。

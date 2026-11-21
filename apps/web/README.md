@@ -52,4 +52,4 @@ node apps/web/app/hooks/runEvents.test.cjs (Resolve-Path .cache/events-test/hook
 uv run --locked python -m scripts.fixture_api --data-dir .cache/desktop-research-fixture --port 18180 --local-config
 ```
 
-fixture 要求新建或空的数据目录。`--local-config` 会清除 fixture 进程继承的服务密钥环境变量，并在该隔离 SQLite 中保存假模型和 Searx 设置；不会调用真实服务。输出中给出可上传样例 PDF 的路径。待处理任务需对 `POST /__fixture/advance` 调用两次，失败任务可重试；quick 不保存证据，deep 显示模拟 researcher 阶段。此 fixture 仅用于浏览器交互和页面内容，不用于验证真实 graph、worker、模型或检索闭环。实际验收范围见 [根 README](../../README.md#验证)。
+fixture 要求新建或空的数据目录。`--local-config` 会清除 fixture 进程继承的服务密钥环境变量，并在该隔离 SQLite 中保存假模型和 Searx 设置；不会调用真实服务。输出中给出可上传样例 PDF 的路径。待处理任务需对 `POST /__fixture/advance` 调用两次，失败任务可重试；quick 不保存证据，deep 显示模拟 researcher 阶段。此 fixture 仅用于浏览器交互和页面内容，不用于验证真实 graph、worker、模型或检索闭环。实际验收范围见 [开发指南](../../docs/DEVELOPMENT.md#验证)。
