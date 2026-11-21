@@ -31,7 +31,7 @@ def run_once(benchmark_task_id=None):
             run_id = task['id']
             research = {key: task.get(key) for key in (
                 'query', 'project_id', 'source', 'paper_ids', 'model_name', 'reasoning_effort', 'research_mode',
-                'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
+                'report_format', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
             )}
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
             def on_event(kind, data):

@@ -9,7 +9,7 @@
 | `literature/planner` | `literature/planner.md` | 结合问题、背景与各轮审查，生成要求、本轮计划、来源选择及继续或报告决定。 |
 | `literature/researcher` | `literature/researcher.md` | act 阶段通过原生 Function Calling 选择工具；draft 阶段根据已有证据写初稿。 |
 | `literature/analyst` | `literature/analyst.md` | 审查本轮初稿是否回应要求、引用是否有据，并输出覆盖、缺口和下一步。 |
-| `literature/reporter` | `literature/reporter.md` | 根据各轮材料自由组织 Markdown 报告。论文主线比较研究方法、实验设计和结论，网页主线组织可核查事实和来源。证据不足时具体说明影响。 |
+| `literature/reporter` | `literature/reporter.md` | 根据各轮材料和所选风格组织 Markdown 报告，按论文或网页主线解读证据。证据不足时具体说明影响。 |
 | `literature/preprocesser` | `literature/preprocesser.md` | 从本地 Markdown 提取多个研究领域、标签和简短描述。 |
 
 ## 结构化数据
@@ -32,6 +32,8 @@
 段落引用由代码映射到当前节点可见证据，遵守项目和收藏夹快照范围。初稿校验事实段落的引用、数值和成本依据。终稿保留无引用正文，只验证显式引用是否存在并符合范围。证据可追溯性与事实、数值判断由写作要求分别约束。
 
 研究模式字段保存在 task：`auto` 是旧 API 客户端的缺省兼容模式，collection 来源在 auto 下强制研究；`quick` 优先于 collection 约束，不读取收藏夹且直接回答；`deep` 绕过 dispatcher 判断并启动研究。用户可通过 API 请求选择模式，API 校验后由 worker 传入可信模板上下文；问题、历史或检索材料中的指令不能改变该模式。任务重试复制原模式，既有 task 通过 additive migration 补为 `auto`。
+
+任务中的 `report_format` 作为受信模板上下文传给 Reporter 和 Dispatcher。Reporter 只渲染所选风格的写作指引，Dispatcher 对直接答复使用简短的同风格指引。证据解读仍遵循首轮研究方向 `search_mode`。
 
 研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据。终稿的 `search_mode` 由首轮研究方向确定；后续渠道切换只影响每轮取证。Reporter 根据实际收束原因与 `outstanding_gaps` 说明未解决事项；该字段反映最近一次累计审查，历史审查中的缺口仅作过程背景。
 

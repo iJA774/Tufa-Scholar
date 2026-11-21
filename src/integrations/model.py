@@ -39,6 +39,7 @@ DEFAULT_TEMPLATE_CONTEXT = {
     'node_role': '',
     'search_mode': 'none',
     'research_mode': 'auto',
+    'report_format': 'academic',
     'available_tools': [],
     'native_tool_decision': False,
     'local_capable': False,

@@ -107,7 +107,7 @@ def main():
             # Exercise the real failed-task/retry path before configuring a model.
             pending = call('POST', f'/projects/{project}/questions', json={
                 'question': 'accuracy', 'source': 'local', 'model_name': 'fixture-selected',
-                'research_mode': 'deep',
+                'research_mode': 'deep', 'report_format': 'brief',
                 'research_depth': 'light', 'prefer_primary_evidence': False, 'network_search': False,
                 'relevance_filter': 'relaxed',
             })
@@ -118,6 +118,7 @@ def main():
             assert failed_detail['research_mode'] == 'deep', failed_detail
             preferences = {
                 'research_depth': 'light',
+                'report_format': 'brief',
                 'prefer_primary_evidence': False,
                 'relevance_filter': 'relaxed',
                 'network_search': False,
@@ -181,6 +182,9 @@ def main():
                 for line in item['messages'][0]['content'].splitlines()
                 if '运行节点标识：' in line
             ]
+            reporter_prompts = [item['messages'][0]['content'] for item in retry_model_requests
+                                if '运行节点标识：reporter' in item['messages'][0]['content']]
+            assert len(reporter_prompts) == 1 and '### 决策简报' in reporter_prompts[0], reporter_prompts
             assert retry_roles and retry_roles[0] == 'planner', retry_roles
             assert 'background_investigator' not in retry_roles and 'dispatcher' not in retry_roles, retry_roles
             local_requests = [json.loads(item['messages'][1]['content']) for item in retry_model_requests]
@@ -207,7 +211,7 @@ def main():
 
             # A direct response runs only the dispatcher and does not search.
             before = len(fixture.model_requests)
-            direct = call('POST', f'/projects/{project}/questions', json={'question': 'direct: define accuracy', 'source': 'auto'})
+            direct = call('POST', f'/projects/{project}/questions', json={'question': 'direct: define accuracy', 'source': 'auto', 'report_format': 'explainer'})
             direct_task = wait(direct['run_id'])
             direct_requests = fixture.model_requests[before:]
             assert direct_task['status'] == 'succeeded', direct_task
@@ -221,6 +225,7 @@ def main():
                 if '运行节点标识：' in line
             ]
             assert roles == ['dispatcher'], roles
+            assert '通俗语言解释核心概念' in direct_requests[0]['messages'][0]['content']
             assert stages(direct['run_id']) == ['dispatcher'], stages(direct['run_id'])
 
             # A blank collection still finishes with an explicit evidence gap.
