@@ -193,8 +193,12 @@
 
 .historyPanelOpen { opacity: 1; pointer-events: auto; transform: translate(0, 0) scale(1); visibility: visible; }
 .historyTop { flex: none; padding: 25px 20px 16px; }
-.historyHeading { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 20px; }
+.historyHeading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 20px; }
 .historyHeading h2 { margin: 0; font-size: 20px; font-weight: 580; letter-spacing: .02em; }
+.clearHistory { padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: #efa9b4; font-size: 12px; }
+.clearHistory:hover:not(:disabled) { background: rgba(186, 68, 89, .13); color: #ffc2ca; }
+.clearHistory:disabled { cursor: default; opacity: .4; }
+.clearHistory:focus-visible { outline: 2px solid #92a1ff; outline-offset: 3px; }
 
 .newButton {
   display: flex;

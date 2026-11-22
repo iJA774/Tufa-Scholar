@@ -263,6 +263,13 @@ def all_conversations():
     return repo.list_all_conversations()
 
 
+@app.delete('/conversations', status_code=204)
+def delete_all_conversations():
+    if repo.delete_all_conversations() == 'active':
+        raise HTTPException(409, '对话有待处理或正在运行的任务，请等待完成后删除')
+    return Response(status_code=204)
+
+
 @app.patch('/conversations/{conversation_id}')
 def patch_conversation(conversation_id: int, body: ConversationPinnedInput):
     conversation = repo.update_conversation_pinned(conversation_id, body.pinned)
