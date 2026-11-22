@@ -182,6 +182,56 @@ class ChatApiTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reports WHERE conversation_id=?', (target['id'],)).fetchone()[0], 0)
             self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
 
+    def test_clear_all_conversations_is_atomic_across_projects_and_preserves_library(self):
+        c = self.client
+        first = c.post('/projects', json={'name': 'first'}).json()['id']
+        second = c.post('/projects', json={'name': 'second'}).json()['id']
+        collection = c.post(f'/projects/{first}/collections', json={'name': 'keep'}).json()['id']
+        paper = c.post(f'/projects/{first}/papers', json={'title': 'shared paper', 'doi': '10.1000/example'}).json()
+        repo.collection_add_existing(first, collection, paper['id'])
+        c.post(f'/projects/{second}/papers', json={'title': 'shared paper', 'doi': '10.1000/example'})
+        old = c.post(f'/projects/{first}/questions', json={'question': 'finished'}).json()
+        c.patch(f"/conversations/{old['conversation_id']}", json={'pinned': True})
+        repo.claim_task()
+        repo.fail_task(old['run_id'], 'retry')
+        retry = c.post(f"/runs/{old['run_id']}/retry").json()
+        repo.claim_task()
+        repo.record_research_event(retry['id'], 'test', {})
+        report_id = repo.finish_chat_task(retry['id'], 'answer', [])['report_id']
+        active = c.post(f'/projects/{second}/questions', json={'question': 'active'}).json()
+        empty = c.post(f'/projects/{second}/conversations', json={'title': 'empty'}).json()
+        before = c.get('/conversations').json()
+
+        self.assertEqual(c.delete('/conversations').status_code, 409)
+        self.assertEqual(c.get('/conversations').json(), before)
+        self.assertEqual(c.get(f'/reports/{report_id}').status_code, 200)
+        self.assertEqual(repo.claim_task()['id'], active['run_id'])
+        self.assertEqual(c.delete('/conversations').status_code, 409)
+        self.assertEqual(c.get('/conversations').json(), before)
+        repo.fail_task(active['run_id'], 'finished')
+        standalone = c.post(f'/projects/{second}/runs', json={'query': 'standalone search'}).json()
+        self.assertEqual(c.get(f"/runs/{standalone['run_id']}").json()['status'], 'pending')
+
+        response = c.delete('/conversations')
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b'')
+        self.assertEqual(c.get('/conversations').json(), [])
+        self.assertEqual(c.delete('/conversations').status_code, 204)
+        for conversation_id in (old['conversation_id'], active['conversation_id'], empty['id']):
+            self.assertEqual(c.get(f'/conversations/{conversation_id}/messages').status_code, 404)
+        self.assertEqual(c.get(f'/reports/{report_id}').status_code, 404)
+        self.assertEqual({p['id'] for p in c.get('/projects').json()}, {first, second})
+        self.assertEqual(c.get(f'/projects/{first}/papers').json()[0]['id'], paper['id'])
+        self.assertEqual(c.get(f'/projects/{second}/papers').json()[0]['id'], paper['id'])
+        self.assertEqual(c.get(f'/projects/{first}/collections/{collection}/papers').json()[0]['id'], paper['id'])
+        self.assertEqual(c.get(f"/runs/{standalone['run_id']}").json()['status'], 'pending')
+        from src.persistence.storage import connect_database
+        with connect_database() as db:
+            for table in ('conversations', 'messages', 'reports', 'research_events'):
+                self.assertEqual(db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 1)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+
     def test_existing_task_rows_migrate_to_auto_without_rebuilding_database(self):
         from src.persistence.storage import initialize_storage
 
