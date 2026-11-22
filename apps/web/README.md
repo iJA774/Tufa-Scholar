@@ -46,6 +46,8 @@ pnpm --dir apps/web exec tsc app/hooks/runPolling.ts --target es2020 --module co
 node apps/web/app/hooks/runPolling.test.cjs (Resolve-Path .cache/polling-test/runPolling.js)
 pnpm --dir apps/web exec tsc app/hooks/runEvents.ts --target es2020 --module commonjs --outDir ../../.cache/events-test --skipLibCheck
 node apps/web/app/hooks/runEvents.test.cjs (Resolve-Path .cache/events-test/hooks/runEvents.js)
+pnpm --dir apps/web exec tsc app/workspace/reportDisplay.ts --target es2020 --module commonjs --outDir ../../.cache/report-display-test --skipLibCheck
+node apps/web/app/workspace/reportDisplay.test.cjs (Resolve-Path .cache/report-display-test/reportDisplay.js)
 ```
 
 桌面交互验收可以使用带真实 API/SQLite、模拟模型和搜索、但不启动 worker 的浏览器 fixture：

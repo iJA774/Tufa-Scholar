@@ -13,7 +13,7 @@ import type { ModelChoice, ReportFormat, ResearchDepth, RelevanceFilter } from "
 import { webSourceLabel } from "./sourceLabels";
 import HeroEmblem from "./HeroEmblem";
 import ResearchPanel from "./ResearchPanel";
-import { displayReport, reportEvidenceIds, reportLink, safeRunError } from "./reportDisplay";
+import { displayReport, hasTitleOnlyReferences, reportEvidenceIds, reportLink, safeRunError } from "./reportDisplay";
 import styles from "./ResearchChat.module.css";
 
 const statusText: Record<string, string> = {
@@ -744,6 +744,7 @@ export default function ResearchChat({
         {messages.map(message => {
           const messageRun = message.run_id ? runs.find(item => item.id === message.run_id) || historyRuns[message.run_id] : undefined;
           const referenceIds = message.metadata?.report_id ? reportEvidenceIds(message.content) : new Set<string>();
+          const titleOnlyReferences = message.metadata?.report_id ? hasTitleOnlyReferences(message.content) : false;
           return <article className={`${styles.message} ${message.role === "user" ? styles.messageUser : styles.messageAssistant}`} key={message.id}>
             {message.role !== "user" && <div className={styles.avatar} aria-hidden="true">✧</div>}
             <div className={styles.messageBubble}>
@@ -772,7 +773,7 @@ export default function ResearchChat({
                 </button>
               </div>}
               {message.metadata?.evidence?.map((citation, index) => {
-                if (citation.id && referenceIds.has(citation.id)) return null;
+                if (titleOnlyReferences || (citation.id && referenceIds.has(citation.id))) return null;
                 const href = citation.version_id ? `/api/paper-versions/${citation.version_id}/file${citation.page ? `#page=${citation.page}` : ""}` : safeSourceUrl(citation.original_url);
                 return <div className={styles.citation} key={`${citation.id || index}-${index}`}>
                   {href ? <a href={href} target="_blank" rel="noopener noreferrer">{citation.title || `参考文献 ${index + 1}`} ↗</a> : <span>{citation.title || `参考文献 ${index + 1}`}</span>}

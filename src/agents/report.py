@@ -364,29 +364,45 @@ def numbered_references(content, evidence, *, legacy=False):
     body = pattern.sub(replace, content) if pattern else content
     if not groups:
         return body
+    if legacy:
+        lines = []
+        for number, items in groups.values():
+            details = []
+            seen_pages = set()
+            metadata = []
+            for key in ('authors', 'year', 'doi', 'published_at'):
+                value = items[0].get(key)
+                value = ', '.join(str(v) for v in value) if isinstance(value, list) else str(value or '')
+                if value and not unsafe_text(value) and not re.search(r'[\r\n|]', value):
+                    metadata.append(re.sub(r'([\\`*_{}\[\]()#!>])', r'\\\1', value))
+            for index, item in enumerate(items):
+                version, page = item.get('version_id'), item.get('page')
+                page_key = (version, page) if isinstance(version, int) and version > 0 and isinstance(page, int) and page > 0 else None
+                if page_key and page_key in seen_pages:
+                    identifier = str(item.get('id', ''))
+                    detail = f'证据 {identifier}' if identifier and not unsafe_text(identifier) else ''
+                else:
+                    detail = reference(item, markdown=True, include_title=index == 0).replace('|', r'\|')
+                detail = re.sub(r'\s+', ' ', detail)
+                if page_key and page_key not in seen_pages:
+                    detail += f' · [查看第 {page} 页](/paper-versions/{version}/file#page={page})'
+                    seen_pages.add(page_key)
+                if detail and detail not in details:
+                    details.append(detail)
+            lines.append(f'- \\[{number}\\] ' + '；'.join(details) + ((' · ' + ' · '.join(metadata)) if metadata else ''))
+        return body.rstrip() + '\n\n## 参考文献\n\n' + '\n'.join(lines)
+
     lines = []
     for number, items in groups.values():
-        details = []
-        seen_pages = set()
-        metadata = []
-        for key in ('authors', 'year', 'doi', 'published_at'):
-            value = items[0].get(key)
-            value = ', '.join(str(v) for v in value) if isinstance(value, list) else str(value or '')
-            if value and not unsafe_text(value) and not re.search(r'[\r\n|]', value):
-                metadata.append(re.sub(r'([\\`*_{}\[\]()#!>])', r'\\\1', value))
-        for index, item in enumerate(items):
-            version, page = item.get('version_id'), item.get('page')
-            page_key = (version, page) if isinstance(version, int) and version > 0 and isinstance(page, int) and page > 0 else None
-            if page_key and page_key in seen_pages:
-                identifier = str(item.get('id', ''))
-                detail = f'证据 {identifier}' if identifier and not unsafe_text(identifier) else ''
-            else:
-                detail = reference(item, markdown=True, include_title=index == 0).replace('|', r'\|')
-            detail = re.sub(r'\s+', ' ', detail)
-            if page_key and page_key not in seen_pages:
-                detail += f' · [查看第 {page} 页](/paper-versions/{version}/file#page={page})'
-                seen_pages.add(page_key)
-            if detail and detail not in details:
-                details.append(detail)
-        lines.append(f'- \\[{number}\\] ' + '；'.join(details) + ((' · ' + ' · '.join(metadata)) if metadata else ''))
+        item = items[0]
+        title = _safe_title(item.get('title', ''))
+        if unsafe_text(title):
+            title = ''
+        title = re.sub(r'\s+', ' ', title or '来源')
+        title = title.replace('\\', '\\\\').replace('[', r'\[').replace(']', r'\]')
+        title = title.replace('(', r'\(').replace(')', r'\)').replace('|', r'\|')
+        url = _safe_markdown_url(item.get('original_url', ''))
+        if url:
+            title = f'[{title}]({url})'
+        lines.append(f'- \\[{number}\\] {title}')
     return body.rstrip() + '\n\n## 参考文献\n\n' + '\n'.join(lines)
