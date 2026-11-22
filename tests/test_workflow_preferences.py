@@ -131,8 +131,8 @@ class ResearchPreferenceTests(unittest.TestCase):
     def test_depth_caps_bound_executed_rounds_actions_and_background_queries(self):
         expected_budgets = {
             "light": (1, 4, 4),
-            "standard": (1, 10, 20),
-            "deep": (1, 15, 48),
+            "standard": (3, 10, 20),
+            "deep": (4, 15, 48),
         }
         expected_executed_actions = {"light": [4], "standard": [10, 10], "deep": [15, 15, 15, 3]}
         for depth, expected_budget in expected_budgets.items():
@@ -154,7 +154,7 @@ class ResearchPreferenceTests(unittest.TestCase):
         _, searches, stages, actions = self.run_mock_workflow(depth="deep", actions_per_round=1)
         self.assertEqual(stages.count("analyst"), 4)
         self.assertEqual(actions, [1, 2, 3, 4])
-        self.assertEqual(sum(query.startswith("background-") for query in searches), 1)
+        self.assertEqual(sum(query.startswith("background-") for query in searches), 4)
         self.assertLessEqual(len(actions), workflow.DEPTH_BUDGETS["deep"]["actions"])
 
     @staticmethod
