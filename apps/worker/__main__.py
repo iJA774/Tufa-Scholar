@@ -15,7 +15,7 @@ from src.persistence import repository
 from src.tools import ToolContext, ToolRegistry
 from src.persistence.storage import initialize_storage
 from src.infrastructure.logging_setup import configure_logging, safe_stack
-from src.infrastructure.diagnostics import diagnostic_scope
+from src.infrastructure.diagnostics import diagnostic_scope, redact_diagnostic
 from src.integrations.model import ModelServiceError, StructuredOutputError, track_token_usage
 
 
@@ -39,6 +39,16 @@ def run_once(benchmark_task_id=None):
                     data = {**data, 'timestamp': time.time()}
                 repository.record_research_event(task['id'], kind, data)
 
+            def save_detail(metadata, value, *, secrets=()):
+                try:
+                    strip_thought = metadata['kind'] in ('model', 'node') and metadata['direction'] != 'input'
+                    detail = redact_diagnostic({'name': metadata['name'], 'value': value}, secrets=secrets, strip_thought=strip_thought)
+                    safe_metadata = {**metadata, 'name': detail['name'][:200]}
+                    repository.record_research_detail(run_id, safe_metadata, detail['value'])
+                except Exception as exc:
+                    log.warning('research_detail_write_failed run_id=%s type=%s', run_id, type(exc).__name__)
+
+            details = {'on_detail': save_detail} if benchmark_task_id is None else {}
             tags = {'suppress_artifacts': True} if benchmark_task_id is not None else {}
             snapshot_box = []
             stages = []
@@ -55,12 +65,12 @@ def run_once(benchmark_task_id=None):
                     if snapshot is None:
                         raise ValueError('报告快照不存在')
                     content, evidence = replay_report(snapshot, task['report_format'], task['model_name'],
-                                                      on_stage=stage_changed, on_event=on_event)
+                                                      on_stage=stage_changed, on_event=on_event, **details)
                     report_model = task['model_name']
                 else:
                     history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
                     kwargs = dict(history=history, on_stage=stage_changed,
-                                  on_subtask=lambda note: repository.record_subtask(task['id'], note), on_event=on_event)
+                                  on_subtask=lambda note: repository.record_subtask(task['id'], note), on_event=on_event, **details)
                     if benchmark_task_id is None:
                         kwargs['on_report_snapshot'] = snapshot_box.append
                     content, evidence = run(research, **kwargs)

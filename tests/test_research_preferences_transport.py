@@ -88,7 +88,7 @@ class ResearchPreferenceTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         received = []
 
-        def agent(research, *, history, on_stage, on_subtask, on_event, on_report_snapshot=None):
+        def agent(research, *, history, on_stage, on_subtask, on_event, on_report_snapshot=None, on_detail=None):
             received.append(research)
             return 'answer', []
 
