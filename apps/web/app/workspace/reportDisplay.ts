@@ -32,6 +32,13 @@ export function reportEvidenceIds(content: string): Set<string> {
   return ids;
 }
 
+/** New reports contain only cited evidence; older entries include evidence IDs. */
+export function hasTitleOnlyReferences(content: string): boolean {
+  const section = content.split(/^## 参考文献\s*$/m).at(-1);
+  if (!section || section === content) return false;
+  return /^- \\\[\d+\\\] /m.test(section) && reportEvidenceIds(content).size === 0;
+}
+
 /** Remove only a known legacy generated preface; never modify the stored report. */
 export function displayReport(content: string, hasFallbackEvent: boolean): string {
   const draft = /^> 终稿未能完成，以下为最近一份通过校验的研究草稿。\r?\n> [^\r\n]+\r?\n(?:\r?\n)?/;

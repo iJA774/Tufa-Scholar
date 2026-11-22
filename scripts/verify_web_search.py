@@ -146,9 +146,14 @@ def main():
             assert evidence[0]['provider'] == 'searx'
             assert evidence[0]['original_url'] == candidates[0]['url']
             assert evidence[0]['retrieved_at']
+            reference_section = result['content'].split('## 参考文献', 1)[1]
+            assert evidence[0]['title'] in reference_section
+            assert f"证据 {evidence[0]['id']}" not in reference_section
+            assert '搜索摘要' not in reference_section and '获取于' not in reference_section
             assert call('GET', f'/projects/{project}/papers') == []
             report_csv = client.get(f"/reports/{result['report_id']}/evidence.csv").text
             assert 'web_snippet' in report_csv and 'searx' in report_csv
+            assert evidence[0]['id'] in report_csv
             assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
 
             dense_question = 'dense-search-fixture accuracy'

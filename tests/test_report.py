@@ -13,8 +13,8 @@ class ReportValidationTests(unittest.TestCase):
         content = report.numbered_references('Terms [[m1]], results [[m2]].', evidence)
         self.assertIn(r'Terms \[1\], results \[1\].', content)
         self.assertEqual(content.count('Local notes'), 1)
-        self.assertIn('本地 Markdown 字符区间 0–22', content)
-        self.assertIn('本地 Markdown 字符区间 80–99', content)
+        self.assertNotIn('字符区间', content)
+        self.assertNotIn('证据 m', content)
 
     def setUp(self):
         self.evidence = {
@@ -117,14 +117,20 @@ class ReportValidationTests(unittest.TestCase):
 
 
 class ReporterMarkdownTests(unittest.TestCase):
-    def test_numbering_reuses_source_and_preserves_all_locations(self):
-        first = {'id': 'a', 'paper_id': 7, 'title': 'Study', 'version_id': 3, 'page': 4}
+    def test_numbering_reuses_source_and_displays_only_titles(self):
+        first = {'id': 'a', 'paper_id': 7, 'title': 'Study', 'version_id': 3, 'page': 4,
+                 'authors': ['Researcher'], 'year': 2026, 'doi': '10.1000/example'}
         second = {**first, 'id': 'b', 'page': 6}
         web = {'id': 'c', 'title': 'Web', 'source_level': 'web_content', 'original_url': 'https://example.org/x'}
         result = report.numbered_references('One [[c]] Two [[a]] [[b]] [[c]]', [first, second, web])
         self.assertIn(r'One \[1\] Two \[2\] \[2\] \[1\]', result)
-        self.assertIn('/paper-versions/3/file#page=4', result)
-        self.assertIn('/paper-versions/3/file#page=6', result)
+        self.assertIn(r'- \[1\] [Web](https://example.org/x)', result)
+        self.assertIn(r'- \[2\] Study', result)
+        self.assertNotIn('证据 ', result)
+        self.assertNotIn('原文版本', result)
+        self.assertNotIn('Researcher', result)
+        self.assertNotIn('2026', result)
+        self.assertNotIn('10.1000/example', result)
         self.assertEqual(result.count('## 参考文献'), 1)
         self.assertEqual(report.numbered_references('No citations', []), 'No citations')
 
@@ -134,22 +140,22 @@ class ReporterMarkdownTests(unittest.TestCase):
         converted = report.numbered_references(old, [item], legacy=True)
         self.assertIn(r'Claim\[1\]', converted)
         self.assertIn('〔author text〕', converted)
+        self.assertIn('证据 a', converted)
 
     def test_source_title_with_separator_is_not_split_between_locations(self):
         first = {'id': 'a', 'paper_id': 7, 'title': 'First · Second', 'version_id': 3, 'page': 4}
         second = {**first, 'id': 'b', 'page': 6}
         result = report.numbered_references('[[a]] [[b]]', [first, second])
         self.assertEqual(result.count('First · Second'), 1)
-        self.assertIn('；证据 b · 原文版本 3，第 6 页', result)
+        self.assertNotIn('证据 ', result)
 
-    def test_same_pdf_page_keeps_all_evidence_ids_but_one_location(self):
+    def test_same_pdf_page_displays_title_once(self):
         first = {'id': 'a', 'paper_id': 7, 'title': 'Study', 'version_id': 3, 'page': 4}
         second = {**first, 'id': 'b'}
         result = report.numbered_references('[[a]] [[b]]', [first, second])
-        self.assertIn(' · 证据 a', result)
-        self.assertIn('；证据 b', result)
-        self.assertEqual(result.count('原文版本 3，第 4 页'), 1)
-        self.assertEqual(result.count('/paper-versions/3/file#page=4'), 1)
+        self.assertEqual(result.count('Study'), 1)
+        self.assertNotIn('证据 ', result)
+        self.assertNotIn('原文版本', result)
 
     def test_publication_uses_validated_inline_sources_and_keeps_model_layout(self):
         evidence = [{'id': 'web', 'title': 'Official page', 'source_level': 'web_content',
@@ -160,7 +166,9 @@ class ReporterMarkdownTests(unittest.TestCase):
         self.assertIn('# 自选标题', published['content'])
         self.assertIn('## 比较', published['content'])
         self.assertIn('https://example.org/report?title=Useful', published['content'])
-        self.assertIn('Markdown 字符区间 25–61', published['content'])
+        self.assertNotIn('Markdown 字符区间', published['content'])
+        self.assertNotIn('证据 web', published['content'])
+        self.assertEqual(published['evidence'], evidence)
         self.assertNotIn('token=private', published['content'])
         self.assertNotIn('[[web]]', published['content'])
         self.assertNotIn('## 关键点', published['content'])
