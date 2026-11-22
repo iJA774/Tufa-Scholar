@@ -54,7 +54,7 @@
 .cardToolbar { position: relative; display: flex; flex: none; align-items: center; justify-content: center; height: 36px; margin: 0 16px 12px; }
 .tabs { --tab-width: 100px; position: relative; display: inline-flex; align-items: center; justify-content: center; width: fit-content; height: 36px; padding: 3px; border: 1px solid var(--panel-border-soft); border-radius: 10px; background: rgba(9, 9, 15, .52); }
 .tabIndicator { position: absolute; z-index: 0; top: 3px; left: 3px; width: var(--tab-width); height: 29px; border: 1px solid rgba(174, 158, 245, .16); border-radius: 7px; background: linear-gradient(135deg, rgba(121, 103, 196, .2), rgba(83, 111, 177, .12)); box-shadow: 0 1px 3px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .035); pointer-events: none; transform: translateX(calc(var(--tab-width) * var(--active-tab-index, 0))); transition: transform .21s cubic-bezier(.2, 0, .38, .9); }
-.tab { position: relative; z-index: 1; width: var(--tab-width); min-width: var(--tab-width); height: 29px; padding: 0 24px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--panel-muted); font-size: 13px; font-weight: 500; white-space: nowrap; transition: color .18s; }
+.tab { position: relative; z-index: 1; width: var(--tab-width); min-width: var(--tab-width); height: 29px; padding: 0 12px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--panel-muted); font-size: 13px; font-weight: 500; white-space: nowrap; transition: color .18s; }
 .tab:hover:not(:disabled) { color: #e2e0ed; }
 .tabActive { color: var(--panel-heading); }
 .tab:disabled { cursor: not-allowed; opacity: .36; }
@@ -164,6 +164,30 @@
 .sourceChip a { display: block; max-width: 100%; overflow: hidden; color: inherit; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
 .sourceChip a:hover { color: var(--panel-accent-hover); }
 .runError { margin: 0 16px 12px; color: #e3a8b1; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.detailsTimeline { display: grid; align-content: start; gap: 9px; padding: 12px 0; }
+.detailNode, .detailCall { min-width: 0; border: 1px solid var(--panel-border-soft); border-radius: 9px; }
+.detailNode { background: rgba(0, 0, 0, .14); }
+.detailNode > summary, .detailCall > summary { position: relative; display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 8px 30px 8px 12px; cursor: pointer; list-style: none; }
+.detailNode > summary::-webkit-details-marker, .detailCall > summary::-webkit-details-marker { display: none; }
+.detailNode > summary::after, .detailCall > summary::after { position: absolute; right: 14px; width: 6px; height: 6px; border-right: 1px solid var(--panel-muted); border-bottom: 1px solid var(--panel-muted); content: ""; transform: rotate(-45deg); }
+.detailNode[open] > summary::after, .detailCall[open] > summary::after { transform: translateY(-2px) rotate(45deg); }
+.detailNode > summary:hover, .detailCall > summary:hover { background: rgba(255, 255, 255, .04); }
+.detailNode > summary:focus-visible, .detailCall > summary:focus-visible, .detailBlock pre:focus-visible { outline: 2px solid var(--panel-accent); outline-offset: -2px; }
+.detailNode > summary strong { flex: 1; font-size: 14px; font-weight: 600; color: var(--panel-heading); }
+.detailNodeIndex { color: var(--panel-accent); font-size: 11px; font-variant-numeric: tabular-nums; }
+.detailCalls { display: grid; gap: 7px; padding: 0 10px 10px; }
+.detailCall { background: rgba(255, 255, 255, .025); }
+.detailCallTitle { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: 3px 7px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.detailCallTitle small { color: var(--panel-muted); font: 11px ui-monospace, monospace; }
+.detailNote, .detailFailed { color: var(--panel-muted); font-size: 12px; }
+.detailFailed { color: #f2a1ad; }
+.detailNote button { padding: 0 6px; border: 0; background: transparent; color: var(--panel-accent-hover); text-decoration: underline; }
+.detailPayloads { display: grid; gap: 12px; padding: 4px 12px 12px; }
+.detailPayloads p { margin: 0; }
+.detailBlock { min-width: 0; }
+.detailBlock h4 { margin: 0 0 5px; color: var(--panel-accent); font-size: 12px; font-weight: 600; }
+.detailBlock pre { max-height: min(42dvh, 420px); margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--panel-border-soft); border-radius: 6px; background: rgba(8, 8, 13, .55); color: var(--panel-text); font: 12px/1.55 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-color: #393542 transparent; scrollbar-width: thin; }
+
 .emptyState { margin: 16px; color: var(--panel-muted); font-size: 13px; line-height: 1.7; }
 
 @keyframes activityEnter { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
@@ -206,6 +230,7 @@
 }
 
 @media (max-width: 520px) {
+  .tabs { --tab-width: clamp(54px, 18vw, 78px); }
   .researchPanel { top: 98px; width: calc(100vw - 16px); height: min(46dvh, 350px); max-height: calc(100dvh - 205px); }
   .tabPanel { padding-right: 15px; padding-left: 15px; }
   .activityStatus { padding-right: 8px; padding-left: 8px; }

@@ -16,6 +16,11 @@ import alertCircleAnimation from "../../../../assets/animations/alert-circle.jso
 import type { Message, Run } from "./types";
 import { buildModelPreviews, type RunEvent } from "../hooks/runEvents";
 import styles from "./ResearchPanel.module.css";
+import ResearchDetails from "./ResearchDetails";
+import { nodeLabels, toolLabels } from "./sourceLabels";
+
+type ResearchTab = "report" | "activities" | "details";
+const tabs: ResearchTab[] = ["report", "activities", "details"];
 import { displayReport, reportLink, safeRunError } from "./reportDisplay";
 
 type Props = {
@@ -45,25 +50,6 @@ function subtaskStatus(status: string) {
   if (status === "no_evidence") return "暂无证据";
   return status;
 }
-
-const nodeLabels: Record<string, string> = {
-  background_investigator: "背景检索",
-  planner: "研究规划",
-  supervisor: "研究调度",
-  researcher: "搜索与证据整理",
-  analyst: "证据分析",
-  reporter: "报告整理",
-};
-
-const toolLabels: Record<string, string> = {
-  search_web: "网页检索",
-  read_web_page: "读取网页",
-  search_papers: "学术检索",
-  search_local_papers: "检索本地文献",
-  select_local_domains: "查看研究领域文献",
-  read_local_markdown: "读取本地 Markdown",
-  collect_evidence: "提取证据",
-};
 
 function textField(data: Record<string, unknown> | undefined, key: string) {
   return data && typeof data[key] === "string" ? data[key] as string : "";
@@ -242,7 +228,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
   const reportPreview = activityPreviews.find(preview => preview.node === "reporter");
 
   const reportTabAvailable = hasReport || !!reportPreview;
-  const [tab, setTab] = useState<"report" | "activities">(reportTabAvailable ? "report" : "activities");
+  const [tab, setTab] = useState<ResearchTab>(reportTabAvailable ? "report" : "activities");
   const tabWasChosen = useRef(false);
   const [hasEntered, setHasEntered] = useState(false);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -253,6 +239,8 @@ export default function ResearchPanel({ run, report, events, open, status, stage
   const reportId = report?.metadata?.report_id;
   const reportTabId = `research-report-tab-${run.id}`;
   const activityTabId = `research-activity-tab-${run.id}`;
+  const detailsTabId = "research-details-tab-" + run.id;
+  const detailsPanelId = "research-details-panel-" + run.id;
   const reportPanelId = `research-report-panel-${run.id}`;
   const activityPanelId = `research-activity-panel-${run.id}`;
 
@@ -284,7 +272,7 @@ export default function ResearchPanel({ run, report, events, open, status, stage
     viewport.scrollTop = viewport.scrollHeight;
   }, [open, tab, run.status, run.stage, run.subtasks, events]);
 
-  const changeTab = (next: "report" | "activities") => {
+  const changeTab = (next: ResearchTab) => {
     if (next === "report" && !reportTabAvailable) return;
     tabWasChosen.current = true;
     setTab(next);
@@ -293,22 +281,25 @@ export default function ResearchPanel({ run, report, events, open, status, stage
   const handleTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    const next = event.key === "ArrowRight" ? (tab === "report" ? "activities" : "report") : (tab === "activities" && reportTabAvailable ? "report" : "activities");
+    const visibleTabs = reportTabAvailable ? tabs : tabs.slice(1);
+    const offset = event.key === "ArrowRight" ? 1 : visibleTabs.length - 1;
+    const next = visibleTabs[(visibleTabs.indexOf(tab) + offset) % visibleTabs.length];
     changeTab(next);
-    requestAnimationFrame(() => tabRefs.current[next === "report" ? 0 : 1]?.focus());
+    requestAnimationFrame(() => tabRefs.current[tabs.indexOf(next)]?.focus());
   };
 
   const subtasks = run.subtasks || [];
   const timeline = mergeActivityEvents(events);
   const expanded = open && hasEntered;
   const className = `${styles.researchPanel} ${expanded ? styles.researchPanelOpen : styles.researchPanelClosed}`;
-  return <aside className={className} aria-label="研究报告与活动" aria-hidden={!open} inert={!open}>
+  return <aside className={className} aria-label="研究进度" aria-hidden={!open} inert={!open}>
     <div className={styles.researchCard}>
       <div className={styles.cardToolbar}>
-        <div className={styles.tabs} style={{ "--active-tab-index": tab === "activities" ? 1 : 0 } as CSSProperties} role="tablist" aria-label="研究内容">
+        <div className={styles.tabs} style={{ "--active-tab-index": tabs.indexOf(tab) } as CSSProperties} role="tablist" aria-label="研究内容">
           <span className={styles.tabIndicator} aria-hidden="true" />
           <button ref={node => { tabRefs.current[0] = node; }} id={reportTabId} className={`${styles.tab} ${tab === "report" ? styles.tabActive : ""}`} type="button" role="tab" aria-selected={tab === "report"} aria-controls={reportPanelId} tabIndex={tab === "report" ? 0 : -1} disabled={!reportTabAvailable} onClick={() => changeTab("report")} onKeyDown={handleTabKey}>报告</button>
           <button ref={node => { tabRefs.current[1] = node; }} id={activityTabId} className={`${styles.tab} ${tab === "activities" ? styles.tabActive : ""}`} type="button" role="tab" aria-selected={tab === "activities"} aria-controls={activityPanelId} tabIndex={tab === "activities" ? 0 : -1} onClick={() => changeTab("activities")} onKeyDown={handleTabKey}>活动</button>
+          <button ref={node => { tabRefs.current[2] = node; }} id={detailsTabId} className={styles.tab + (tab === "details" ? " " + styles.tabActive : "")} type="button" role="tab" aria-selected={tab === "details"} aria-controls={detailsPanelId} tabIndex={tab === "details" ? 0 : -1} onClick={() => changeTab("details")} onKeyDown={handleTabKey}>细节</button>
         </div>
         <button ref={closeButtonRef} className={styles.closeButton} type="button" aria-label="关闭研究面板" onClick={onClose}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </div>
@@ -447,6 +438,10 @@ export default function ResearchPanel({ run, report, events, open, status, stage
             </li>;
           })}
         </ol> : timeline.length === 0 && activityPreviews.length === 0 ? <p className={styles.emptyState}>当前任务暂未返回研究活动。</p> : null}
+      </section>
+
+      <section id={detailsPanelId} role="tabpanel" aria-labelledby={detailsTabId} hidden={tab !== "details"} tabIndex={0} className={styles.tabPanel}>
+        <ResearchDetails runId={run.id} enabled={open && tab === "details"} active={active} />
       </section>
     </div>
   </aside>;

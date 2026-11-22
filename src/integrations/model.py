@@ -913,7 +913,7 @@ def _post_structured(config, headers, request_body, *, on_stream, attempt, phase
     raise RuntimeError('模型服务无法处理请求参数')
 
 
-def structured(prompt_id, payload, schema, *, model_options=None, template_context=None, on_stream=None, native_tools=None, frozen_prompt=None, capture_report=None):
+def structured(prompt_id, payload, schema, *, model_options=None, template_context=None, on_stream=None, native_tools=None, frozen_prompt=None, capture_report=None, on_detail=None):
     config = settings.model_config()
     if model_options and model_options.get('model_name'):
         config = dict(config, model=model_options['model_name'])
@@ -972,8 +972,13 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         content = None
         usage = None
         finish_reason = None
+        native_decision = None
         context = {'prompt_id': prompt_id, 'attempt': attempt, 'rendered_prompt': prompt, 'model': config['model'], 'model_options': options, 'messages': messages}
         secrets = (config['api_key'],) if config.get('api_key') else ()
+        def detail(direction, value):
+            if on_detail is not None:
+                on_detail(direction, attempt, phase, value, secrets)
+
         try:
             request_body = {'model': config['model'], 'messages': list(messages), **options}
             if native_tools is None and schema is not None:
@@ -988,6 +993,8 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 request_body['stream'] = True
                 if not _parameter_is_known_unsupported(config, 'stream_options'):
                     request_body['stream_options'] = {'include_usage': True}
+            if on_detail is not None:
+                detail('input', {key: request_body[key] for key in ('model', 'messages', 'tools') if key in request_body})
             response, content, usage, finish_reason, streamed, native_decision = _post_structured(
                 config,
                 headers,
@@ -1043,9 +1050,11 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                         int((time.monotonic() - attempt_started) * 1000), response.status_code,
                         _usage_log_fields(usage))
             _emit_stream(on_stream, 'model.completed', completed)
+            detail('output', {'content': content, 'tool_decision': native_decision, 'repaired_content': repaired})
             return result
         except httpx.HTTPStatusError as exc:
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
+            detail('error', {'http_status': exc.response.status_code})
             diagnostic_id = record_failure(kind='http_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__, 'status': exc.response.status_code}, context=context, secrets=secrets)
             logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d error_type=%s diagnostic_id=%s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
@@ -1057,6 +1066,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
         except httpx.RequestError as exc:
             # A partial stream may already have been billed; never retry it.
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
+            detail('error', {'message': '模型连接失败或超时'})
             diagnostic_id = record_failure(kind='network_error', payload=payload, schema=json_schema, errors={'type': type(exc).__name__}, context=context, secrets=secrets)
             logger.warning('model_call failed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d error_type=%s diagnostic_id=%s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
@@ -1070,6 +1080,7 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
             else:
                 errors = [{'type': 'invalid_response', 'path': []}]
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})
+            detail('error', {'content': content, 'tool_decision': native_decision, 'errors': errors})
             diagnostic_id = record_failure(kind='model_validation', payload=payload, schema=json_schema, response=content, errors=errors, context=context, secrets=secrets)
             logger.warning('model_call invalid run_id=%s prompt_id=%s phase=%s attempt=%d errors=%s finish_reason=%s diagnostic_id=%s %s',
                            run_id if run_id is not None else 'na', prompt_id, phase, attempt,
