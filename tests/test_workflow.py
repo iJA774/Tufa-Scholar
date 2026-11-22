@@ -382,7 +382,8 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(len(fixture.reporter_payloads), 1)
                 self.assertNotIn('candidates', fixture.reporter_payloads[0])
                 self.assertNotIn('# 阶段性研究结果', content)
-                self.assertIn('需要更多来源交叉核对', content)
+                self.assertIn('需要更多来源交叉核对', fixture.reporter_payloads[0]['outstanding_gaps'])
+                self.assertNotIn('需要更多来源交叉核对', content)
                 if initial == second:
                     self.assertEqual(round_sources[0], round_sources[1])
                 if initial != second:

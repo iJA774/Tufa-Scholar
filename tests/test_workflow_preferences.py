@@ -227,7 +227,7 @@ class ResearchPreferenceTests(unittest.TestCase):
         self.assertEqual(result["current_plan"], review["next_steps"])
         self.assertEqual(result["research_stop_reason"], "")
 
-    def test_budget_stop_reason_is_distinct_from_sufficient_completion_in_report(self):
+    def test_budget_stop_reason_is_sent_to_reporter_without_an_automatic_footer(self):
         round_limited = self.deep_planner_state(self.deep_review(sufficient=False))
         round_limited["rounds"] *= workflow.DEPTH_BUDGETS["deep"]["rounds"]
         stop = workflow._planner(round_limited, None)
@@ -257,7 +257,7 @@ class ResearchPreferenceTests(unittest.TestCase):
         self.assertEqual(completed_payload["research_stop_reason"], "sufficient")
         self.assertNotIn("预算已用完", completed_report)
         self.assertEqual(exhausted_payload["research_stop_reason"], "tool_budget_exhausted")
-        self.assertIn("研究工具总预算已用完", exhausted_report)
+        self.assertEqual(exhausted_report, completed_report)
 
 
 if __name__ == "__main__":

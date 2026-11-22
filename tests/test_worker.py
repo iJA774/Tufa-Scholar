@@ -19,7 +19,7 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('worker agent')['id']
             first = repository.create_question(project, None, 'first question', 'local')
             observed = []
-            def agent(research, *, history, on_stage, on_subtask, on_event):
+            def agent(research, *, history, on_stage, on_subtask, on_event, on_detail=None):
                 on_stage('dispatcher')
                 on_event('node.started', {'node': 'planner'})
                 on_subtask({'index': 1, 'source': 'paper', 'task': 'topic', 'status': 'no_evidence', 'findings': [], 'gap': '缺少材料', 'sources': []})
@@ -66,7 +66,7 @@ class WorkerTests(unittest.TestCase):
             task = repository.create_question(project, None, 'question', 'local', research_mode='deep', report_format='brief')
             received = []
 
-            def agent(research, *, history, on_stage, on_subtask, on_event):
+            def agent(research, *, history, on_stage, on_subtask, on_event, on_detail=None):
                 received.append((research, history))
                 return 'answer', []
 
@@ -75,6 +75,37 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(received[0][0]['research_mode'], 'deep')
             self.assertEqual(received[0][0]['report_format'], 'brief')
             self.assertEqual(repository.get_task(task['run_id'])['research_mode'], 'deep')
+
+    def test_research_detail_payload_strips_credentials_and_private_response_text(self):
+        from apps.worker.__main__ import run_once
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            'TUFA_DATA_DIR': directory, 'OPENAI_API_KEY': 'fixture-model-credential',
+        }, clear=True):
+            initialize_storage()
+            project = repository.create_project('detail scope')['id']
+            run_id = repository.create_question(project, None, 'question', 'local')['run_id']
+            self.assertEqual(repository.research_detail_batch(run_id, 0)['entries'], [])
+
+            def agent(research, *, on_detail, **kwargs):
+                on_detail({
+                    'node': 'reporter', 'node_id': 'node-1', 'call_id': 'call-1',
+                    'attempt': 1, 'phase': None, 'kind': 'model', 'direction': 'output', 'name': 'reporter',
+                }, {
+                    'authorization': 'header-value',
+                    'content': '<think>provider-thought</think> visible fixture-model-credential',
+                    'source': 'https://example.org/material?token=url-value',
+                })
+                return 'answer', []
+
+            with patch('src.agents.literature.run', side_effect=agent):
+                self.assertTrue(run_once())
+            entries = repository.research_detail_batch(run_id, 0)['entries']
+            self.assertEqual(len(entries), 1)
+            data = repository.get_research_detail(run_id, entries[0]['id'])
+            self.assertEqual(data['value'], {
+                'content': ' visible [redacted]', 'source': 'https://example.org/material?[redacted]',
+            })
 
     def test_subtasks_survive_failure_and_retry_starts_empty(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory, patch.dict(os.environ, {'TUFA_DATA_DIR': directory}):
@@ -102,7 +133,7 @@ class WorkerTests(unittest.TestCase):
             project = repository.create_project('scope')['id']
             task = repository.create_question(project, None, 'question', 'local')
             ids = []
-            def agent(research, *, history, on_stage, on_subtask, on_event):
+            def agent(research, *, history, on_stage, on_subtask, on_event, on_detail=None):
                 self.assertNotIn('id', research)
                 ids.append(record_failure(kind='test', payload={}, schema={}))
                 raise RuntimeError('failure')
