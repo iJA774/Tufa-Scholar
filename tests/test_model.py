@@ -775,6 +775,24 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result, '# 研究\n\n结论 [[E1]]')
         self.assertNotIn('response_format', post.call_args.kwargs['json'])
 
+    def test_explainer_guidance_applies_to_direct_answers_and_reports(self):
+        config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
+        explainer = {**self.context(), 'report_format': 'explainer'}
+        payload = {'question': '比较两种方法', 'outstanding_gaps': ['缺少直接实验']}
+        with patch('src.integrations.model.settings.model_config', return_value=config), \
+             patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
+            structured('runtime/dispatcher', payload, Output, template_context=explainer)
+            structured('literature/reporter', payload, None, template_context=explainer)
+            structured('literature/reporter', payload, None, template_context=self.context())
+
+        messages = [call.kwargs['json']['messages'] for call in post.call_args_list]
+        for system, user in messages[:2]:
+            self.assertIn('省略免责声明、防御性措辞', system['content'])
+            self.assertIn('结尾用简短的核心答案收束', system['content'])
+            self.assertEqual(json.loads(user['content']), payload)
+        self.assertNotIn('说明能够确认什么、不能确认什么', messages[1][0]['content'])
+        self.assertNotIn('省略免责声明、防御性措辞', messages[2][0]['content'])
+
     def test_incomplete_markdown_is_rejected(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
         for reason in ('length', 'content_filter'):

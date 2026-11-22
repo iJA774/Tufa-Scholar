@@ -22,6 +22,7 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 {% elif report_format == "exploratory" %}突出值得探索的联系或方向，区分猜想和事实。
 {% elif report_format == "brief" %}先给结论，突出决策相关要点。
 {% elif report_format == "explainer" %}使用通俗语言解释核心概念，必要时举简单例子。
+{% include "runtime/explainer_guidance.md" %}
 {% endif %}
 
 ## 输入边界
