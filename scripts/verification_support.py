@@ -192,6 +192,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             preferred = 'web' if payload.get('source') == 'web' and 'web' in allowed else 'paper'
             mode = payload.get('search_mode') or preferred
             if payload.get('phase') == 'query':
+                if 'background-planning-fixture' in folded:
+                    return {'source': 'web', 'queries': ['accuracy scope', 'accuracy methods', 'accuracy comparison']}
                 return {
                     'source': preferred if preferred in allowed else allowed[0],
                     'queries': ['accuracy'] if 'context-cutoff-fixture' in folded else [question],
@@ -201,6 +203,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 }
             candidates = payload.get('candidates', [])
             chosen = candidates[0] if candidates else None
+            if 'background-planning-fixture' in folded:
+                ids = [item['candidate_id'] for item in candidates]
+                return {
+                    'source': 'web', 'selected_candidate_ids': ids,
+                    'additional_queries': [] if payload.get('final_selection') else ['accuracy limitations'],
+                    'research_scope': '模拟准确率研究范围',
+                    'confirmed_background': [{'text': '模拟来源报告准确率', 'candidate_ids': ids[:1]}] if ids else [],
+                    'dimensions': ['研究方法', '比较条件'],
+                    'controversies': [{'text': '比较条件需要核查', 'candidate_ids': ids[-1:]}] if ids else [],
+                    'summary': '模拟背景筛选', 'gaps': ['核查研究条件'],
+                }
             return {
                 'source': mode if mode in {'web', 'paper'} else preferred,
                 'queries': [],

@@ -26,7 +26,6 @@ from src.tools.registry import ToolCallValidationError
 logger = logging.getLogger("tufa.agent")
 registry = ToolRegistry()
 
-MAX_BACKGROUND_WEB_RESULTS = 3
 MAX_RESEARCH_WEB_RESULTS = 3
 MAX_CANDIDATE_CONTEXT = 6
 MAX_EVIDENCE_CONTEXT = 8
@@ -39,17 +38,23 @@ LOCAL_RESEARCH_TOOLS = frozenset({"select_local_domains", "read_local_markdown"}
 DEPTH_BUDGETS = {
     "light": {
         "rounds": 1, "actions_per_round": 4, "actions": 4,
-        "background_searches": 1, "local_actions": 2, "decision_input_units": 10_000,
+        "background_searches": 1, "background_supplemental": 0, "background_web_results": 3,
+        "background_reads": 0, "background_candidates": 12, "planner_candidates": 5,
+        "local_actions": 2, "decision_input_units": 10_000,
         "cumulative_decision_input_units": 48_000,
     },
     "standard": {
         "rounds": 2, "actions_per_round": 10, "actions": 20,
-        "background_searches": 1, "local_actions": 5, "decision_input_units": 10_000,
+        "background_searches": 3, "background_supplemental": 1, "background_web_results": 5,
+        "background_reads": 1, "background_candidates": 24, "planner_candidates": 12,
+        "local_actions": 5, "decision_input_units": 10_000,
         "cumulative_decision_input_units": 160_000,
     },
     "deep": {
         "rounds": 4, "actions_per_round": 15, "actions": 48,
-        "background_searches": 1, "local_actions": 8, "decision_input_units": 14_000,
+        "background_searches": 4, "background_supplemental": 2, "background_web_results": 5,
+        "background_reads": 3, "background_candidates": 36, "planner_candidates": 18,
+        "local_actions": 8, "decision_input_units": 14_000,
         "cumulative_decision_input_units": 400_000,
     },
 }
@@ -168,13 +173,25 @@ class DispatcherOutput(BaseModel):
         return self
 
 
+class BackgroundFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(default="", max_length=500)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=36)
+
+
 class BackgroundOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: Literal["web", "paper"]
-    queries: list[str] = Field(default_factory=list, max_length=4)
-    selected_candidate_ids: list[str] = Field(default_factory=list, max_length=20)
+    queries: list[str] = Field(default_factory=list, max_length=20)
+    additional_queries: list[str] = Field(default_factory=list, max_length=20)
+    read_candidate_ids: list[str] = Field(default_factory=list, max_length=36)
+    selected_candidate_ids: list[str] = Field(default_factory=list, max_length=36)
     summary: str = Field(default="", max_length=5_000)
     gaps: list[str] = Field(default_factory=list, max_length=8)
+    research_scope: str = Field(default="", max_length=1_000)
+    confirmed_background: list[BackgroundFinding] = Field(default_factory=list, max_length=12)
+    dimensions: list[str] = Field(default_factory=list, max_length=12)
+    controversies: list[BackgroundFinding] = Field(default_factory=list, max_length=8)
 
 
 class PlannerOutput(BaseModel):
@@ -522,7 +539,7 @@ def _background_summary_for_model(background):
     """Keep the screened overview and gaps, not candidate records repeated elsewhere."""
     if not isinstance(background, dict):
         return {}
-    summary = {key: value for key, value in background.items() if key != "selected_candidates"}
+    summary = {key: value for key, value in background.items() if key in {"source", "queries", "summary", "gaps"}}
     selected_ids = [
         item.get("candidate_id")
         for item in background.get("selected_candidates", [])
@@ -1372,11 +1389,35 @@ def _invoke_tool_with_events(state, mode, tool_name, arguments, *, node="researc
     return patch, result
 
 
+def _background_candidates(state, mode):
+    """Interleave queries before filling the bounded screening queue."""
+    pool = _prioritized_candidates(state, state.get("candidate_pools", {}).get(mode, []))
+    queues = []
+    for entries in state.get("query_results", {}).get(mode, {}).values():
+        queue = []
+        for entry in entries:
+            identities = _candidate_ids(entry.get("paper", {}), mode)
+            match = next((item for item in pool if identities & _candidate_ids(item, mode)), None)
+            if match and match not in queue:
+                queue.append(match)
+        queues.append(queue)
+    ordered = []
+    while any(queues):
+        for queue in queues:
+            if queue:
+                item = queue.pop(0)
+                if item not in ordered:
+                    ordered.append(item)
+    ordered.extend(item for item in pool if item not in ordered)
+    return [_candidate_view(item, mode, text_limit=500) for item in ordered[:_budget(state)["background_candidates"]]]
+
+
 def _background_investigator(state, on_stage):
     _emit(on_stage, "background_investigator")
     if state.get("background"):
         return {}
     research = state["research"]
+    budget = _budget(state)
     allowed_modes = _available_modes(research)
     preferred = _preferred_mode(research["source"])
     if preferred not in allowed_modes:
@@ -1384,106 +1425,139 @@ def _background_investigator(state, on_stage):
     query_tools = _search_catalog(research, allowed_modes if research["source"] == "auto" else [preferred])
     try:
         query_plan = _model(
-            state,
-            "literature/background_investigator",
-            _payload(
-                state, phase="query", available_sources=allowed_modes,
-                research_depth=research.get("research_depth", "standard"),
-                prefer_primary_evidence=research.get("prefer_primary_evidence", True),
-                relevance_filter=research.get("relevance_filter", "standard"),
-                background_search_limit=_budget(state)["background_searches"],
-            ),
-            BackgroundOutput,
-            node_role="background_investigator",
+            state, "literature/background_investigator",
+            _payload(state, phase="query", available_sources=allowed_modes,
+                     research_depth=research.get("research_depth", "standard"),
+                     prefer_primary_evidence=research.get("prefer_primary_evidence", True),
+                     relevance_filter=research.get("relevance_filter", "standard"),
+                     background_search_limit=budget["background_searches"]),
+            BackgroundOutput, node_role="background_investigator",
             search_mode="none" if research["source"] == "auto" else preferred,
             available_tools=query_tools,
         )
         mode = query_plan.source if research["source"] == "auto" and query_plan.source in allowed_modes else preferred
-        queries = [value.strip() for value in query_plan.queries if value.strip()][:_budget(state)["background_searches"]]
+        proposed = query_plan.queries
     except (ModelServiceError, StructuredOutputError):
-        mode = preferred
-        queries = []
-        state = {**state, "errors": list(state.get("errors", [])) + [_safe_error("background_investigator", "model_failed", "背景检索规划不可用，改用原问题进行有限检索。")]
-        }
-    if not queries:
-        queries = [research["query"][:1_000]]
-    pools = {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}
-    query_results = state.get("query_results", {})
-    errors = list(state.get("errors", []))
-    warnings = list(state.get("warnings", []))
+        mode, proposed = preferred, []
+        state = {**state, "errors": list(state.get("errors", [])) + [_safe_error("background_investigator", "model_failed", "背景检索规划不可用，改用原问题进行有限检索。")]}
+    if not any(_label_key(value) for value in proposed):
+        proposed = [research["query"][:1_000]]
+    query_state = {**state, "candidate_pools": {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()},
+                   "query_results": state.get("query_results", {}), "errors": list(state.get("errors", [])),
+                   "warnings": list(state.get("warnings", []))}
     context = _tool_context(research, mode)
     if mode == "paper":
         context = ToolContext(research["project_id"], "openalex", (), network_search=research.get("network_search", True), local_literature=False)
-    search_name = "search_web" if mode == "web" else "search_papers"
     available_names = {item["name"] for item in registry.list_tools(context)}
-    for query in queries[:_budget(state)["background_searches"]] if search_name in available_names and research["source"] not in {"local", "collection"} else []:
-        tool_name = search_name
-        arguments = {"query": query, "limit": MAX_BACKGROUND_WEB_RESULTS} if mode == "web" else {"query": query}
-        call_id = _tool_event_start(state, "background_investigator", mode, tool_name, arguments)
-        try:
-            if mode == "web":
-                results = _invoke_registry_tool(state, tool_name, arguments, context, call_id)
-            else:
-                result = _invoke_registry_tool(state, tool_name, arguments, context, call_id)
-                results = result.get("results", [])
-                if result.get("warnings"):
-                    warnings.append("paper_search_incomplete")
-            search_state = {"candidate_pools": pools, "query_results": query_results}
-            pools, query_results = _record_search_results(search_state, mode, query, results)
-            _tool_event_completed(
-                state,
-                "background_investigator",
-                call_id,
-                mode,
-                tool_name,
-                arguments,
-                {"candidate_count": len(results)},
-                {"candidate_pools": pools, "query_results": query_results},
-            )
-        except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
-            _tool_event_failed(state, "background_investigator", call_id, mode, tool_name, arguments, exc)
-            errors.append(_tool_error(tool_name, exc))
-    query_state = {**state, "candidate_pools": pools, "query_results": query_results, "errors": errors, "warnings": warnings}
-    background_decision = {"source": mode, "queries": queries[:_budget(state)["background_searches"]]}
-    candidates = _candidate_summaries(query_state, mode, text_limit=500)
-    try:
-        selected = _model(
-            query_state,
-            "literature/background_investigator",
-            _payload(query_state, phase="select", search_mode=mode, queries=background_decision["queries"], candidates=candidates),
-            BackgroundOutput,
-            node_role="background_investigator",
-            search_mode=mode,
-            available_tools=[],
+    search_name = "search_web" if mode == "web" else "search_papers"
+    queries, seen_queries = [], set()
+
+    def search(values, limit):
+        performed = 0
+        if search_name not in available_names or research["source"] in {"local", "collection"}:
+            return performed
+        for value in values:
+            query = re.sub(r"\s+", " ", value).strip()[:1_000]
+            key = _label_key(query)
+            if not key or key in seen_queries:
+                continue
+            if performed >= limit:
+                break
+            seen_queries.add(key)
+            queries.append(query)
+            performed += 1
+            arguments = {"query": query, "limit": budget["background_web_results"]} if mode == "web" else {"query": query}
+            call_id = _tool_event_start(query_state, "background_investigator", mode, search_name, arguments)
+            try:
+                result = _invoke_registry_tool(query_state, search_name, arguments, context, call_id)
+                items = result[:budget["background_web_results"]] if mode == "web" else result.get("results", [])
+                if mode == "paper" and result.get("warnings") and "paper_search_incomplete" not in query_state["warnings"]:
+                    query_state["warnings"].append("paper_search_incomplete")
+                pools, query_results = _record_search_results(query_state, mode, query, items)
+                query_state.update(candidate_pools=pools, query_results=query_results)
+                _tool_event_completed(query_state, "background_investigator", call_id, mode, search_name, arguments,
+                                      {"candidate_count": len(items)}, {"candidate_pools": pools, "query_results": query_results})
+            except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
+                _tool_event_failed(query_state, "background_investigator", call_id, mode, search_name, arguments, exc)
+                query_state["errors"].append(_tool_error(search_name, exc))
+        return performed
+
+    search(proposed, budget["background_searches"])
+    candidates = _background_candidates(query_state, mode)
+
+    def select(candidates, *, final=False):
+        return _model(
+            query_state, "literature/background_investigator",
+            _payload(query_state, phase="select", search_mode=mode, queries=queries, candidates=candidates,
+                     final_selection=final, supplemental_query_limit=0 if final else budget["background_supplemental"],
+                     read_limit=0 if final or mode != "web" else budget["background_reads"],
+                     planner_candidate_limit=budget["planner_candidates"]),
+            BackgroundOutput, node_role="background_investigator", search_mode=mode, available_tools=[],
         )
-        valid_ids = {item["candidate_id"] for item in candidates}
-        selected_ids = [item for item in selected.selected_candidate_ids if item in valid_ids]
-        selected_items = _candidate_summaries(query_state, mode, selected_ids, text_limit=500)
-        background = {
-            "source": mode,
-            "queries": background_decision["queries"],
-            "selected_candidates": selected_items,
-            "summary": selected.summary,
-            "gaps": selected.gaps,
-        }
+
+    try:
+        selected = select(candidates)
+        visible_ids = {item["candidate_id"] for item in candidates}
+        supplemental_count = search(selected.additional_queries, budget["background_supplemental"])
+        read_count = 0
+        if mode == "web" and "read_web_page" in available_names:
+            read_ids = []
+            for candidate_id in selected.read_candidate_ids:
+                if candidate_id in visible_ids and candidate_id not in read_ids:
+                    read_ids.append(candidate_id)
+            for candidate_id in read_ids[:budget["background_reads"]]:
+                read_count += 1
+                arguments = {"candidate_id": candidate_id, "limit": 4000}
+                # _invoke_tool validates IDs against its visible queue and the earlier selection.
+                read_state = {**query_state, "background": {"selected_candidates": candidates}}
+                call_id = _tool_event_start(read_state, "background_investigator", mode, "read_web_page", arguments)
+                try:
+                    patch, result = _invoke_tool(read_state, mode, "read_web_page", arguments, call_id=call_id)
+                    query_state["candidate_pools"] = patch["candidate_pools"]
+                    query_state["read_web_pages"] = patch["read_web_pages"]
+                    _tool_event_completed(read_state, "background_investigator", call_id, mode, "read_web_page", arguments, result, patch)
+                except (ToolCallValidationError, WebSearchError, WebPageError, RuntimeError) as exc:
+                    _tool_event_failed(read_state, "background_investigator", call_id, mode, "read_web_page", arguments, exc)
+                    query_state["errors"].append(_tool_error("read_web_page", exc))
+        if supplemental_count or read_count:
+            previous_candidates = candidates
+            candidates = _background_candidates(query_state, mode)
+            try:
+                selected = select(candidates, final=True)
+            except (ModelServiceError, StructuredOutputError):
+                query_state["errors"].append(_safe_error("background_investigator", "selection_failed", "背景复核不可用，保留先前筛选结果。"))
+                pool = {item.get("candidate_id"): item for item in query_state.get("candidate_pools", {}).get(mode, [])}
+                candidates = [_candidate_view(pool.get(item["candidate_id"], item), mode, text_limit=500) for item in previous_candidates]
+        by_id = {item["candidate_id"]: item for item in candidates}
+        selected_ids = list(dict.fromkeys(item for item in selected.selected_candidate_ids if item in by_id))[:budget["planner_candidates"]]
+        selected_items = [by_id[item] for item in selected_ids]
+        selected_set = set(selected_ids)
+        def supported_findings(values):
+            findings = []
+            for finding in values:
+                ids = list(dict.fromkeys(item for item in finding.candidate_ids if item in selected_set))
+                if finding.text.strip() and ids:
+                    findings.append({"text": finding.text.strip(), "candidate_ids": ids})
+            return findings
+        background = {"source": mode, "queries": queries, "selected_candidates": selected_items,
+                      "summary": selected.summary, "gaps": _clean_labels(selected.gaps, limit=8),
+                      "research_scope": selected.research_scope, "confirmed_background": supported_findings(selected.confirmed_background),
+                      "dimensions": _clean_labels(selected.dimensions, limit=12),
+                      "controversies": supported_findings(selected.controversies)}
+        if not candidates:
+            background["summary"] = ""
+            background["gaps"] = background["gaps"] or ["背景检索未找到可用候选。"]
     except (ModelServiceError, StructuredOutputError):
-        valid_items = candidates[:5]
-        background = {
-            "source": mode,
-            "queries": background_decision["queries"],
-            "selected_candidates": valid_items,
-            "summary": "；".join((item.get("title", "未命名来源") + "：" + (item.get("abstract") or item.get("content") or "无摘要"))[:500] for item in valid_items),
-            "gaps": ["背景筛选模型不可用，候选仅按检索顺序保留。"],
-        }
-        query_state["errors"] = list(query_state.get("errors", [])) + [_safe_error("background_investigator", "selection_failed", "背景候选筛选模型不可用，保留实际检索候选。")]
-    return {
-        "candidate_pools": query_state.get("candidate_pools", {"paper": [], "web": []}),
-        "query_results": query_state.get("query_results", {}),
-        "background_decision": background_decision,
-        "background": background,
-        "errors": query_state.get("errors", []),
-        "warnings": query_state.get("warnings", []),
-    }
+        valid_items = candidates[:budget["planner_candidates"]]
+        background = {"source": mode, "queries": queries, "selected_candidates": valid_items,
+                      "summary": "背景筛选不可用，保留检索候选供后续核查。" if valid_items else "",
+                      "gaps": ["背景筛选模型不可用，候选仅按检索顺序保留。"]}
+        query_state["errors"].append(_safe_error("background_investigator", "selection_failed", "背景候选筛选模型不可用，保留实际检索候选。"))
+    return {"candidate_pools": query_state.get("candidate_pools", {"paper": [], "web": []}),
+            "query_results": query_state.get("query_results", {}),
+            "background_decision": {"source": mode, "queries": queries}, "background": background,
+            "read_web_pages": query_state.get("read_web_pages", state.get("read_web_pages", [])),
+            "errors": query_state["errors"], "warnings": query_state["warnings"]}
 
 
 def _fallback_plan(state):
@@ -1515,6 +1589,20 @@ def _planner_stop(state, reason, rationale):
         "research_stop_reason": reason,
         "last_completed": "planner",
     }
+
+
+def _planner_background_candidates(state):
+    candidates = state.get("background", {}).get("selected_candidates", [])[:_budget(state)["planner_candidates"]]
+    result = []
+    for item in candidates:
+        view = {key: str(item[key])[:1_000 if key in {"original_url", "url"} else 240]
+                for key in ("candidate_id", "title", "source", "source_level", "provider", "original_url", "url", "openalex_id", "doi")
+                if item.get(key) is not None}
+        text = item.get("content") or item.get("abstract") or ""
+        if text:
+            view["summary"] = str(text)[:240]
+        result.append(view)
+    return result
 
 
 def _planner(state, on_stage):
@@ -1561,11 +1649,17 @@ def _planner(state, on_stage):
         evidence=_evidence_views(_select_evidence(state), text_limit=240),
         allowed_sources=allowed,
         source_preference=state.get("background", {}).get("source", _preferred_mode(state["research"]["source"])),
+        background_candidates=_planner_background_candidates(state),
         research_depth=state.get("research", {}).get("research_depth", "standard"),
         research_budget=budget,
         analyst_sufficient=_review_is_sufficient(state, state.get("current_review", {})),
         actionable_next_steps=_distinct_next_steps(state, state.get("current_review", {})),
     )
+    payload["background"].update({
+        key: state.get("background", {}).get(key)
+        for key in ("research_scope", "confirmed_background", "dimensions", "controversies")
+        if key in state.get("background", {})
+    })
     errors = list(state.get("errors", []))
     try:
         result = _model(

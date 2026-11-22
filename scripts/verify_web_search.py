@@ -156,6 +156,35 @@ def main():
             assert evidence[0]['id'] in report_csv
             assert len(call('GET', f"/conversations/{question['conversation_id']}/messages")) == 2
 
+            planning_question = 'background-planning-fixture accuracy'
+            searches_before_planning = len(fixture.search_requests)
+            planning = call('POST', f'/projects/{project}/questions', json={
+                'question': planning_question, 'source': 'web', 'research_mode': 'deep',
+                'research_depth': 'standard',
+            })
+            planning_task = wait(planning['run_id'])
+            assert planning_task['status'] == 'succeeded', planning_task
+            assert fixture.search_requests[searches_before_planning:] == [
+                'accuracy scope', 'accuracy methods', 'accuracy comparison', 'accuracy limitations',
+            ]
+            planner_payloads = [
+                json.loads(request['messages'][1]['content']) for request in fixture.model_requests
+                if '运行节点标识：planner' in request['messages'][0]['content']
+                and json.loads(request['messages'][1]['content']).get('question') == planning_question
+            ]
+            assert planner_payloads and planner_payloads[0]['evidence'] == [], planner_payloads
+            first_plan = planner_payloads[0]
+            planning_candidates = first_plan['background_candidates']
+            assert len(planning_candidates) == 4, planning_candidates
+            candidate_ids = {item['candidate_id'] for item in planning_candidates}
+            assert all(item.get('title') and item.get('summary') and item.get('source_level') == 'web_snippet'
+                       and item.get('provider') == 'searx' for item in planning_candidates), planning_candidates
+            assert first_plan['background']['research_scope'] == '模拟准确率研究范围'
+            assert first_plan['background']['confirmed_background'] and first_plan['background']['controversies']
+            for item in first_plan['background']['confirmed_background'] + first_plan['background']['controversies']:
+                assert item['candidate_ids'] and set(item['candidate_ids']) <= candidate_ids, item
+            assert first_plan['background']['dimensions'] == ['研究方法', '比较条件']
+
             dense_question = 'dense-search-fixture accuracy'
             dense = call('POST', f'/projects/{project}/questions', json={
                 'question': dense_question, 'source': 'web', 'research_mode': 'deep',
@@ -176,9 +205,9 @@ def main():
                 if json.loads(request['messages'][1]['content']).get('question') == dense_question
             ]
             background = [payload for _, payload in dense_calls if payload.get('phase') == 'select']
-            assert len(background) == 1 and 1 <= len(background[0]['candidates']) <= 3, background
+            assert len(background) == 1 and 1 <= len(background[0]['candidates']) <= 5, background
             decisions = [(request, payload) for request, payload in dense_calls if payload.get('phase') == 'act']
-            assert decisions and all(1 <= len(payload['current_candidates']) <= 3 for _, payload in decisions), decisions
+            assert decisions and all(1 <= len(payload['current_candidates']) <= 5 for _, payload in decisions), decisions
             assert all(request.get('reasoning_effort') == 'low' and request.get('max_completion_tokens') == 4096
                        for request, _ in decisions)
             assert all(request.get('tool_choice') == 'auto'
