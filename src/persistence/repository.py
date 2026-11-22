@@ -113,6 +113,16 @@ def update_conversation_pinned(conversation_id, pinned):
         return conversation
 
 
+def _delete_conversation_history(db, conversation_ids_sql, args=()):
+    # Retries point to earlier tasks in the same conversation.
+    scope = f'({conversation_ids_sql})'
+    db.execute(f'UPDATE tasks SET origin_run_id=NULL WHERE conversation_id IN {scope}', args)
+    db.execute(f'DELETE FROM reports WHERE conversation_id IN {scope}', args)
+    db.execute(f'DELETE FROM messages WHERE conversation_id IN {scope}', args)
+    db.execute(f'DELETE FROM tasks WHERE conversation_id IN {scope}', args)
+    db.execute(f'DELETE FROM conversations WHERE id IN {scope}', args)
+
+
 def delete_conversation(conversation_id):
     with connect_database() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -121,13 +131,17 @@ def delete_conversation(conversation_id):
         if _one(db, "SELECT id FROM tasks WHERE conversation_id=? AND status IN ('pending','running') LIMIT 1", (conversation_id,)):
             return 'active'
 
-        # Retries point to an earlier task in the same conversation. Clear these
-        # nullable self-references before removing the conversation's task rows.
-        db.execute('UPDATE tasks SET origin_run_id=NULL WHERE conversation_id=?', (conversation_id,))
-        db.execute('DELETE FROM reports WHERE conversation_id=?', (conversation_id,))
-        db.execute('DELETE FROM messages WHERE conversation_id=?', (conversation_id,))
-        db.execute('DELETE FROM tasks WHERE conversation_id=?', (conversation_id,))
-        db.execute('DELETE FROM conversations WHERE id=?', (conversation_id,))
+        _delete_conversation_history(db, 'SELECT id FROM conversations WHERE id=?', (conversation_id,))
+        db.commit()
+        return 'deleted'
+
+
+def delete_all_conversations():
+    with connect_database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if _one(db, "SELECT t.id FROM tasks t JOIN conversations c ON c.id=t.conversation_id WHERE t.status IN ('pending','running') LIMIT 1"):
+            return 'active'
+        _delete_conversation_history(db, 'SELECT id FROM conversations')
         db.commit()
         return 'deleted'
 

@@ -54,7 +54,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
   const [settingsOpen, setSettingsOpen] = useState(initialSettingsOpen);
   const [menuConversationId, setMenuConversationId] = useState<number>();
   const [conversationActionBusy, setConversationActionBusy] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Conversation>();
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | "all">();
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [toast, setToast] = useState("");
@@ -411,11 +411,14 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
     setDeleteBusy(true);
     setDeleteError("");
     try {
-      await api<void>(`/conversations/${conversation.id}`, { method: "DELETE", signal: controller.signal });
+      await api<void>(conversation === "all" ? "/conversations" : `/conversations/${conversation.id}`, { method: "DELETE", signal: controller.signal });
       if (!mounted.current || controller.signal.aborted) return;
-      setConversations(items => items.filter(item => item.id !== conversation.id));
+      historyController.current?.abort();
+      historyRequest.current++;
+      setConversations(items => conversation === "all" ? [] : items.filter(item => item.id !== conversation.id));
+      if (conversation === "all") setHistorySearch("");
       setMenuConversationId(undefined);
-      if (conversationIdRef.current === conversation.id) {
+      if (conversation === "all" || conversationIdRef.current === conversation.id) {
         conversationIdRef.current = undefined;
         setConversationId(undefined);
         setTokenUsage(undefined);
@@ -425,7 +428,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
       deleteReturnFocus.current = historySearchRef.current;
       setDeleteTarget(undefined);
       setDeleteError("");
-      notify("研究记录已删除");
+      notify(conversation === "all" ? "研究历史已清空" : "研究记录已删除");
       await refreshHistory().catch(() => undefined);
     } catch (error) {
       if (mounted.current && !controller.signal.aborted) setDeleteError(messageOf(error));
@@ -444,8 +447,15 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
     setDeleteTarget(conversation);
   }, []);
 
+  const requestClearHistory = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    deleteReturnFocus.current = event.currentTarget;
+    setMenuConversationId(undefined);
+    setDeleteError("");
+    setDeleteTarget("all");
+  }, []);
+
   const cancelDelete = useCallback(() => {
-    if (deleteTarget) {
+    if (deleteTarget && deleteTarget !== "all") {
       deleteReturnFocus.current = panelRef.current?.querySelector<HTMLElement>(`[data-conversation-actions="${deleteTarget.id}"]`) ?? null;
     }
     setDeleteTarget(undefined);
@@ -516,6 +526,7 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
       <div className={styles.historyTop}>
         <div className={styles.historyHeading}>
           <h2>研究历史</h2>
+          <button className={styles.clearHistory} type="button" disabled={historyLoading || !!historyError || !conversations.length || conversationActionBusy || deleteBusy} onClick={requestClearHistory}>清空历史</button>
         </div>
         <button className={styles.newButton} type="button" onClick={createNewStudy}><svg className={`${styles.icon} ${styles.iconSmall}`} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>开启新的研究</button>
         <label className={styles.historySearch}>
@@ -571,12 +582,12 @@ export default function WorkspacePage({ initialSettingsOpen = false, onSettingsC
       }}
     >
       {deleteTarget && <div className={styles.deleteDialogContent}>
-        <h2 id="deleteConversationTitle">删除研究记录？</h2>
-        <p>“{deleteTarget.title}”及其消息和报告将被删除。</p>
+        <h2 id="deleteConversationTitle">{deleteTarget === "all" ? "清空研究历史？" : "删除研究记录？"}</h2>
+        <p>{deleteTarget === "all" ? "所有项目的记录（包括置顶记录）及其消息和报告将被永久删除。" : `“${deleteTarget.title}”及其消息和报告将被删除。`}</p>
         {deleteError && <p className={styles.deleteError} role="alert">{deleteError}</p>}
         <div className={styles.deleteDialogActions}>
           <button type="button" disabled={deleteBusy} autoFocus onClick={cancelDelete}>取消</button>
-          <button className={styles.deleteConfirm} type="button" disabled={deleteBusy} onClick={() => void confirmDelete()}>{deleteBusy ? "正在删除…" : "删除"}</button>
+          <button className={styles.deleteConfirm} type="button" disabled={deleteBusy} onClick={() => void confirmDelete()}>{deleteBusy ? "正在删除…" : deleteTarget === "all" ? "清空" : "删除"}</button>
         </div>
       </div>}
     </dialog>
