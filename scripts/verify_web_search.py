@@ -209,10 +209,12 @@ def main():
             cutoff_run = cutoff['run_id']
             cutoff_task = wait(cutoff_run)
             assert cutoff_task['status'] == 'succeeded', cutoff_task
-            assert '上下文预算' in cutoff_task['result']['content']
+            assert '上下文预算' not in cutoff_task['result']['content']
             assert fixture.search_requests[searches_before:] == ['accuracy']
-            cutoff_phases = [json.loads(request['messages'][1]['content']).get('phase')
-                             for request in fixture.model_requests[requests_before:]]
+            cutoff_payloads = [json.loads(request['messages'][1]['content'])
+                               for request in fixture.model_requests[requests_before:]]
+            assert cutoff_payloads[-1]['research_stop_reason'] == 'decision_context_budget_exhausted'
+            cutoff_phases = [payload.get('phase') for payload in cutoff_payloads]
             assert cutoff_phases == ['query', 'select', None, 'draft', None, None], cutoff_phases
             assert stages(cutoff_run).count('researcher') == 1
             assert stages(cutoff_run)[-1:] == ['reporter']

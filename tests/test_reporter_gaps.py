@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from src.agents import literature
 
@@ -24,24 +25,24 @@ class ReporterGapsTests(unittest.TestCase):
             with self.subTest(depth=depth):
                 state = self.state(depth)
                 self.assertEqual(literature._outstanding_gaps(state), [])
-                self.assertEqual(literature._outstanding_gaps(state, fallback=True), [])
-                caveats = literature._warning_caveats(state, fallback=True)
-                self.assertTrue(any("预算耗尽" in item for item in caveats))
-                self.assertFalse(any("旧缺口" in item for item in caveats))
                 fallback = literature._reporter_fallback(state)
                 self.assertNotIn("旧缺口", fallback["content"])
+                self.assertNotIn("预算耗尽", fallback["content"])
 
-    def test_current_incomplete_review_is_preserved(self):
+    def test_current_gap_reaches_the_model_without_an_automatic_footer(self):
         state = self.state()
-        state["current_review"] = {"sufficient": False, "gaps": ["当前缺口"], "next_steps": ["当前补查"]}
-        self.assertEqual(literature._outstanding_gaps(state), ["当前缺口"])
-        self.assertEqual(literature._outstanding_gaps(state, fallback=True), ["当前缺口", "当前补查"])
-        self.assertIn("当前缺口", literature._warning_caveats(state))
-
-    def test_background_gaps_retained_when_no_review_exists(self):
-        state = self.state()
-        state.update(rounds=[], current_review={})
-        self.assertIn("背景旧缺口", literature._outstanding_gaps(state, fallback=True))
+        state["current_review"] = {"sufficient": False, "gaps": ["缺少直接对比实验"], "next_steps": ["当前补查"]}
+        state["warnings"] = ["paper_search_incomplete"]
+        markdown = "# 方法比较\n\n缺少直接对比实验，因此两者的相对表现尚不能确认。"
+        with patch.object(literature, "_model", return_value=markdown) as model:
+            result = literature._reporter(state, None)
+        payload = model.call_args.args[2]
+        self.assertEqual(payload["outstanding_gaps"], ["缺少直接对比实验"])
+        self.assertEqual(payload["research_stop_reason"], "round_budget_exhausted")
+        self.assertEqual(result["content"], markdown)
+        fallback = literature._reporter_fallback(state)
+        self.assertNotIn("缺少直接对比实验", fallback["content"])
+        self.assertNotIn("预算耗尽", fallback["content"])
 
     def test_fallback_preserves_latest_valid_scoped_draft(self):
         state = self.state()
