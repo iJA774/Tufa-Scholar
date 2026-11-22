@@ -285,9 +285,12 @@ class State(TypedDict, total=False):
 class _EventContext:
     """Per-run callback and call ID source; held only in the in-memory graph state."""
 
-    def __init__(self, callback):
+    def __init__(self, callback, on_detail=None):
         self.callback = callback
+        self.on_detail = on_detail
         self.sequence = 0
+        self.node_id = None
+        self.node = None
 
     def next_call_id(self):
         self.sequence += 1
@@ -296,6 +299,19 @@ class _EventContext:
     def emit(self, kind, data):
         if self.callback:
             self.callback(kind, data)
+
+    def detail(self, kind, direction, name, call_id, value, *, phase=None, attempt=None, secrets=()):
+        if self.on_detail is not None:
+            self.on_detail({
+                "node": self.node,
+                "node_id": self.node_id,
+                "call_id": call_id,
+                "kind": kind,
+                "direction": direction,
+                "name": name,
+                "attempt": attempt,
+                "phase": phase,
+            }, value, secrets=secrets)
 
 
 def _emit(on_stage, node_name):
@@ -464,6 +480,11 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
         "template_context": template_context,
         "on_stream": on_stream,
     }
+    if context.on_detail is not None:
+        def on_detail(direction, attempt, phase, value, secrets):
+            context.detail("model", direction, prompt_id, call_id, value, phase=phase, attempt=attempt, secrets=secrets)
+
+        call_options["on_detail"] = on_detail
     if native_tools is not None:
         call_options["native_tools"] = native_tools
     return structured(prompt_id, payload, schema, **call_options)
@@ -1018,7 +1039,17 @@ def _native_tool_specs(catalog):
     return specs
 
 
-def _invoke_tool(state, mode, tool_name, arguments):
+def _invoke_registry_tool(state, tool_name, arguments, tool_context, call_id):
+    events = state.get("_event_context")
+    if events and call_id:
+        events.detail("tool", "input", tool_name, call_id, arguments)
+    result = registry.invoke(tool_name, arguments, context=tool_context)
+    if events and call_id:
+        events.detail("tool", "output", tool_name, call_id, result)
+    return result
+
+
+def _invoke_tool(state, mode, tool_name, arguments, *, call_id=None):
     research = state["research"]
     if state.get("research_context_limit_reached"):
         raise ToolCallValidationError("工具参数无效", "decision_context_budget_reached")
@@ -1049,7 +1080,7 @@ def _invoke_tool(state, mode, tool_name, arguments):
         requested = args.get("domains")
         if not isinstance(requested, list) or not requested or any(d not in domains for d in requested):
             raise ToolCallValidationError("工具参数无效", "unknown_local_domain")
-        result = registry.invoke(tool_name, args, context=context)
+        result = _invoke_registry_tool(state, tool_name, args, context, call_id)
         documents = [{**item, "title": str(item.get("title", ""))[:240],
                       "description": str(item.get("description", ""))[:240],
                       "tags": [str(tag)[:100] for tag in item.get("tags", [])[:10]],
@@ -1062,7 +1093,7 @@ def _invoke_tool(state, mode, tool_name, arguments):
     if tool_name == "read_local_markdown":
         if args.get("document_id") not in state.get("disclosed_local_documents", []):
             raise ToolCallValidationError("工具参数无效", "undisclosed_local_document")
-        result = registry.invoke(tool_name, args, context=context)
+        result = _invoke_registry_tool(state, tool_name, args, context, call_id)
         pool = _unique_evidence(state.get("evidence_pool", []) + result)
         signatures = {_evidence_signature(item): item["id"] for item in pool}
         normalized = [{**item, "id": signatures[_evidence_signature(item)]} for item in result]
@@ -1110,7 +1141,7 @@ def _invoke_tool(state, mode, tool_name, arguments):
                 papers.append(candidate)
                 blocks_to_mark.append(marker)
         args["papers"] = papers[:6]
-        result = registry.invoke(tool_name, args, context=context)
+        result = _invoke_registry_tool(state, tool_name, args, context, call_id)
         enriched = _enrich_evidence(result, chosen, mode)
         evidence_pool = _unique_evidence(state.get("evidence_pool", []) + enriched)
         id_by_signature = {_evidence_signature(item): item["id"] for item in evidence_pool}
@@ -1131,7 +1162,7 @@ def _invoke_tool(state, mode, tool_name, arguments):
         allowed_urls = {item.get("url") or item.get("original_url") for item in visible_pool}
         if not isinstance(args.get("url"), str) or args["url"] not in allowed_urls:
             raise ToolCallValidationError("工具参数无效", "unknown_candidate_url")
-        result = registry.invoke(tool_name, args, context=context)
+        result = _invoke_registry_tool(state, tool_name, args, context, call_id)
         original = next((item for item in visible_pool if (item.get("url") or item.get("original_url")) == args["url"]), {})
         content = result.get("markdown", "")
         page_item = {
@@ -1153,7 +1184,7 @@ def _invoke_tool(state, mode, tool_name, arguments):
             read_web_pages.append(read_key)
         return {"candidate_pools": pools, "tool_results": tool_results, "read_web_pages": read_web_pages}, tool_results[-1]
     if tool_name == "search_papers":
-        result = registry.invoke(tool_name, args, context=context)
+        result = _invoke_registry_tool(state, tool_name, args, context, call_id)
         items = result.get("results", [])
         pools, query_results = _record_search_results(state, mode, args.get("query", ""), items)
         warnings = list(state.get("warnings", []))
@@ -1169,11 +1200,11 @@ def _invoke_tool(state, mode, tool_name, arguments):
             args["limit"] = min(args["limit"], MAX_RESEARCH_WEB_RESULTS)
         else:
             raise ToolCallValidationError("工具参数无效", "invalid_search_limit")
-        result = registry.invoke(tool_name, args, context=context)
+        result = _invoke_registry_tool(state, tool_name, args, context, call_id)
         pools, query_results = _record_search_results(state, "web", args.get("query", ""), result)
         tool_results = list(state.get("tool_results", [])) + [{"tool": tool_name, "query": args.get("query", ""), "candidate_count": len(result)}]
         return {"candidate_pools": pools, "query_results": query_results, "tool_results": tool_results}, {"candidate_count": len(result)}
-    result = registry.invoke(tool_name, args, context=context)
+    result = _invoke_registry_tool(state, tool_name, args, context, call_id)
     return {"tool_results": list(state.get("tool_results", [])) + [{"tool": tool_name, "result": str(result)[:MAX_CANDIDATE_TEXT]}]}, result
 
 
@@ -1308,6 +1339,9 @@ def _tool_event_failed(state, node, call_id, mode, tool_name, arguments, exc):
         )
     if not call_id:
         return
+    state["_event_context"].detail("tool", "error", tool_name, call_id, {
+        "message": safe["message"], "code": safe["code"], "arguments": arguments,
+    })
     _emit_event(state, "tool.failed", {
         "node": node,
         "call_id": call_id,
@@ -1319,7 +1353,7 @@ def _tool_event_failed(state, node, call_id, mode, tool_name, arguments, exc):
 def _invoke_tool_with_events(state, mode, tool_name, arguments, *, node="researcher", reason=None):
     call_id = _tool_event_start(state, node, mode, tool_name, arguments, reason)
     try:
-        patch, result = _invoke_tool(state, mode, tool_name, arguments)
+        patch, result = _invoke_tool(state, mode, tool_name, arguments, call_id=call_id)
     except Exception as exc:
         _tool_event_failed(state, node, call_id, mode, tool_name, arguments, exc)
         raise
@@ -1377,9 +1411,9 @@ def _background_investigator(state, on_stage):
         call_id = _tool_event_start(state, "background_investigator", mode, tool_name, arguments)
         try:
             if mode == "web":
-                results = registry.invoke(tool_name, arguments, context=context)
+                results = _invoke_registry_tool(state, tool_name, arguments, context, call_id)
             else:
-                result = registry.invoke(tool_name, arguments, context=context)
+                result = _invoke_registry_tool(state, tool_name, arguments, context, call_id)
                 results = result.get("results", [])
                 if result.get("warnings"):
                     warnings.append("paper_search_incomplete")
@@ -2482,10 +2516,48 @@ def _node_completion_data(node, state, patch):
     return data
 
 
+_NODE_OUTPUT_FIELDS = {
+    "dispatcher": ("needs_research", "content"),
+    "background_investigator": ("background_decision", "background"),
+    "planner": ("plan", "research_stop_reason"),
+    "supervisor": ("next_node", "current_plan", "current_source", "current_round"),
+    "researcher": ("current_draft", "current_findings", "round_search_queries"),
+    "analyst": ("current_review", "current_findings"),
+    "reporter": ("content", "final_evidence", "report_fallback"),
+}
+
+
 def _run_node_with_events(state, node, callback):
-    _emit_event(state, "node.started", {"node": node})
-    patch = callback(state)
-    _emit_event(state, "node.completed", _node_completion_data(node, state, patch))
+    context = state.get("_event_context")
+    capture = context is not None and context.on_detail is not None
+    if capture:
+        context.node = node
+        context.node_id = context.next_call_id()
+        start = {
+            "source": state["research"]["source"],
+            "research_mode": state["research"].get("research_mode", "auto"),
+        }
+        if state.get("current_round"):
+            start["round"] = state["current_round"]
+        if state.get("current_source"):
+            start["current_source"] = state["current_source"]
+        if node == "supervisor":
+            start.update(last_completed=state.get("last_completed", "planner"), plan=state.get("plan"),
+                         completed_rounds=len(state.get("rounds", [])))
+        context.detail("node", "input", node, context.node_id, start)
+    if node != "dispatcher":
+        _emit_event(state, "node.started", {"node": node})
+    try:
+        patch = callback(state)
+    except Exception:
+        if capture:
+            context.detail("node", "error", node, context.node_id, {"message": "节点执行中断"})
+        raise
+    if capture:
+        output = {key: patch[key] for key in _NODE_OUTPUT_FIELDS[node] if key in patch}
+        context.detail("node", "output", node, context.node_id, output)
+    if node != "dispatcher":
+        _emit_event(state, "node.completed", _node_completion_data(node, state, patch))
     return patch
 
 
@@ -2499,7 +2571,7 @@ def _after_dispatch(state):
 
 def _graph(on_stage, on_subtask):
     graph = StateGraph(State)
-    graph.add_node("dispatcher", lambda state: _dispatch(state, on_stage))
+    graph.add_node("dispatcher", lambda state: _run_node_with_events(state, "dispatcher", lambda current: _dispatch(current, on_stage)))
     graph.add_node("background_investigator", lambda state: _run_node_with_events(state, "background_investigator", lambda current: _background_investigator(current, on_stage)))
     graph.add_node("planner", lambda state: _run_node_with_events(state, "planner", lambda current: _planner(current, on_stage)))
     graph.add_node("supervisor", lambda state: _run_node_with_events(state, "supervisor", lambda current: _supervisor(current, on_stage)))
@@ -2535,7 +2607,7 @@ def _safe_history(history, source):
     return list(history or [])
 
 
-def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
+def run(research, *, history, on_stage=None, on_subtask=None, on_event=None, on_detail=None):
     """Run the research graph and return the final Markdown and cited evidence."""
     if not isinstance(research, dict):
         raise TypeError("research must be a dict")
@@ -2579,8 +2651,8 @@ def run(research, *, history, on_stage=None, on_subtask=None, on_event=None):
         "warnings": [],
         "prepared_round": 0,
     }
-    if on_event is not None:
-        initial["_event_context"] = _EventContext(on_event)
+    if on_event is not None or on_detail is not None:
+        initial["_event_context"] = _EventContext(on_event, on_detail)
     graph = _graph(on_stage, on_subtask)
     result = graph.invoke(initial, config={"recursion_limit": 40})
     if result.get("content") is None:

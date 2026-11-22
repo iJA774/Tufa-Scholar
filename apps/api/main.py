@@ -551,6 +551,24 @@ async def stream_research_events(run_id: int, request: Request, after: int = Que
     })
 
 
+@app.get('/runs/{run_id}/details')
+def list_research_details(run_id: int, response: Response, after: int = Query(0, ge=0, le=9223372036854775807)):
+    page = repo.research_detail_batch(run_id, after)
+    if page is None:
+        raise HTTPException(404, '任务不存在')
+    response.headers['Cache-Control'] = 'no-store'
+    return page
+
+
+@app.get('/runs/{run_id}/details/{detail_id}')
+def get_research_detail(run_id: int, detail_id: int, response: Response):
+    detail = repo.get_research_detail(run_id, detail_id)
+    if detail is None:
+        raise HTTPException(404, '研究细节不存在')
+    response.headers['Cache-Control'] = 'no-store'
+    return detail
+
+
 @app.post('/runs/{run_id}/retry', status_code=201)
 def retry_run(run_id: int):
     task = repo.get_task(run_id)

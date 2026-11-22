@@ -11,7 +11,7 @@ from src.persistence import repository
 from src.tools import ToolContext, ToolRegistry
 from src.persistence.storage import initialize_storage
 from src.infrastructure.logging_setup import configure_logging, safe_stack
-from src.infrastructure.diagnostics import diagnostic_scope
+from src.infrastructure.diagnostics import diagnostic_scope, redact_diagnostic
 from src.integrations.model import ModelServiceError, StructuredOutputError, track_token_usage
 
 
@@ -31,6 +31,16 @@ def run_once():
                 'report_format', 'research_depth', 'prefer_primary_evidence', 'relevance_filter', 'network_search', 'local_literature'
             )}
             history = [] if task['source'] == 'collection' else repository.task_history(task['id'])
+
+            def save_detail(metadata, value, *, secrets=()):
+                try:
+                    strip_thought = metadata['kind'] in ('model', 'node') and metadata['direction'] != 'input'
+                    detail = redact_diagnostic({'name': metadata['name'], 'value': value}, secrets=secrets, strip_thought=strip_thought)
+                    safe_metadata = {**metadata, 'name': detail['name'][:200]}
+                    repository.record_research_detail(run_id, safe_metadata, detail['value'])
+                except Exception as exc:
+                    log.warning('research_detail_write_failed run_id=%s type=%s', run_id, type(exc).__name__)
+
             with (
                 diagnostic_scope(run_id=run_id, project_id=task['project_id']),
                 track_token_usage(lambda total: repository.add_conversation_tokens(run_id, total)),
@@ -40,6 +50,7 @@ def run_once():
                     on_stage=lambda stage: repository.update_stage(task['id'], stage),
                     on_subtask=lambda note: repository.record_subtask(task['id'], note),
                     on_event=lambda kind, data: repository.record_research_event(task['id'], kind, data),
+                    on_detail=save_detail,
                 )
             repository.finish_chat_task(task['id'], content, evidence)
         else:

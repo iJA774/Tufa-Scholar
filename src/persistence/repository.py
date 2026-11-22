@@ -304,6 +304,45 @@ def research_event_batch(run_id, after):
         ]
 
 
+RESEARCH_DETAIL_PAGE_SIZE = 100
+_RESEARCH_DETAIL_BYTE_LIMIT = 2 * 1024 * 1024
+
+
+def record_research_detail(run_id, metadata, value):
+    content = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8', errors='replace')
+    truncated = len(content) > _RESEARCH_DETAIL_BYTE_LIMIT
+    with connect_database() as db:
+        db.execute('''INSERT INTO research_details(run_id, metadata, content, truncated)
+            SELECT id, ?, ?, ? FROM tasks WHERE id=? AND kind='chat' AND status='running' ''',
+                   (json.dumps(metadata, ensure_ascii=True), content[:_RESEARCH_DETAIL_BYTE_LIMIT].decode('utf-8', errors='ignore'), truncated, run_id))
+        db.commit()
+
+
+def research_detail_batch(run_id, after):
+    with connect_database() as db:
+        db.execute('BEGIN')
+        task = _one(db, "SELECT status FROM tasks WHERE id=? AND kind='chat'", (run_id,))
+        if task is None:
+            return None
+        rows = _all(db, '''SELECT id, metadata FROM research_details
+            WHERE run_id=? AND id>? ORDER BY id LIMIT ?''', (run_id, after, RESEARCH_DETAIL_PAGE_SIZE))
+        return {
+            'status': task['status'],
+            'entries': [{'id': row['id'], **json.loads(row['metadata'])} for row in rows],
+            'has_more': len(rows) == RESEARCH_DETAIL_PAGE_SIZE,
+        }
+
+
+def get_research_detail(run_id, detail_id):
+    with connect_database() as db:
+        row = _one(db, 'SELECT content, truncated FROM research_details WHERE run_id=? AND id=?',
+                   (run_id, detail_id))
+        if row is None:
+            return None
+        truncated = bool(row['truncated'])
+        return {'truncated': truncated, 'value': row['content'] if truncated else json.loads(row['content'])}
+
+
 def list_tasks(project_id, conversation_id=None):
     with connect_database() as db:
         if conversation_id is None:

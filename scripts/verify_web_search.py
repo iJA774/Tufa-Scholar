@@ -244,6 +244,47 @@ def main():
             assert all(event['data'].get('node') != 'dispatcher' for event in events if event['kind'].startswith('node.'))
             assert 'data: ' not in client.get(events_path, params={'after': events[-1]['id']}).text
 
+            details_path = f'/runs/{stream_run}/details'
+            first_page = client.get(details_path)
+            assert first_page.headers['cache-control'] == 'no-store'
+            page = first_page.json()
+            details = list(page['entries'])
+            while page['has_more']:
+                page = call('GET', details_path, params={'after': details[-1]['id']})
+                details.extend(page['entries'])
+            assert page['status'] == 'succeeded'
+            assert {entry['node'] for entry in details} >= {
+                'dispatcher', 'background_investigator', 'planner', 'supervisor', 'researcher', 'analyst', 'reporter',
+            }
+            assert all('value' not in entry for entry in details)
+            background = next(entry for entry in details if entry['node'] == 'background_investigator'
+                              and entry['kind'] == 'model' and entry['direction'] == 'input')
+            background_detail = call('GET', f"{details_path}/{background['id']}")
+            transmitted = next(request['messages'] for request in fixture.model_requests
+                               if '运行节点标识：background_investigator' in request['messages'][0]['content']
+                               and json.loads(request['messages'][1]['content']).get('question') == 'stream-fixture accuracy')
+            assert not background_detail['truncated']
+            assert background_detail['value']['messages'] == transmitted
+            search = next(entry for entry in details if entry['name'] == 'search_web' and entry['direction'] == 'output')
+            search_detail = call('GET', f"{details_path}/{search['id']}")['value']
+            assert search_detail[0]['title'] == 'Simulated official accuracy results'
+            assert '92%' in search_detail[0]['content']
+            native = next(entry for entry in details if entry['node'] == 'researcher' and entry['kind'] == 'model'
+                          and entry['phase'] == 'act' and entry['direction'] == 'output')
+            decision = call('GET', f"{details_path}/{native['id']}")['value']['tool_decision']
+            assert decision['tool_name'] and isinstance(decision['arguments'], dict)
+            reporter = next(entry for entry in details if entry['node'] == 'reporter'
+                            and entry['kind'] == 'model' and entry['direction'] == 'output')
+            reporter_response = client.get(f"{details_path}/{reporter['id']}")
+            assert reporter_response.headers['cache-control'] == 'no-store'
+            assert '92%' in reporter_response.json()['value']['content']
+            assert 'private-fixture-sentinel' not in reporter_response.text
+            assert '运行节点标识' not in client.get(events_path).text
+            assert client.get(f"/runs/{quick['run_id']}/details/{reporter['id']}").status_code == 404
+            assert call('GET', details_path, params={'after': details[-1]['id']})['entries'] == []
+            assert client.delete(f"/conversations/{streamed_question['conversation_id']}").status_code == 204
+            assert client.get(details_path).status_code == 404
+
             rejected_report = call('POST', f'/projects/{project}/questions', json={
                 'question': 'reporter-invalid-citation accuracy', 'source': 'web',
             })
@@ -321,6 +362,7 @@ def main():
             print('Context cutoff: an over-budget decision is skipped and the worker goes from draft to report without any further retrieval.')
             print('Thinking-budget conflict: a streaming HTTP 400 is recovered once and the worker saves a cited report.')
             print('Live SSE: reporter delta arrived while the worker was running; tool reason and reconnect cursor passed.')
+            print('Research details: transmitted prompts, native tool calls, web results, and run isolation passed.')
             print('Reporter citation rejection: report and CSV preserve valid provisional evidence.')
             print('Provider failure: rewritten search retries stop after two consecutive failures and produce an explicit no-evidence report.')
             print('No real search provider or remote web page was contacted.')

@@ -85,6 +85,14 @@ def initialize_storage() -> dict:
             data TEXT NOT NULL
         )''')
         connection.execute('CREATE INDEX IF NOT EXISTS research_events_run ON research_events(run_id, id)')
+        connection.execute('''CREATE TABLE IF NOT EXISTS research_details (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            metadata TEXT NOT NULL,
+            content TEXT NOT NULL,
+            truncated INTEGER NOT NULL
+        )''')
+        connection.execute('CREATE INDEX IF NOT EXISTS research_details_run ON research_details(run_id, id)')
         connection.commit()
         # Exercise FTS5 indexing/querying without inserting test papers.
         connection.execute("CREATE VIRTUAL TABLE temp.fts_probe USING fts5(content)")
