@@ -153,7 +153,7 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual(model.reporter_payloads[0]['evidence'], [])
         self.assertEqual(evidence, [])
         self.assertNotIn('private search failure', content)
-        self.assertRegex(content, r'证据不足|没有可核查证据|没有获得可用证据')
+        self.assertIn('没有可核查的网页证据', content)
         self.assertNotIn('# 阶段性研究结果', content)
 
     def test_successful_forced_rewrite_resets_consecutive_search_failures(self):
@@ -200,7 +200,7 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertEqual([payload['phase'] for payload in researcher_payloads], ['act', 'act', 'act', 'act', 'draft'])
         self.assertEqual(search.call_count, 4)
         self.assertEqual(evidence, [])
-        self.assertRegex(content, r'证据不足|没有可核查证据|没有获得可用证据')
+        self.assertIn('未能取得可核查证据', content)
 
     def test_repeated_failed_web_read_is_skipped_and_round_stops(self):
         candidate = {

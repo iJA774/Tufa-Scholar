@@ -190,7 +190,7 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(retrieved[0], "accuracy")
         self.assertFalse(evidence)
         self.assertIn("未能形成有证据支持的结论", content)
-        self.assertIn("没有可核查证据", content)
+        self.assertNotIn("本次没有可核查证据", content)
         self.assertEqual(stages[-1], "reporter")
 
     def test_background_and_planner_model_failures_fall_back_to_original_query_and_report(self):
@@ -398,7 +398,10 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertIn("collect_evidence", [name for name, _, _ in invoke_calls])
         self.assertTrue(evidence)
         self.assertIn("已保留可用的研究资料", content)
-        self.assertIn("资料可能不完整", content)
+        self.assertIn("资料覆盖仍有限", content)
+        self.assertNotIn("资料可能不完整", content)
+        reporter_payload = next(payload for prompt, payload in model_payloads if prompt == "literature/reporter")
+        self.assertEqual(reporter_payload["warnings"], ["paper_search_incomplete"])
         self.assertNotIn("private upstream message", content)
         self.assertTrue(model_payloads)
         for _, payload in model_payloads:

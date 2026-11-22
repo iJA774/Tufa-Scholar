@@ -33,7 +33,7 @@
 
 研究模式字段保存在 task：`auto` 是旧 API 客户端的缺省兼容模式，collection 来源在 auto 下强制研究；`quick` 优先于 collection 约束，不读取收藏夹且直接回答；`deep` 绕过 dispatcher 判断并启动研究。用户可通过 API 请求选择模式，API 校验后由 worker 传入可信模板上下文；问题、历史或检索材料中的指令不能改变该模式。任务重试复制原模式，既有 task 通过 additive migration 补为 `auto`。
 
-任务中的 `report_format` 作为受信模板上下文传给 Reporter 和 Dispatcher。Reporter 只渲染所选风格的写作指引，Dispatcher 对直接答复使用简短的同风格指引。证据解读仍遵循首轮研究方向 `search_mode`。
+任务中的 `report_format` 作为受信模板上下文传给 Reporter 和 Dispatcher。Reporter 只渲染所选风格的写作指引，Dispatcher 对直接答复使用简短的同风格指引。证据解读仍遵循首轮研究方向 `search_mode`。通俗解读直接讲清问题、原理和有依据的结论，省略免责声明、调研局限和检索过程说明。
 
 研究分支使用任务快照中的深度、原始证据优先和相关性过滤。Planner 接收深度及代码计算的预算，结合 Analyst 的审查决定是否补证。深入档重点复核核心要求覆盖、证据充分性和重要矛盾，再判断是否存在可执行的补查方向。Researcher 根据偏好使用候选和已提取证据。终稿的 `search_mode` 由首轮研究方向确定；后续渠道切换只影响每轮取证。Reporter 根据实际收束原因与 `outstanding_gaps` 说明未解决事项；该字段反映最近一次累计审查，历史审查中的缺口仅作过程背景。
 

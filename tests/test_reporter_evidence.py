@@ -85,7 +85,7 @@ class ReporterEvidenceTests(unittest.TestCase):
         self.assertTrue(any(x['id'].startswith('a') for x in selected))
         self.assertTrue(any(x['id'].startswith('b') for x in selected))
 
-    def test_overflow_is_disclosed_and_excludes_unseen_citations(self):
+    def test_model_receives_overflow_count_and_report_excludes_unseen_citations(self):
         pool = [evidence(f'e{i}', text='The outcome was 92%.') for i in range(60)]
         state = {'research': {'project_id': 1, 'query': 'study', 'source': 'auto'},
                  'history': [], 'background': {}, 'plan': {}, 'errors': [], 'warnings': [],
@@ -100,7 +100,7 @@ class ReporterEvidenceTests(unittest.TestCase):
         with patch.object(workflow, '_model', side_effect=model):
             result = workflow._reporter(state, None)
         self.assertEqual(captured['evidence_omitted_count'], 12)
-        self.assertIn('本报告基于其中部分证据', result['content'])
+        self.assertNotIn('本报告基于其中部分证据', result['content'])
         self.assertEqual(len(result['final_evidence']), 1)
         self.assertTrue(result['final_rejections'])
 

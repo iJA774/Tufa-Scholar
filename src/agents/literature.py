@@ -2177,22 +2177,15 @@ def _visible_report_evidence(items, allowed_papers):
     return visible
 
 
-def _publish_report(verified, caveats=()):
-    notes = ["> " + note for note in dict.fromkeys(caveats) if note]
-    body = "\n\n".join(part for part in [verified["content"], *notes] if part)
-    return {**verified, "content": numbered_references(body, verified["evidence"])}
+def _publish_report(verified):
+    return {**verified, "content": numbered_references(verified["content"], verified["evidence"])}
 
 
-def _outstanding_gaps(state, *, fallback=False):
+def _outstanding_gaps(state):
     rounds = state.get("rounds", [])
     review = state.get("current_review") or (rounds[-1].get("review", {}) if rounds else {})
     if _depth(state) != "deep":
-        gaps = list(review.get("gaps", []))
-        if fallback and review and not review.get("sufficient"):
-            gaps.extend(review.get("next_steps", []))
-        if fallback and not review:
-            gaps.extend(state.get("background", {}).get("gaps", []))
-        return _clean_labels(gaps, limit=5 if fallback else 24)
+        return _clean_labels(review.get("gaps", []), limit=24)
     gaps = [
         *(f"核心要求尚未覆盖：{item}" for item in _core_requirement_gaps(state, review)),
         *(f"尚未解决的重要矛盾：{item}" for item in review.get("unresolved_contradictions", [])),
@@ -2218,13 +2211,13 @@ def _reporter_fallback(state):
     for index, draft in enumerate(reversed(drafts)):
         checked = validate_markdown(draft, evidence, allowed_paper_ids=allowed)
         if checked["evidence"]:
-            return _publish_report(checked, _warning_caveats(state, fallback=True))
+            return _publish_report(checked)
         if index == 0 and not review.get("sufficient") and any(
             line.lstrip().startswith("> 局限") for line in checked["content"].splitlines()
         ):
             limitations = checked
     checked = limitations or {"content": "现有资料不足以形成有证据支持的结论。", "evidence": [], "rejected": []}
-    return _publish_report(checked, _warning_caveats(state, fallback=True))
+    return _publish_report(checked)
 
 
 def _log_report_validation(*, input_evidence_count, final_evidence_count, rejected_claim_count, fallback_rejected_count, fallback_reason):
@@ -2252,29 +2245,6 @@ def _reporter_recovery(state, *, reason_code, input_evidence_count, rejected_cla
         fallback_reason=reason_code,
     )
     return result
-
-
-def _warning_caveats(state, *, fallback=False):
-    caveats = []
-    if "paper_search_incomplete" in state.get("warnings", []):
-        caveats.append("论文检索的部分外部来源失败，已保留可用结果，资料可能不完整。")
-    if state.get("research_context_limit_reached"):
-        caveats.append("研究决策输入达到本机估算上下文预算，已停止新增工具调用。本报告基于现有材料，收束原因是预算耗尽。")
-    elif _research_tool_budget_exhausted(state):
-        caveats.append("研究工具总预算已用完。本报告基于现有材料，收束原因是预算耗尽。")
-    stop_reason = state.get("research_stop_reason")
-    if stop_reason == "round_budget_exhausted":
-        caveats.append("研究轮次达到上限。本报告基于现有材料，收束原因是预算耗尽。")
-    elif stop_reason == "no_distinct_research_path":
-        caveats.append("当前没有新的可执行补查方向，研究充分性仍未确认。")
-    elif stop_reason == "planner_reported_incomplete":
-        caveats.append("本次研究已收束，现有证据尚未确认覆盖所有要求。")
-    if fallback or stop_reason != "sufficient":
-        caveats.extend(
-            gap for gap in _outstanding_gaps(state, fallback=fallback)
-            if not validate_claim(gap, [], {}, allow_uncited=True, is_limitation=True)[1]
-        )
-    return caveats
 
 
 def _reporter_evidence(state, pool):
@@ -2401,14 +2371,7 @@ def _reporter(state, on_stage):
         reason_code = "no_valid_report_body"
 
     if checked and checked["has_body"]:
-        caveats = _warning_caveats(state)
-        if not working:
-            caveats.append("本次没有可核查证据，相关判断仍待验证。")
-        if len(all_evidence) > len(working):
-            caveats.append("累计证据超出终稿上下文预算，本报告基于其中部分证据。")
-        if checked["rejected"]:
-            caveats.append("部分内容因引用无效或格式不安全而省略。")
-        report = _publish_report(checked, caveats)
+        report = _publish_report(checked)
         rejected = report["rejected"]
         _log_report_validation(
             input_evidence_count=len(working),
