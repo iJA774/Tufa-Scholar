@@ -22,14 +22,12 @@ def replay(artifact):
             AnalystOutput,
             BackgroundOutput,
             DispatcherOutput,
-            PlannerOutput,
             ResearchActionOutput,
             _parse_control,
         )
         schemas = {
             'runtime/dispatcher': DispatcherOutput,
             'literature/background_investigator': BackgroundOutput,
-            'literature/planner': PlannerOutput,
             'literature/analyst': AnalystOutput,
         }
     except ImportError:
@@ -44,14 +42,14 @@ def replay(artifact):
             return '未复现' if isinstance(response, str) and response.strip() else '复现：文本为空或格式无效'
         if schema is None:
             return '无法离线复现：未知研究阶段'
-    if prompt_id == 'literature/reporter':
+    if prompt_id in ('literature/planner', 'literature/reporter'):
         response = artifact.get('response')
         return '未复现' if isinstance(response, str) and response.strip() else '复现：文本为空或格式无效'
     if schema is None:
         return '无法离线复现：未知提示词'
     try:
         response = artifact.get('response')
-        if prompt_id in ('literature/planner', 'literature/analyst') and isinstance(response, str):
+        if prompt_id == 'literature/analyst' and isinstance(response, str):
             _parse_control(response, schema)
         elif isinstance(response, str):
             schema.model_validate_json(response)

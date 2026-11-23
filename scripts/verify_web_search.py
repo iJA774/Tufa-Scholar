@@ -185,6 +185,22 @@ def main():
                 assert item['candidate_ids'] and set(item['candidate_ids']) <= candidate_ids, item
             assert first_plan['background']['dimensions'] == ['研究方法', '比较条件']
 
+            partial_question = 'partial-planner-fixture accuracy'
+            partial = call('POST', f'/projects/{project}/questions', json={
+                'question': partial_question, 'source': 'web', 'research_mode': 'deep',
+            })
+            partial_task = wait(partial['run_id'])
+            assert partial_task['status'] == 'succeeded', partial_task
+            partial_decisions = [json.loads(request['messages'][1]['content']) for request in fixture.model_requests
+                                 if '运行节点标识：researcher' in request['messages'][0]['content']
+                                 and json.loads(request['messages'][1]['content']).get('question') == partial_question
+                                 and json.loads(request['messages'][1]['content']).get('phase') == 'act']
+            expected_prefix = '# 研究计划\n\n## 研究要求\n- 查证准确率及其来源\n\n## 研究步骤\n- 检索原始记录并核对实验'
+            assert partial_decisions and partial_decisions[0]['research_plan'] == expected_prefix, partial_decisions
+            assert partial_decisions[0]['research_plan_truncated'] is True
+            assert partial_decisions[0]['current_source'] == 'web'
+            assert partial_decisions[0]['requirements'] == ['查证准确率及其来源']
+
             dense_question = 'dense-search-fixture accuracy'
             dense = call('POST', f'/projects/{project}/questions', json={
                 'question': dense_question, 'source': 'web', 'research_mode': 'deep',
@@ -230,8 +246,8 @@ def main():
             conflict_decisions = [request for request in fixture.model_requests[before_conflict:]
                                   if request.get('reasoning_effort') == 'low']
             assert len(conflict_decisions) >= 4
-            assert conflict_decisions[0].get('max_completion_tokens') == 4096
-            assert all('max_completion_tokens' not in request for request in conflict_decisions[1:])
+            assert conflict_decisions[0].get('max_completion_tokens') == 8192
+            assert all(request.get('max_completion_tokens') in (None, 4096) for request in conflict_decisions[1:])
             assert conflict_decisions[0]['messages'] == conflict_decisions[1]['messages']
 
             cutoff_question = 'context-cutoff-fixture ' + '核对这项研究的准确率。' * 1_000
@@ -362,6 +378,10 @@ def main():
                 and json.loads(request['messages'][1]['content']).get('question') == 'two-rounds accuracy'
             ]
             assert len(reporter_payloads) == 1 and len(reporter_payloads[0]['rounds']) == 2
+            route_requests = [request for request in fixture.model_requests
+                              if '运行节点标识：route' in request['messages'][0]['content']
+                              and json.loads(request['messages'][1]['content']).get('question') == 'two-rounds accuracy']
+            assert route_requests and route_requests[0]['tools'][0]['function']['name'] == 'select_research_route'
             assert stages(two_round['run_id'])[-1:] == ['reporter']
 
             # A provider failure must still yield a completed, evidence-free report.

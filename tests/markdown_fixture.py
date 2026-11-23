@@ -1,12 +1,24 @@
 """Build model responses using the workflow's text control protocol."""
 import json
+from types import SimpleNamespace
 
 
-def plan(**fields):
-    data = {'requirements': [], 'plan': [], 'source': 'paper', 'action': 'research',
-            'completion_confirmed': False, 'rationale': ''}
-    data.update(fields)
-    return '研究计划\n\n```tufa-control\n' + json.dumps(data, ensure_ascii=False) + '\n```'
+def plan(*, requirements=(), plan=()):
+    return '\n'.join([
+        '# 研究计划', '', '## 研究要求',
+        *(f'- {item}' for item in requirements), '', '## 研究步骤',
+        *(f'- {item}' for item in plan),
+    ])
+
+
+def route(source='paper', action='research', completion_confirmed=False, *, initial=False):
+    arguments = {'source': source}
+    if not initial:
+        arguments.update(action=action, completion_confirmed=completion_confirmed)
+    return SimpleNamespace(
+        action='tool', tool_name='select_research_route',
+        arguments=arguments,
+    )
 
 
 def review(**fields):

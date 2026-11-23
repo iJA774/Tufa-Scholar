@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
-from markdown_fixture import plan, review
+from markdown_fixture import plan, review, route
 
 
 def researcher_output(*, action="finish", tool_name="", arguments=None, reason=""):
@@ -50,14 +50,13 @@ class WebWorkflowModel:
                 gaps=[] if candidates else ['无可用网页候选'],
             )
         if prompt_id == 'literature/planner':
-            count = payload['round_count']
             return plan(
                 requirements=['核实准确率'],
                 plan=['搜索官方准确率结果'],
-                source='web',
-                action='research' if count < self.rounds else 'report',
-                rationale='网页 fixture',
             )
+        if prompt_id == 'literature/route':
+            action = 'research' if payload['round_count'] < self.rounds else 'report'
+            return route('web', action, action == 'report')
         if prompt_id == 'literature/researcher':
             candidates = payload.get('current_candidates', [])
             evidence = [item for item in payload.get('evidence', []) if item.get('source_level') in {'web_snippet', 'web_content'}]
@@ -128,7 +127,7 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertTrue(all(
             call[2].get('native_tools') is None
             for call in model.calls
-            if call[0] != 'literature/researcher'
+            if call[0] not in {'literature/researcher', 'literature/route'}
         ))
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0]['source_level'], 'web_snippet')
@@ -170,9 +169,10 @@ class WebWorkflowTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source='web', summary='没有候选', gaps=['暂无候选'])
                 if prompt_id == 'literature/planner':
                     return plan(
-                        requirements=['核实准确率'], plan=['accuracy plan'], source='web',
-                        action='research' if payload['round_count'] == 0 else 'report', rationale='fixture',
+                        requirements=['核实准确率'], plan=['accuracy plan'],
                     )
+                if prompt_id == 'literature/route':
+                    return route('web', 'report', False)
                 if prompt_id == 'literature/researcher':
                     if payload['phase'] == 'draft':
                         return '> 局限：未能取得可核查证据。'

@@ -68,6 +68,7 @@ class ModelTests(unittest.TestCase):
             ('literature/preprocesser', '分类角色', 'none', []),
             ('literature/background_investigator', '背景调查角色', 'none', [{'name': 'search_web', 'description': '网页检索', 'input_schema': {}}]),
             ('literature/planner', '计划角色', 'paper', [{'name': 'search_papers', 'description': '论文检索', 'input_schema': {}}]),
+            ('literature/route', '路由角色', 'paper', []),
             ('literature/researcher', '论文研究角色', 'paper', [{'name': 'collect_evidence', 'description': '提取证据', 'input_schema': {}}]),
             ('literature/analyst', '分析角色', 'web', []),
             ('literature/reporter', '报告角色', 'web', []),
@@ -80,13 +81,13 @@ class ModelTests(unittest.TestCase):
         payload = {'question': '材料 {{ CURRENT_TIME }} {{ OUTPUT_SCHEMA }} {% include "private" %}'}
         clock_values = [
             datetime(2026, 12, 31, 23, 59, second, tzinfo=timezone(timedelta(hours=8)))
-            for second in range(53, 60)
+            for second in range(52, 60)
         ]
         with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.datetime') as clock:
             clock.now.side_effect = clock_values
             for index, (prompt_id, role, mode, tools) in enumerate(cases):
                 with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response(json.dumps(output))) as post:
-                    text_output = prompt_id in {'literature/planner', 'literature/researcher', 'literature/analyst', 'literature/reporter'}
+                    text_output = prompt_id in {'literature/planner', 'literature/route', 'literature/researcher', 'literature/analyst', 'literature/reporter'}
                     result = structured(prompt_id, payload, None if text_output else Output, template_context=self.context(role, mode, tools))
                 self.assertEqual(json.loads(result) if text_output else result.model_dump(), output)
                 body = post.call_args.kwargs['json']
@@ -94,7 +95,7 @@ class ModelTests(unittest.TestCase):
                 expected_time = clock_values[index].isoformat(timespec='seconds')
                 self.assertTrue(system['content'].startswith(f'---\nCURRENT_TIME: {expected_time}\n---\n'))
                 self.assertIn(role, system['content'])
-                if prompt_id != 'runtime/dispatcher':
+                if prompt_id not in {'runtime/dispatcher', 'literature/route', 'literature/planner'}:
                     self.assertIn(f'`{mode}`', system['content'])
                 for tool in tools:
                     self.assertNotIn(tool['name'], system['content'])
@@ -371,20 +372,21 @@ class ModelTests(unittest.TestCase):
         self.assertIn('tools', post.call_args.kwargs['json'])
         self.assertEqual(post.call_args.kwargs['json']['tool_choice'], 'auto')
 
-    def test_decision_stages_use_low_effort_and_4096_output_cap_but_writing_stages_are_uncapped(self):
+    def test_decision_stages_use_role_specific_output_caps_and_writing_stages_are_uncapped(self):
         config = {'base_url': 'https://decision-options.example/v1', 'model': 'test'}
         with patch('src.integrations.model.settings.model_config', return_value=config):
-            for prompt_id, payload in (
-                ('literature/background_investigator', {'phase': 'query'}),
-                ('literature/planner', {}),
-                ('literature/analyst', {}),
-                ('literature/researcher', {'phase': 'act'}),
+            for prompt_id, payload, cap in (
+                ('literature/background_investigator', {'phase': 'query'}, 8192),
+                ('literature/planner', {}, 8192),
+                ('literature/analyst', {}, 8192),
+                ('literature/route', {}, 4096),
+                ('literature/researcher', {'phase': 'act'}, 4096),
             ):
                 with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response()) as post:
                     structured(prompt_id, payload, Output, template_context=self.context())
                 request = post.call_args.kwargs['json']
                 self.assertEqual(request['reasoning_effort'], 'low')
-                self.assertEqual(request['max_completion_tokens'], 4096)
+                self.assertEqual(request['max_completion_tokens'], cap)
 
             for prompt_id, payload in (
                 ('runtime/dispatcher', {'phase': 'query'}),
@@ -453,7 +455,7 @@ class ModelTests(unittest.TestCase):
                     )
                 request = post.call_args.kwargs['json']
                 self.assertEqual(request['reasoning_effort'], 'low')
-                self.assertEqual(request['max_completion_tokens'], 4096)
+                self.assertEqual(request['max_completion_tokens'], 4096 if prompt_id == 'literature/researcher' else 8192)
 
     def test_explicit_effort_overrides_default_and_higher_effort_has_no_output_cap(self):
         config = {'base_url': 'https://explicit-effort.example/v1', 'model': 'test'}
@@ -475,7 +477,7 @@ class ModelTests(unittest.TestCase):
             )
         request = post.call_args.kwargs['json']
         self.assertEqual(request['reasoning_effort'], 'low')
-        self.assertEqual(request['max_completion_tokens'], 4096)
+        self.assertEqual(request['max_completion_tokens'], 8192)
 
     def test_optional_decision_parameters_retry_only_after_explicit_rejection_and_cache_support(self):
         config = {'base_url': 'https://option-compat.example/v1', 'model': 'test'}
@@ -496,7 +498,7 @@ class ModelTests(unittest.TestCase):
             structured('literature/planner', {}, Output, template_context=self.context())
 
         self.assertEqual(len(sent), 3)
-        self.assertEqual(sent[0]['max_completion_tokens'], 4096)
+        self.assertEqual(sent[0]['max_completion_tokens'], 8192)
         self.assertNotIn('max_completion_tokens', sent[1])
         self.assertNotIn('max_completion_tokens', sent[2])
         self.assertTrue(all(request['reasoning_effort'] == 'low' for request in sent))
@@ -585,8 +587,8 @@ class ModelTests(unittest.TestCase):
             headers={'content-type': 'text/event-stream'},
             content=(
                 'data: {"error":{"code":"invalid_parameter_error","param":null,'
-                '"message":"max_completion_tokens [4096] must be greater than '
-                'thinking_budget [8192]","type":"invalid_request_error"},"id":"evt-1"}\n\n'
+                '"message":"max_completion_tokens [8192] must be greater than '
+                'thinking_budget [10000]","type":"invalid_request_error"},"id":"evt-1"}\n\n'
             ),
         )
 
@@ -624,12 +626,12 @@ class ModelTests(unittest.TestCase):
 
         self.assertEqual((first.answer, second.answer), ('ok', 'ok'))
         self.assertEqual(len(sent), 4)
-        self.assertEqual(sent[0]['max_completion_tokens'], 4096)
+        self.assertEqual(sent[0]['max_completion_tokens'], 8192)
         self.assertEqual(sent[0]['reasoning_effort'], 'low')
         for request_body in sent[1:]:
             self.assertNotIn('max_completion_tokens', request_body)
             self.assertEqual(request_body['reasoning_effort'], 'low')
-        pair = 'reasoning_effort=low+max_completion_tokens=4096'
+        pair = 'reasoning_effort=low+max_completion_tokens=8192'
         self.assertTrue(model_client._parameter_is_known_unsupported(config, pair))
         self.assertFalse(model_client._parameter_is_known_unsupported({**config, 'model': 'other'}, pair))
         fallback_logs = [line for line in logs.output if 'model_option_fallback' in line]
@@ -655,7 +657,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(stream.call_count, 1)
         sent = stream.call_args.kwargs['json']
         self.assertEqual(sent['reasoning_effort'], 'low')
-        self.assertEqual(sent['max_completion_tokens'], 4096)
+        self.assertEqual(sent['max_completion_tokens'], 8192)
         self.assertEqual(len(model_client.UNSUPPORTED_REQUEST_PARAMS), 0)
 
     def test_rejected_default_effort_value_falls_back_without_disabling_other_effort_levels(self):
@@ -795,11 +797,66 @@ class ModelTests(unittest.TestCase):
 
     def test_incomplete_markdown_is_rejected(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
-        for reason in ('length', 'content_filter'):
-            response = self.response('partial', finish_reason=reason)
-            with self.subTest(reason=reason), patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.httpx.post', return_value=response):
+        for prompt_id, content, reason in (
+            ('literature/reporter', 'partial', 'length'),
+            ('literature/researcher', 'partial', 'length'),
+            ('literature/analyst', 'partial', 'length'),
+            ('literature/planner', 'partial', 'content_filter'),
+            ('literature/planner', '', 'length'),
+            ('literature/planner', '  ', 'length'),
+        ):
+            response = self.response(content, finish_reason=reason)
+            with self.subTest(prompt_id=prompt_id, content=content, reason=reason), \
+                 patch('src.integrations.model.settings.model_config', return_value=config), \
+                 patch('src.integrations.model.httpx.post', return_value=response):
                 with self.assertRaises(StructuredOutputError):
-                    structured('literature/reporter', {}, None, template_context=self.context())
+                    structured(prompt_id, {}, None, template_context=self.context())
+
+    def test_truncated_planner_preserves_visible_text_in_stream_and_json_responses(self):
+        config = {'base_url': 'https://partial-planner.example/v1', 'model': 'test'}
+        prefix = '# 研究计划\n\n先核实原始数据，再比较不同'
+        request = httpx.Request('POST', config['base_url'] + '/chat/completions')
+        chunks = [
+            {'choices': [{'delta': {'content': prefix[:10]}}]},
+            {'choices': [{'delta': {'content': prefix[10:]}}]},
+            {'choices': [{'delta': {}, 'finish_reason': 'length'}]},
+        ]
+        encoded = ''.join('data: ' + json.dumps(chunk, ensure_ascii=False) + '\n\n' for chunk in chunks) + 'data: [DONE]\n\n'
+        streamed = httpx.Response(200, request=request, headers={'content-type': 'text/event-stream'}, content=encoded.encode('utf-8'))
+        events, details = [], []
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            with patch('src.integrations.model.httpx.post', return_value=self.response(prefix, finish_reason='length')) as post:
+                direct = structured('literature/planner', {}, None, template_context=self.context())
+            with patch('src.integrations.model.httpx.stream', return_value=nullcontext(streamed)) as stream:
+                result = structured('literature/planner', {}, None, template_context=self.context(),
+                                    on_stream=lambda kind, data: events.append((kind, data)),
+                                    on_detail=lambda *args: details.append(args))
+        self.assertIsInstance(direct, model_client.TruncatedPlan)
+        self.assertIsInstance(result, model_client.TruncatedPlan)
+        self.assertEqual(direct.text, prefix)
+        self.assertEqual(result.text, prefix)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual(''.join(data.get('text', '') for kind, data in events if kind == 'model.delta'), prefix)
+        self.assertEqual(events[-1][0], 'model.completed')
+        self.assertTrue(any(direction == 'output' and data.get('truncated') is True
+                            for direction, _, _, data, _ in details))
+
+    def test_truncated_native_action_and_background_remain_invalid(self):
+        config = {'base_url': 'https://strict-partial.example/v1', 'model': 'test'}
+        native = self.response('', finish_reason='length')
+        partial_json = self.response('{"answer":"partial', finish_reason='length')
+        with patch('src.integrations.model.settings.model_config', return_value=config):
+            with patch('src.integrations.model.httpx.post', return_value=native) as post:
+                with self.assertRaises(StructuredOutputError):
+                    structured('literature/researcher', {'phase': 'act'}, ResearchActionOutput,
+                               template_context=self.context(), native_tools=self.native_tools())
+                self.assertEqual(post.call_count, 1)
+            with patch('src.integrations.model.httpx.post', return_value=partial_json) as post:
+                with self.assertRaises(StructuredOutputError):
+                    structured('literature/background_investigator', {'phase': 'query'}, Output,
+                               template_context=self.context())
+                self.assertEqual(post.call_count, 1)
 
     def test_planner_gets_local_filenames_and_role_without_rendering_context_values_again(self):
         config = {'base_url': 'https://example.invalid/v1', 'model': 'test'}
@@ -816,7 +873,7 @@ class ModelTests(unittest.TestCase):
         system, user = post.call_args.kwargs['json']['messages']
         self.assertIn('科研计划制定者', system['content'])
         self.assertIn('paper', system['content'])
-        self.assertIn('实验条件', system['content'])
+        self.assertIn('研究要求', system['content'])
         self.assertNotIn('search_papers', system['content'])
         self.assertNotIn('只检索允许范围内的论文', system['content'])
         self.assertNotIn('<研究图表>.pdf {{ CURRENT_TIME }}', system['content'])

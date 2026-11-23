@@ -95,9 +95,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
         role = match.group(1) if match else ''
         if (request.get('model') == 'fixture-thinking-budget'
                 and request.get('reasoning_effort') == 'low'
-                and request.get('max_completion_tokens') == 4096):
+                and request.get('max_completion_tokens') == 8192):
             error = {'error': {'code': 'invalid_parameter_error', 'param': None,
-                               'message': 'max_completion_tokens [4096] must be greater than thinking_budget [8192]',
+                               'message': 'max_completion_tokens [8192] must be greater than thinking_budget [10000]',
                                'type': 'invalid_request_error'}}
             self.send_response(400)
             self.send_header('Content-Type', 'text/event-stream;charset=utf-8')
@@ -105,7 +105,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.wfile.write(f'data: {json.dumps(error)}\n\n'.encode('utf-8'))
             return
         result = self._model_result(role, payload, system)
-        if role == 'researcher' and payload.get('phase') == 'act':
+        if (role == 'researcher' and payload.get('phase') == 'act') or role == 'route':
             assert request.get('tools') and request.get('tool_choice') == 'auto'
             assert 'response_format' not in request
             arguments = result.get('arguments', {})
@@ -159,7 +159,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
             return
         self._send_json({
-            'choices': [{'message': {'content': content}}],
+            'choices': [{'message': {'content': content},
+                         'finish_reason': 'length' if role == 'planner' and 'partial-planner-fixture' in payload.get('question', '') else 'stop'}],
             'usage': {
                 'prompt_tokens': prompt_tokens,
                 'completion_tokens': completion_tokens,
@@ -223,20 +224,23 @@ class FixtureHandler(BaseHTTPRequestHandler):
             }
 
         if role == 'planner':
+            if 'partial-planner-fixture' in folded:
+                return '# 研究计划\n\n## 研究要求\n- 查证准确率及其来源\n\n## 研究步骤\n- 检索原始记录并核对实验'
+            return '# 研究计划\n\n## 研究要求\n- 查证准确率及其来源\n\n## 研究步骤\n- 收集并核对与问题直接相关的证据'
+
+        if role == 'route':
             allowed = payload.get('allowed_sources') or ['paper']
-            preferred = payload.get('source_preference') or ('web' if payload.get('source') == 'web' else 'paper')
+            preferred = payload.get('current_source') or allowed[0]
             source = preferred if preferred in allowed else allowed[0]
             count = payload.get('round_count', 0)
             two_rounds = 'two-rounds' in folded or 'context-cutoff-fixture' in folded
-            control = {
-                'requirements': ['查证准确率及其来源'],
-                'plan': ['收集并核对与问题直接相关的证据'],
-                'source': source,
-                'action': 'research' if count == 0 or (two_rounds and count == 1) else 'report',
-                'rationale': '使用隔离 HTTP 验收计划。',
-                'completion_confirmed': False,
-            }
-            return '核查准确率及其来源。\n\n```tufa-control\n' + json.dumps(control, ensure_ascii=False) + '\n```'
+            arguments = {'source': source}
+            if count:
+                action = 'research' if two_rounds and count == 1 else 'report'
+                arguments.update(action=action, completion_confirmed=action == 'report')
+                if two_rounds and count == 1:
+                    arguments['next_steps'] = ['核查另一项独立来源的准确率结果']
+            return {'tool_name': 'select_research_route', 'arguments': arguments}
 
         if role == 'researcher':
             candidates = payload.get('current_candidates', [])
@@ -288,7 +292,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 'sufficient': has_evidence,
                 'covered_requirements': ['准确率'] if has_evidence else [],
                 'gaps': [] if has_evidence else ['没有取得可核查证据'],
-                'next_steps': [] if has_evidence else ['更换查询或来源后重新检索'],
+                'next_steps': [] if has_evidence or 'research-failure' in folded else ['更换查询或来源后重新检索'],
                 'unresolved_contradictions': [],
                 'evidence_reliability_confirmed': has_evidence,
                 'important_conclusions_cross_validated': has_evidence,

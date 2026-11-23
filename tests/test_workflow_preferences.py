@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from src.agents import literature as workflow
-from markdown_fixture import plan, review
+from src.integrations.model import TruncatedPlan
+from markdown_fixture import plan, review, route
 
 
 class ResearchPreferenceTests(unittest.TestCase):
@@ -88,7 +89,9 @@ class ResearchPreferenceTests(unittest.TestCase):
             if prompt_id == "literature/planner":
                 round_count = payload["round_count"]
                 planner_rounds.append(round_count)
-                return plan(requirements=["answer"], plan=["answer the question"], source="paper", action="research")
+                return plan(requirements=["answer"], plan=["answer the question"])
+            if prompt_id == "literature/route":
+                return route('paper')
             if prompt_id == "literature/researcher":
                 if payload["phase"] == "act":
                     if not payload["calls_remaining"]:
@@ -188,19 +191,141 @@ class ResearchPreferenceTests(unittest.TestCase):
             "candidate_pools": {"paper": [], "web": []},
         }
 
+    def test_initial_fixed_source_skips_route_and_accepts_free_form_markdown(self):
+        state = self.state(source='web', project_id=1)
+        markdown = '# 调研\n\n先核查原始页面。\n\n### 后续\n对照独立资料。'
+        with patch.object(workflow, '_model', return_value=markdown) as model:
+            result = workflow._planner(state, None)
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(result['plan']['body'], markdown)
+        self.assertEqual(result['core_requirements'], ['uncertainty calibration'])
+        self.assertEqual(result['research_route']['source'], 'web')
+        self.assertEqual(result['research_route']['action'], 'research')
+
+    def test_truncated_plan_retains_text_and_only_complete_requirements(self):
+        cases = (
+            ('# 计划\n\n## 研究要求\n- 核实数据来源\n- 比较不同', ['climate model uncertainty']),
+            ('# 计划\n\n## 研究要求\n- 核实数据来源\n- 比较不同方法\n\n## 研究步骤\n- 核实原始',
+             ['核实数据来源', '比较不同方法']),
+            ('# 计划\n\n```markdown\n## 研究要求\n- 虚假要求', ['climate model uncertainty']),
+        )
+        for markdown, requirements in cases:
+            with self.subTest(markdown=markdown):
+                state = self.state(source='local', project_id=1)
+                state.pop('plan')
+                with patch.object(workflow, '_model', return_value=TruncatedPlan(markdown)):
+                    result = workflow._planner(state, None)
+                self.assertEqual(result['plan']['body'], markdown)
+                self.assertTrue(result['plan']['truncated'])
+                self.assertEqual(result['core_requirements'], requirements)
+                self.assertEqual(result['research_route']['source'], 'paper')
+                self.assertEqual(result['research_route']['action'], 'research')
+                self.assertFalse(any(item.get('code') == 'model_failed' for item in result['errors']))
+
+                analyst_inputs = []
+                def model(current, prompt_id, payload, schema, **kwargs):
+                    analyst_inputs.append(payload)
+                    return review(sufficient=False, gaps=['缺少证据'])
+                with patch.object(workflow, '_model', side_effect=model):
+                    workflow._analyst({**state, **result, 'current_draft': ''}, None, None)
+                self.assertEqual(analyst_inputs[0]['requirements'], requirements)
+
+    def test_researcher_receives_truncated_plan_without_expanding_source_scope(self):
+        state = self.state(source='local', project_id=1)
+        state.pop('plan')
+        markdown = '# 计划\n\n检索准确率并核对实验条件，然后比较'
+        with patch.object(workflow, '_model', return_value=TruncatedPlan(markdown)):
+            plan_result = workflow._planner(state, None)
+        decisions = []
+        def model(current, prompt_id, payload, schema, **kwargs):
+            if payload.get('phase') == 'act':
+                decisions.append((payload, kwargs['native_tools']))
+                return workflow.ResearchActionOutput(action='finish')
+            return '> 局限：暂无可核查证据。'
+        with patch.object(workflow, '_model', side_effect=model), \
+             patch.object(workflow, 'structured_input_units', return_value=1), \
+             patch('src.tools.local_markdown.list_local_domains', return_value=['测试领域']):
+            workflow._researcher({**state, **plan_result}, None)
+        self.assertTrue(decisions)
+        self.assertEqual(decisions[0][0]['research_plan'], markdown)
+        self.assertTrue(decisions[0][0]['research_plan_truncated'])
+        self.assertNotIn('search_web', [tool['name'] for tool in decisions[0][1]])
+
+    def test_long_plan_is_trimmed_only_in_decision_input_to_fit_budget(self):
+        state = self.state(source='local', project_id=1)
+        markdown = '# 计划\n' + '查证实验来源。' * 200
+        state.update(plan={'body': markdown, 'truncated': True}, current_source='paper')
+        decisions = []
+        def model(current, prompt_id, payload, schema, **kwargs):
+            if payload.get('phase') == 'act':
+                decisions.append(payload.copy())
+                return workflow.ResearchActionOutput(action='finish')
+            return '> 局限：暂无可核查证据。'
+        def estimate(prompt_id, payload, schema, **kwargs):
+            return 100 + len(payload['research_plan'])
+        budget = {**workflow.DEPTH_BUDGETS['standard'], 'decision_input_units': 150,
+                  'cumulative_decision_input_units': 150}
+        with patch.object(workflow, '_model', side_effect=model), \
+             patch.object(workflow, 'structured_input_units', side_effect=estimate), \
+             patch('src.tools.local_markdown.list_local_domains', return_value=['测试领域']), \
+             patch.dict(workflow.DEPTH_BUDGETS, {'standard': budget}):
+            result = workflow._researcher(state, None)
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]['research_plan'], markdown[:49])
+        self.assertTrue(decisions[0]['research_plan_truncated'])
+        self.assertEqual(state['plan']['body'], markdown)
+        self.assertIn('research_plan_context_truncated', result['warnings'])
+
+    def test_initial_auto_selects_source_and_invalid_source_falls_back(self):
+        state = self.state(source='auto', project_id=1)
+        state.pop('plan')
+        markdown = '# 范围\n\n自由形式的计划。'
+        with patch.object(workflow, '_model', side_effect=[markdown, route('web', initial=True)]) as model:
+            result = workflow._planner(state, None)
+        tool = model.call_args_list[1].kwargs['native_tools'][0]
+        self.assertEqual(tool['name'], 'select_research_route')
+        self.assertEqual(set(tool['input_schema']['properties']), {'source'})
+        self.assertEqual(tool['input_schema']['required'], ['source'])
+        self.assertEqual(result['research_route']['source'], 'web')
+        self.assertEqual(result['research_route']['action'], 'research')
+        self.assertEqual(result['core_requirements'], ['climate model uncertainty'])
+
+        state['research']['source'] = 'local'
+        state['rounds'] = [{'plan': ['first search'], 'queries': []}]
+        state['current_review'] = {'sufficient': False, 'next_steps': ['check a separate result']}
+        with patch.object(workflow, '_model', side_effect=[markdown, route('web', 'report', True)]):
+            result = workflow._planner(state, None)
+        self.assertEqual(result['research_route']['source'], 'paper')
+        self.assertEqual(result['research_route']['action'], 'research')
+        self.assertEqual(result['errors'][-1]['code'], 'route_failed')
+
+    def test_standard_report_claim_without_evidence_continues_with_analyst_step(self):
+        state = self.deep_planner_state(self.deep_review(
+            next_steps=['Check an independent source for requirement B'],
+        ))
+        state['research']['research_depth'] = 'standard'
+        state['evidence_pool'] = []
+        markdown = '# 调研\n\n继续核查。'
+        with patch.object(workflow, '_model', side_effect=[markdown, route('paper', 'report', True)]):
+            result = workflow._planner(state, None)
+        self.assertEqual(result['research_route']['action'], 'research')
+        self.assertFalse(result['research_route']['completion_confirmed'])
+        self.assertEqual(result['current_plan'], ['Check an independent source for requirement B'])
+        self.assertEqual(result['research_stop_reason'], '')
+
     def test_deep_review_can_end_early_only_after_all_core_checks_pass(self):
         state = self.deep_planner_state(self.deep_review())
-        with patch.object(workflow, "_model", return_value=plan(
-            requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=True,
-        )):
+        with patch.object(workflow, "_model", side_effect=[
+            plan(requirements=["requirement A", "requirement B"]), route('paper', 'report', True),
+        ]):
             result = workflow._planner(state, None)
 
         self.assertTrue(workflow._review_is_sufficient(state, state["current_review"]))
-        self.assertEqual(result["plan"]["action"], "report")
+        self.assertEqual(result["research_route"]["action"], "report")
         self.assertEqual(result["research_stop_reason"], "sufficient")
-        with patch.object(workflow, "_model", return_value=plan(
-            requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=False,
-        )):
+        with patch.object(workflow, "_model", side_effect=[
+            plan(requirements=["requirement A", "requirement B"]), route('paper', 'report', False),
+        ]):
             unconfirmed = workflow._planner(state, None)
         self.assertNotEqual(unconfirmed["research_stop_reason"], "sufficient")
         self.assertFalse(workflow._review_is_sufficient(
@@ -218,13 +343,13 @@ class ResearchPreferenceTests(unittest.TestCase):
             important_conclusions_cross_validated=False,
         )
         state = self.deep_planner_state(review)
-        with patch.object(workflow, "_model", return_value=plan(
-            requirements=["requirement A", "requirement B"], plan=[], source="paper", action="report", completion_confirmed=True,
-        )):
+        with patch.object(workflow, "_model", side_effect=[
+            plan(requirements=["requirement A", "requirement B"]), route('paper', 'report', True),
+        ]):
             result = workflow._planner(state, None)
 
-        self.assertEqual(result["plan"]["action"], "research")
-        self.assertEqual(result["current_plan"], review["next_steps"])
+        self.assertEqual(result["research_route"]["action"], "research")
+        self.assertTrue(result["current_plan"])
         self.assertEqual(result["research_stop_reason"], "")
 
     def test_budget_stop_reason_is_sent_to_reporter_without_an_automatic_footer(self):

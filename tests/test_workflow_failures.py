@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents import literature as workflow
-from markdown_fixture import plan, review, draft as draft_text, section, claim
+from markdown_fixture import plan, review, route, draft as draft_text, section, claim
 from src.infrastructure.diagnostics import diagnostic_scope
 from src.integrations.model import ModelServiceError
 
@@ -95,6 +95,9 @@ class WorkflowFailureTests(unittest.TestCase):
 
         retrieve = retrieve or default_retrieve
         def adapted_model(prompt_id, payload, schema, **kwargs):
+            if prompt_id == 'literature/route':
+                allowed = payload['allowed_sources']
+                return route(allowed[0], 'report', False, initial=payload['round_count'] == 0)
             result = model(prompt_id, payload, schema, **kwargs)
             if prompt_id == "literature/researcher" and payload.get("phase") == "draft" and isinstance(result, SimpleNamespace):
                 return result.draft
@@ -128,8 +131,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source="paper", selected_candidate_ids=[chosen["candidate_id"]])
                 if prompt_id == "literature/planner":
                     return plan(
-                        requirements=["查找支持资料"], plan=["检索论文"], source="paper",
-                        action="research" if payload["round_count"] == 0 else "report",
+                        requirements=["查找支持资料"], plan=["检索论文"],
                     )
                 if prompt_id == "literature/researcher":
                     researcher_calls.append((payload, kwargs["template_context"], kwargs.get("native_tools")))
@@ -266,8 +268,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source="paper", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
                     return plan(
-                        requirements=["检查准确率"], plan=["阅读论文"], source="paper",
-                        action="research" if payload["round_count"] == 0 else "report",
+                        requirements=["检查准确率"], plan=["阅读论文"],
                     )
                 if prompt_id == "literature/researcher":
                     self.researcher_actions += 1
@@ -346,8 +347,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source="paper", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
                     return plan(
-                        requirements=["检查相关研究"], plan=["检索并取证"], source="paper",
-                        action="research" if payload["round_count"] == 0 else "report",
+                        requirements=["检查相关研究"], plan=["检索并取证"],
                     )
                 if prompt_id == "literature/researcher":
                     self.researcher_actions += 1
@@ -430,8 +430,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source="web", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
                     return plan(
-                        requirements=["读取网页正文"], plan=["读取网页并提取证据"], source="web",
-                        action="research" if payload["round_count"] == 0 else "report",
+                        requirements=["读取网页正文"], plan=["读取网页并提取证据"],
                     )
                 if prompt_id == "literature/researcher":
                     researcher_payloads.append(payload)
@@ -524,8 +523,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source="web", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
                     return plan(
-                        requirements=["读取网页正文"], plan=["读取网页"], source="web",
-                        action="research" if payload["round_count"] == 0 else "report",
+                        requirements=["读取网页正文"], plan=["读取网页"],
                     )
                 if prompt_id == "literature/researcher":
                     if payload["phase"] == "act":
@@ -580,7 +578,7 @@ class WorkflowFailureTests(unittest.TestCase):
                     return workflow.BackgroundOutput(source="web", selected_candidate_ids=[candidate["candidate_id"]])
                 if prompt_id == "literature/planner":
                     return plan(
-                        requirements=["读取网页正文"], plan=["逐段读取网页"], source="web", action="research",
+                        requirements=["读取网页正文"], plan=["逐段读取网页"],
                     )
                 if prompt_id == "literature/researcher":
                     schemas.append((payload["phase"], schema, kwargs.get("native_tools")))
@@ -610,7 +608,6 @@ class WorkflowFailureTests(unittest.TestCase):
         original_estimator = workflow.structured_input_units
 
         def measure_actual_input(prompt_id, payload, schema, *, template_context=None, native_tools=None):
-            estimated_native_tools.append(native_tools)
             units = original_estimator(
                 prompt_id,
                 payload,
@@ -618,11 +615,16 @@ class WorkflowFailureTests(unittest.TestCase):
                 template_context=template_context,
                 native_tools=native_tools,
             )
-            measured_units.append(units)
-            # Set the cumulative ceiling to the exact rendered-input total at
-            # the third researcher decision. Its equality must stop the call.
-            if len(measured_units) == 3:
-                decision_budget["cumulative_decision_input_units"] = sum(measured_units)
+            if len(measured_units) < 3:
+                estimated_native_tools.append(native_tools)
+                measured_units.append(units)
+                if len(measured_units) == 3:
+                    empty_plan_units = original_estimator(
+                        prompt_id, {**payload, 'research_plan': '', 'research_plan_truncated': True}, schema,
+                        template_context=template_context, native_tools=native_tools,
+                    )
+                    # Even the fixed input overhead consumes the remaining budget.
+                    decision_budget["cumulative_decision_input_units"] = sum(measured_units[:2]) + empty_plan_units
             return units
 
         stages = []
