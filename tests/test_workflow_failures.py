@@ -608,7 +608,6 @@ class WorkflowFailureTests(unittest.TestCase):
         original_estimator = workflow.structured_input_units
 
         def measure_actual_input(prompt_id, payload, schema, *, template_context=None, native_tools=None):
-            estimated_native_tools.append(native_tools)
             units = original_estimator(
                 prompt_id,
                 payload,
@@ -616,11 +615,16 @@ class WorkflowFailureTests(unittest.TestCase):
                 template_context=template_context,
                 native_tools=native_tools,
             )
-            measured_units.append(units)
-            # Set the cumulative ceiling to the exact rendered-input total at
-            # the third researcher decision. Its equality must stop the call.
-            if len(measured_units) == 3:
-                decision_budget["cumulative_decision_input_units"] = sum(measured_units)
+            if len(measured_units) < 3:
+                estimated_native_tools.append(native_tools)
+                measured_units.append(units)
+                if len(measured_units) == 3:
+                    empty_plan_units = original_estimator(
+                        prompt_id, {**payload, 'research_plan': '', 'research_plan_truncated': True}, schema,
+                        template_context=template_context, native_tools=native_tools,
+                    )
+                    # Even the fixed input overhead consumes the remaining budget.
+                    decision_budget["cumulative_decision_input_units"] = sum(measured_units[:2]) + empty_plan_units
             return units
 
         stages = []

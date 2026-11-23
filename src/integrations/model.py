@@ -7,6 +7,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
@@ -47,6 +48,8 @@ DEFAULT_TEMPLATE_CONTEXT = {
 # These nodes return bounded decisions or tool choices. Writing stages are left
 # uncapped so a valid report or evidence-backed draft is not cut off.
 DECISION_OUTPUT_CAP = 4096
+LONG_DECISION_OUTPUT_CAP = 8192
+
 DECISION_PROMPTS = frozenset({
     'literature/background_investigator',
     'literature/planner',
@@ -161,6 +164,11 @@ class StructuredOutputError(RuntimeError):
     def __init__(self, message, *, category='invalid'):
         super().__init__(message)
         self.category = category
+
+
+@dataclass(frozen=True)
+class TruncatedPlan:
+    text: str
 
 
 def _safe_validation_errors(exc, json_schema):
@@ -315,7 +323,11 @@ def _decision_request_options(prompt_id, payload, model_options):
     # remains capped for bounded decision stages in every depth profile.
     if bounded_decision and (not explicit_effort or str(explicit_effort).lower() == 'low'):
         if str(effort or 'low').lower() == 'low':
-            options['max_completion_tokens'] = DECISION_OUTPUT_CAP
+            options['max_completion_tokens'] = (
+                LONG_DECISION_OUTPUT_CAP if prompt_id in {
+                    'literature/background_investigator', 'literature/planner', 'literature/analyst'
+                } else DECISION_OUTPUT_CAP
+            )
     return options
 
 
@@ -1024,12 +1036,20 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                     raise
                 result = schema.model_validate_json(repaired, strict=True)
             else:
-                if schema is None and (not isinstance(content, str) or not content.strip() or finish_reason in ('length', 'content_filter')):
-                    raise ValueError('incomplete text response')
+                if schema is None:
+                    if not isinstance(content, str) or not content.strip() or finish_reason == 'content_filter':
+                        raise ValueError('incomplete text response')
+                    if finish_reason == 'length':
+                        if prompt_id != 'literature/planner':
+                            raise ValueError('incomplete text response')
+                        result = TruncatedPlan(content)
                 if native_tools is None and schema is not None:
                     json.loads(content, object_pairs_hook=_json_without_duplicate_keys,
                                parse_constant=_reject_json_constant)
             completed = {'attempt': attempt, 'phase': phase}
+            truncated = isinstance(result, TruncatedPlan)
+            if truncated:
+                completed['truncated'] = True
             if repaired is not None:
                 logger.info('model_call repaired run_id=%s prompt_id=%s phase=%s attempt=%d',
                             run_id if run_id is not None else 'na', prompt_id, phase, attempt)
@@ -1037,12 +1057,12 @@ def structured(prompt_id, payload, schema, *, model_options=None, template_conte
                 for secret in secrets:
                     display = display.replace(secret, '[REDACTED]')
                 completed['text'] = display
-            logger.info('model_call completed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d %s',
+            logger.info('model_call completed run_id=%s prompt_id=%s phase=%s attempt=%d elapsed_ms=%d status=%d truncated=%s %s',
                         run_id if run_id is not None else 'na', prompt_id, phase, attempt,
                         int((time.monotonic() - attempt_started) * 1000), response.status_code,
-                        _usage_log_fields(usage))
+                        truncated, _usage_log_fields(usage))
             _emit_stream(on_stream, 'model.completed', completed)
-            detail('output', {'content': content, 'tool_decision': native_decision, 'repaired_content': repaired})
+            detail('output', {'content': content, 'tool_decision': native_decision, 'repaired_content': repaired, 'truncated': truncated})
             return result
         except httpx.HTTPStatusError as exc:
             _emit_stream(on_stream, 'model.failed', {'attempt': attempt, 'phase': phase})

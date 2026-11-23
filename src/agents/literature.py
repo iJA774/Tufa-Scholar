@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from src.agents.report import numbered_references, validate_claim, validate_markdown
 from src.integrations.web_page import WebPageError
 from src.integrations.web_search import WebSearchError
-from src.integrations.model import ModelServiceError, StructuredOutputError, structured, structured_input_units
+from src.integrations.model import ModelServiceError, StructuredOutputError, TruncatedPlan, structured, structured_input_units
 from src.infrastructure.diagnostics import diagnostic_context
 from src.literature.keywords import relevance_score, relevance_terms
 from src.literature.retrieval import _candidate_ids, rank_candidates
@@ -284,6 +284,7 @@ class State(TypedDict, total=False):
     research_local_actions_used: int
     research_decision_input_units: int
     research_context_limit_reached: bool
+    round_plan_prefix_used: bool
     research_stop_reason: str
     errors: list
     warnings: list
@@ -1585,14 +1586,15 @@ def _planner_background_candidates(state):
     return result
 
 
-def _select_research_route(state, body, allowed, reference_mode, core_requirements, errors):
+def _select_research_route(state, body, allowed, reference_mode, core_requirements, errors, truncated=False):
     rounds = state.get("rounds", [])
     route = {"source": reference_mode, "action": "research", "completion_confirmed": False}
     if rounds or (state["research"]["source"] == "auto" and len(allowed) > 1):
         specs = [{"name": "select_research_route", "description": "选择本轮研究渠道及是否收束。", "input_schema": (RouteOutput if rounds else InitialRouteOutput).model_json_schema()}]
         try:
             decision = _model(state, "literature/route", {"question": state["research"]["query"],
-                "research_plan": body, "allowed_sources": allowed, "current_source": reference_mode,
+                "research_plan": body, "research_plan_truncated": truncated,
+                "allowed_sources": allowed, "current_source": reference_mode,
                 "round_count": len(rounds),
                 "review": state.get("current_review", {}), "requirements": core_requirements},
                 ResearchActionOutput, node_role="route", search_mode=reference_mode,
@@ -1652,21 +1654,24 @@ def _planner(state, on_stage):
     payload["background"].update({key: state.get("background", {}).get(key) for key in
         ("research_scope", "confirmed_background", "dimensions", "controversies") if key in state.get("background", {})})
     errors = list(state.get("errors", []))
+    truncated = False
     try:
         body = _model(state, "literature/planner", payload, None, node_role="planner",
                       search_mode=reference_mode, available_tools=[])
+        if isinstance(body, TruncatedPlan):
+            body, truncated = body.text, True
         if not isinstance(body, str) or not body.strip():
             raise StructuredOutputError("研究计划为空")
     except (ModelServiceError, StructuredOutputError):
         body = "围绕原问题和已有背景检索可核验证据，逐项核对研究要求与证据缺口。"
         errors.append(_safe_error("planner", "model_failed", "规划模型不可用，按当前来源继续有限研究。"))
     if not core_requirements:
-        text_without_code = re.sub(r"(?ms)^\s*(```+|~~~+)[^\n]*\n.*?^\s*\1\s*$", "", body)
+        text_without_code = re.sub(r"(?ms)^\s*(```+|~~~+)[^\n]*\n.*?(?:^\s*\1\s*$|\Z)", "", body)
         section = re.search(r"(?im)^#{1,6}\s*[^\n]*(?:研究要求|问题要求|requirements)[^\n]*\n(.*?)(?=^#{1,6}\s|\Z)", text_without_code, re.DOTALL)
-        if section:
+        if section and (not truncated or section.end() < len(text_without_code)):
             core_requirements = _clean_labels(re.findall(r"(?m)^\s*(?:[-*+]\s+|\d+[.、]\s*)(.+)$", section.group(1)))
         core_requirements = core_requirements or [state["research"]["query"][:500]]
-    route = _select_research_route(state, body, allowed, reference_mode, core_requirements, errors)
+    route = _select_research_route(state, body, allowed, reference_mode, core_requirements, errors, truncated=truncated)
     stop_reason = ""
     selected_steps = []
     if not rounds:
@@ -1688,7 +1693,7 @@ def _planner(state, on_stage):
     route["rationale"] = ("核心要求已覆盖，证据审查通过。" if stop_reason == "sufficient" else
                           "没有新的可执行补查方向，报告将说明未解决的缺口。" if stop_reason else
                           "按当前研究方向继续检索和核验。")
-    data = {"body": body, "plan": steps}
+    data = {"body": body, "plan": steps, "truncated": truncated}
 
     return {
         "plan": data,
@@ -1797,13 +1802,33 @@ def _log_research_stop(reason, *, failed_reads, tool_actions, consecutive_failur
     )
 
 
+def _fit_research_plan(payload, measure, available_units):
+    """Fit a plan prefix strictly inside the remaining decision budget."""
+    full_plan = payload["research_plan"]
+    if not full_plan:
+        return None
+    payload["research_plan_truncated"] = True
+    low, high = 0, len(full_plan)
+    while low < high:
+        middle = (low + high + 1) // 2
+        payload["research_plan"] = full_plan[:middle]
+        if measure() < available_units:
+            low = middle
+        else:
+            high = middle - 1
+    if not low:
+        return None
+    payload["research_plan"] = full_plan[:low]
+    return measure()
+
+
 def _researcher(state, on_stage):
     _emit(on_stage, "researcher")
     mode = state.get("current_source", "paper")
     allowed_modes = _available_modes(state["research"])
     if mode not in allowed_modes:
         mode = allowed_modes[0]
-    state = {**state, "candidate_pools": {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}, "tool_results": [], "errors": list(state.get("errors", []))}
+    state = {**state, "candidate_pools": {key: list(value) for key, value in state.get("candidate_pools", {"paper": [], "web": []}).items()}, "tool_results": [], "errors": list(state.get("errors", [])), "warnings": list(state.get("warnings", []))}
     tried_queries = set()
     search_failures = 0
     consecutive_search_failures = 0
@@ -1824,6 +1849,7 @@ def _researcher(state, on_stage):
     actions_used = state.get("research_actions_used", 0)
     local_actions_used = state.get("research_local_actions_used", 0)
     decision_input_units = state.get("research_decision_input_units", 0)
+    plan_prefix_used = False
     budget = _budget(state)
     round_action_limit = budget["actions_per_round"]
     local_action_limit = _local_action_limit(state)
@@ -1865,6 +1891,7 @@ def _researcher(state, on_stage):
             "current_round": state.get("current_round", 1),
             "current_source": mode,
             "research_plan": (state.get("plan") or {}).get("body", ""),
+            "research_plan_truncated": bool((state.get("plan") or {}).get("truncated")),
             "follow_up_steps": state.get("current_plan", []),
             "requirements": state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []),
             "selected_candidate_ids": _background_summary_for_model(state.get("background", {})).get("selected_candidate_ids", []),
@@ -1886,13 +1913,25 @@ def _researcher(state, on_stage):
         if deep:
             payload["attempted_queries"] = [query[:200] for query in (previous_queries + round_search_queries)[-8:]]
         template_context = _model_template_context(state, mode, "researcher", prompt_tools)
-        input_units = structured_input_units(
-            "literature/researcher",
-            payload,
-            ResearchActionOutput,
-            template_context=template_context,
-            native_tools=native_tools,
+        def measure_input():
+            return structured_input_units(
+                "literature/researcher", payload, ResearchActionOutput,
+                template_context=template_context, native_tools=native_tools,
+            )
+
+        input_units = measure_input()
+        available_units = min(
+            budget["decision_input_units"],
+            budget["cumulative_decision_input_units"] - decision_input_units,
         )
+        if input_units >= available_units:
+            fitted_units = _fit_research_plan(payload, measure_input, available_units)
+            if fitted_units is not None:
+                input_units = fitted_units
+                plan_prefix_used = True
+                warnings = state.setdefault("warnings", [])
+                if "research_plan_context_truncated" not in warnings:
+                    warnings.append("research_plan_context_truncated")
         projected_input_units = decision_input_units + input_units
         if (
             input_units >= budget["decision_input_units"]
@@ -2129,6 +2168,7 @@ def _researcher(state, on_stage):
         "research_local_actions_used": state.get("research_local_actions_used", 0),
         "research_decision_input_units": state.get("research_decision_input_units", 0),
         "round_tool_actions": action_count + local_action_count,
+        "round_plan_prefix_used": plan_prefix_used,
         "round_search_queries": round_search_queries,
         "research_context_limit_reached": state.get("research_context_limit_reached", False),
         "errors": state.get("errors", []),
@@ -2532,6 +2572,8 @@ def _node_completion_data(node, state, patch):
             data["source"] = source
             data["route"] = source
         rationale = _safe_event_text(route.get("rationale"), 240)
+        if plan.get("truncated") and not patch.get("research_stop_reason", "").endswith("_exhausted"):
+            rationale = "研究计划输出达到长度上限，已保留生成的内容。"
         if rationale:
             data["message"] = rationale
         if plan.get("body") and not patch.get("research_stop_reason", "").endswith("_exhausted"):
@@ -2543,6 +2585,8 @@ def _node_completion_data(node, state, patch):
         data["source"] = state.get("current_source", "paper")
         evidence = patch.get("evidence_pool", state.get("evidence_pool", []))
         data["message"] = f"已整理 {len(evidence)} 条证据，提交本轮审查。"
+        if patch.get("round_plan_prefix_used"):
+            data["message"] += "研究决策输入受预算限制，已使用计划前缀。"
     elif node == "analyst":
         review = patch.get("current_review", state.get("current_review", {}))
         data["source"] = state.get("current_source", "paper")

@@ -95,9 +95,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
         role = match.group(1) if match else ''
         if (request.get('model') == 'fixture-thinking-budget'
                 and request.get('reasoning_effort') == 'low'
-                and request.get('max_completion_tokens') == 4096):
+                and request.get('max_completion_tokens') == 8192):
             error = {'error': {'code': 'invalid_parameter_error', 'param': None,
-                               'message': 'max_completion_tokens [4096] must be greater than thinking_budget [8192]',
+                               'message': 'max_completion_tokens [8192] must be greater than thinking_budget [10000]',
                                'type': 'invalid_request_error'}}
             self.send_response(400)
             self.send_header('Content-Type', 'text/event-stream;charset=utf-8')
@@ -159,7 +159,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
             return
         self._send_json({
-            'choices': [{'message': {'content': content}}],
+            'choices': [{'message': {'content': content},
+                         'finish_reason': 'length' if role == 'planner' and 'partial-planner-fixture' in payload.get('question', '') else 'stop'}],
             'usage': {
                 'prompt_tokens': prompt_tokens,
                 'completion_tokens': completion_tokens,
@@ -223,6 +224,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             }
 
         if role == 'planner':
+            if 'partial-planner-fixture' in folded:
+                return '# 研究计划\n\n## 研究要求\n- 查证准确率及其来源\n\n## 研究步骤\n- 检索原始记录并核对实验'
             return '# 研究计划\n\n## 研究要求\n- 查证准确率及其来源\n\n## 研究步骤\n- 收集并核对与问题直接相关的证据'
 
         if role == 'route':
