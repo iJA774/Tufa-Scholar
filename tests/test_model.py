@@ -68,6 +68,7 @@ class ModelTests(unittest.TestCase):
             ('literature/preprocesser', '分类角色', 'none', []),
             ('literature/background_investigator', '背景调查角色', 'none', [{'name': 'search_web', 'description': '网页检索', 'input_schema': {}}]),
             ('literature/planner', '计划角色', 'paper', [{'name': 'search_papers', 'description': '论文检索', 'input_schema': {}}]),
+            ('literature/route', '路由角色', 'paper', []),
             ('literature/researcher', '论文研究角色', 'paper', [{'name': 'collect_evidence', 'description': '提取证据', 'input_schema': {}}]),
             ('literature/analyst', '分析角色', 'web', []),
             ('literature/reporter', '报告角色', 'web', []),
@@ -80,13 +81,13 @@ class ModelTests(unittest.TestCase):
         payload = {'question': '材料 {{ CURRENT_TIME }} {{ OUTPUT_SCHEMA }} {% include "private" %}'}
         clock_values = [
             datetime(2026, 12, 31, 23, 59, second, tzinfo=timezone(timedelta(hours=8)))
-            for second in range(53, 60)
+            for second in range(52, 60)
         ]
         with patch('src.integrations.model.settings.model_config', return_value=config), patch('src.integrations.model.datetime') as clock:
             clock.now.side_effect = clock_values
             for index, (prompt_id, role, mode, tools) in enumerate(cases):
                 with self.subTest(prompt_id=prompt_id), patch('src.integrations.model.httpx.post', return_value=self.response(json.dumps(output))) as post:
-                    text_output = prompt_id in {'literature/planner', 'literature/researcher', 'literature/analyst', 'literature/reporter'}
+                    text_output = prompt_id in {'literature/planner', 'literature/route', 'literature/researcher', 'literature/analyst', 'literature/reporter'}
                     result = structured(prompt_id, payload, None if text_output else Output, template_context=self.context(role, mode, tools))
                 self.assertEqual(json.loads(result) if text_output else result.model_dump(), output)
                 body = post.call_args.kwargs['json']
@@ -94,7 +95,7 @@ class ModelTests(unittest.TestCase):
                 expected_time = clock_values[index].isoformat(timespec='seconds')
                 self.assertTrue(system['content'].startswith(f'---\nCURRENT_TIME: {expected_time}\n---\n'))
                 self.assertIn(role, system['content'])
-                if prompt_id != 'runtime/dispatcher':
+                if prompt_id not in {'runtime/dispatcher', 'literature/route', 'literature/planner'}:
                     self.assertIn(f'`{mode}`', system['content'])
                 for tool in tools:
                     self.assertNotIn(tool['name'], system['content'])
@@ -816,7 +817,7 @@ class ModelTests(unittest.TestCase):
         system, user = post.call_args.kwargs['json']['messages']
         self.assertIn('科研计划制定者', system['content'])
         self.assertIn('paper', system['content'])
-        self.assertIn('实验条件', system['content'])
+        self.assertIn('研究要求', system['content'])
         self.assertNotIn('search_papers', system['content'])
         self.assertNotIn('只检索允许范围内的论文', system['content'])
         self.assertNotIn('<研究图表>.pdf {{ CURRENT_TIME }}', system['content'])

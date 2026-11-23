@@ -24,6 +24,7 @@ PROMPT_IDS = frozenset({
     'literature/preprocesser',
     'literature/background_investigator',
     'literature/planner',
+    'literature/route',
     'literature/researcher',
     'literature/analyst',
     'literature/reporter',
@@ -49,6 +50,7 @@ DECISION_OUTPUT_CAP = 4096
 DECISION_PROMPTS = frozenset({
     'literature/background_investigator',
     'literature/planner',
+    'literature/route',
     'literature/analyst',
 })
 UNSUPPORTED_REQUEST_PARAMS = OrderedDict()
@@ -294,6 +296,7 @@ def _decision_request_options(prompt_id, payload, model_options):
         effort = {
             'literature/background_investigator': 'medium',
             'literature/planner': 'high',
+            'literature/route': 'low',
             'literature/researcher': 'medium' if isinstance(payload, dict) and payload.get('phase') == 'act' else (
                 'high' if isinstance(payload, dict) and payload.get('phase') == 'draft' else None
             ),

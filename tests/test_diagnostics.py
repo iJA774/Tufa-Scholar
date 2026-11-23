@@ -58,7 +58,8 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(replay([]), '诊断格式无效')
         self.assertEqual(replay({'context': []}), '诊断格式无效')
         invalid_plan = {'kind': 'model_validation', 'context': {'prompt_id': 'literature/planner'}, 'response': 'missing control'}
-        self.assertTrue(replay(invalid_plan).startswith('复现：'))
+        self.assertEqual(replay(invalid_plan), '未复现')
+        self.assertTrue(replay({**invalid_plan, 'response': ''}).startswith('复现：'))
 
     def test_write_failure_is_safe(self):
         with patch('src.infrastructure.diagnostics.data_directory', side_effect=OSError('sensitive')):

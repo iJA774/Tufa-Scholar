@@ -115,16 +115,12 @@ def _core_requirement_gaps(state, review):
 
 
 def _review_is_sufficient(state, review):
-    if not review.get("sufficient"):
-        return False
-    if _depth(state) != "deep":
-        return True
-    return not (
+    return bool(review.get("sufficient")) and not (
         _core_requirement_gaps(state, review)
         or review.get("gaps")
         or review.get("unresolved_contradictions")
         or not review.get("evidence_reliability_confirmed")
-        or not review.get("important_conclusions_cross_validated")
+        or (_depth(state) == "deep" and not review.get("important_conclusions_cross_validated"))
         or not _select_evidence(state, expanded=True)
     )
 
@@ -194,14 +190,17 @@ class BackgroundOutput(BaseModel):
     controversies: list[BackgroundFinding] = Field(default_factory=list, max_length=8)
 
 
-class PlannerOutput(BaseModel):
+class InitialRouteOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    requirements: list[str] = Field(default_factory=list, max_length=12)
-    plan: list[str] = Field(default_factory=list, max_length=8)
+    source: Literal["web", "paper"]
+
+
+class RouteOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     source: Literal["web", "paper"]
     action: Literal["research", "report"]
-    completion_confirmed: bool = False
-    rationale: str = Field(default="", max_length=1_000)
+    completion_confirmed: bool
+    next_steps: list[str] = Field(default_factory=list, max_length=8)
 
 
 class ResearchActionOutput(BaseModel):
@@ -264,6 +263,7 @@ class State(TypedDict, total=False):
     history: list
     background: dict
     plan: dict
+    research_route: dict
     current_plan: list
     current_source: str
     current_round: int
@@ -466,6 +466,8 @@ def _model(state, prompt_id, payload, schema, *, node_role, search_mode="none", 
     call_id = context.next_call_id()
 
     def on_stream(kind, data):
+        if node_role == "route":
+            return
         # The model adapter exposes only streamed assistant content. Keep the
         # workflow envelope small and never forward request prompts or options.
         if kind == "model.delta":
@@ -775,7 +777,7 @@ def _relevance_facets(state):
     research = state.get("research", {})
     facets = [research.get("query", "")]
     facets.extend(state.get("current_plan", []))
-    facets.extend((state.get("plan") or {}).get("requirements", []))
+    facets.extend(state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []))
     return [relevance_terms(value) for value in facets if isinstance(value, str) and value.strip()]
 
 
@@ -918,7 +920,7 @@ def _select_evidence(state, include_ids=None, *, expanded=False):
 
     facets = [state["research"]["query"]]
     facets.extend(state.get("current_plan", []))
-    facets.extend((state.get("plan") or {}).get("requirements", []))
+    facets.extend(state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []))
     for round_item in state.get("rounds", []):
         facets.extend(round_item.get("plan", []))
         review = round_item.get("review", {})
@@ -1550,30 +1552,19 @@ def _background_investigator(state, on_stage):
 
 
 def _fallback_plan(state):
-    background = state.get("background", {})
-    mode = background.get("source") or _preferred_mode(state["research"]["source"])
-    return {
-        "requirements": [state["research"]["query"][:500]],
-        "plan": ["围绕原问题和已有背景检索可核验资料"],
-        "source": mode,
-        "action": "research",
-        "rationale": "使用保守默认计划继续研究。",
-    }
+    return {"plan": ["围绕原问题和已有背景检索可核验资料"]}
 
 
 def _planner_stop(state, reason, rationale):
     data = dict(state.get("plan") or _fallback_plan(state))
-    deep = _depth(state) == "deep"
-    core = _clean_labels(state.get("core_requirements") or data.get("requirements") or [state["research"]["query"]]) if deep else []
-    if deep:
-        data["requirements"] = _clean_labels([*core, *data.get("requirements", [])])
-    data["action"] = "report"
-    data["completion_confirmed"] = False
-    data["rationale"] = rationale
+    core = _clean_labels(state.get("core_requirements") or data.get("requirements") or [state["research"]["query"]])
+    source = state.get("current_source") or data.get("source") or _preferred_mode(state["research"]["source"])
     return {
         "plan": data,
+        "research_route": {"source": source, "action": "report",
+                           "completion_confirmed": False, "rationale": rationale},
         "current_plan": data.get("plan", []),
-        "current_source": data.get("source", _preferred_mode(state["research"]["source"])),
+        "current_source": source,
         "core_requirements": core,
         "research_stop_reason": reason,
         "last_completed": "planner",
@@ -1592,6 +1583,32 @@ def _planner_background_candidates(state):
             view["summary"] = str(text)[:240]
         result.append(view)
     return result
+
+
+def _select_research_route(state, body, allowed, reference_mode, core_requirements, errors):
+    rounds = state.get("rounds", [])
+    route = {"source": reference_mode, "action": "research", "completion_confirmed": False}
+    if rounds or (state["research"]["source"] == "auto" and len(allowed) > 1):
+        specs = [{"name": "select_research_route", "description": "选择本轮研究渠道及是否收束。", "input_schema": (RouteOutput if rounds else InitialRouteOutput).model_json_schema()}]
+        try:
+            decision = _model(state, "literature/route", {"question": state["research"]["query"],
+                "research_plan": body, "allowed_sources": allowed, "current_source": reference_mode,
+                "round_count": len(rounds),
+                "review": state.get("current_review", {}), "requirements": core_requirements},
+                ResearchActionOutput, node_role="route", search_mode=reference_mode,
+                available_tools=[], native_tools=specs)
+            if decision.action != "tool" or decision.tool_name != "select_research_route":
+                raise StructuredOutputError("研究路由缺失")
+            if rounds:
+                route = RouteOutput.model_validate(decision.arguments, strict=True).model_dump()
+            else:
+                route["source"] = InitialRouteOutput.model_validate(decision.arguments, strict=True).source
+            if route["source"] not in allowed:
+                raise StructuredOutputError("研究来源超出范围")
+        except (ModelServiceError, StructuredOutputError, ValueError):
+            route = {"source": reference_mode, "action": "research", "completion_confirmed": False}
+            errors.append(_safe_error("planner", "route_failed", "路由决策不可用，采用保守研究方向。"))
+    return route
 
 
 def _planner(state, on_stage):
@@ -1616,102 +1633,68 @@ def _planner(state, on_stage):
             "round_budget_exhausted",
             "已达到研究轮次上限；报告将说明资源限制和仍未确认完成的研究要求。",
         )
-    core_requirements = (
-        _clean_labels(
-            state.get("core_requirements")
-            or (state.get("plan") or {}).get("requirements", [])
-            or ([state["research"]["query"][:500]] if rounds else [])
-        )
-        if _depth(state) == "deep" else []
-    )
+    core_requirements = _clean_labels(state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []))
     reference_mode = state.get("current_source") or state.get("background", {}).get("source")
+    if not rounds and state["research"]["source"] != "auto":
+        reference_mode = _preferred_mode(state["research"]["source"])
     if reference_mode not in allowed:
-        reference_mode = "none" if state["research"]["source"] == "auto" else _preferred_mode(state["research"]["source"])
-    prompt_id = "literature/planner"
+        reference_mode = allowed[0]
     payload = _payload(
-        state,
-        round_count=len(rounds),
-        core_requirements=core_requirements,
-        current_plan=state.get("current_plan", []),
-        current_draft=state.get("current_draft", ""),
-        current_review=state.get("current_review", {}),
-        evidence=_evidence_views(_select_evidence(state), text_limit=240),
-        allowed_sources=allowed,
-        source_preference=state.get("background", {}).get("source", _preferred_mode(state["research"]["source"])),
-        background_candidates=_planner_background_candidates(state),
+        state, round_count=len(rounds), core_requirements=core_requirements,
+        current_plan=state.get("current_plan", []), current_review=state.get("current_review", {}),
+        current_draft=state.get("current_draft", ""), evidence=_evidence_views(_select_evidence(state), text_limit=240),
+        allowed_sources=allowed, research_budget=budget,
         research_depth=state.get("research", {}).get("research_depth", "standard"),
-        research_budget=budget,
         analyst_sufficient=_review_is_sufficient(state, state.get("current_review", {})),
+        background_candidates=_planner_background_candidates(state),
         actionable_next_steps=_distinct_next_steps(state, state.get("current_review", {})),
     )
-    payload["background"].update({
-        key: state.get("background", {}).get(key)
-        for key in ("research_scope", "confirmed_background", "dimensions", "controversies")
-        if key in state.get("background", {})
-    })
+    payload["background"].update({key: state.get("background", {}).get(key) for key in
+        ("research_scope", "confirmed_background", "dimensions", "controversies") if key in state.get("background", {})})
     errors = list(state.get("errors", []))
     try:
-        result = _model(
-            state,
-            prompt_id,
-            payload,
-            None,
-            node_role="planner",
-            search_mode=reference_mode,
-            available_tools=[],
-        )
-        body, data = _parse_control(result, PlannerOutput)
-        data["body"] = body
-        if data["source"] not in allowed:
-            data["source"] = state.get("current_source") or state.get("background", {}).get("source") or allowed[0]
-        if not data["requirements"]:
-            data["requirements"] = core_requirements or [state["research"]["query"][:500]]
-        if not data["plan"] and (not rounds or _depth(state) != "deep"):
-            data["plan"] = ["围绕原问题补充可核验证据"]
-        if not rounds:
-            if state["research"]["source"] != "auto":
-                data["source"] = _preferred_mode(state["research"]["source"])
-            data["action"] = "research"
+        body = _model(state, "literature/planner", payload, None, node_role="planner",
+                      search_mode=reference_mode, available_tools=[])
+        if not isinstance(body, str) or not body.strip():
+            raise StructuredOutputError("研究计划为空")
     except (ModelServiceError, StructuredOutputError):
-        data = _fallback_plan(state)
+        body = "围绕原问题和已有背景检索可核验证据，逐项核对研究要求与证据缺口。"
         errors.append(_safe_error("planner", "model_failed", "规划模型不可用，按当前来源继续有限研究。"))
-
-    if _depth(state) == "deep":
-        core_requirements = core_requirements or _clean_labels(data.get("requirements", []))
-        data["requirements"] = _clean_labels([*core_requirements, *data.get("requirements", [])])
+    if not core_requirements:
+        text_without_code = re.sub(r"(?ms)^\s*(```+|~~~+)[^\n]*\n.*?^\s*\1\s*$", "", body)
+        section = re.search(r"(?im)^#{1,6}\s*[^\n]*(?:研究要求|问题要求|requirements)[^\n]*\n(.*?)(?=^#{1,6}\s|\Z)", text_without_code, re.DOTALL)
+        if section:
+            core_requirements = _clean_labels(re.findall(r"(?m)^\s*(?:[-*+]\s+|\d+[.、]\s*)(.+)$", section.group(1)))
+        core_requirements = core_requirements or [state["research"]["query"][:500]]
+    route = _select_research_route(state, body, allowed, reference_mode, core_requirements, errors)
     stop_reason = ""
-    if rounds and _depth(state) == "deep":
+    selected_steps = []
+    if not rounds:
+        route.update(action="research", completion_confirmed=False)
+    else:
         review = state.get("current_review", {})
-        complete = _review_is_sufficient(state, review)
+        sufficient = _review_is_sufficient({**state, "core_requirements": core_requirements}, review)
         next_steps = _distinct_next_steps(state, review)
-        planner_steps = _distinct_plan_steps(state, data.get("plan", [])) if data.get("action") == "research" else []
-        if complete and data.get("action") == "report" and data.get("completion_confirmed"):
-            data["action"] = "report"
-            data["rationale"] = "核心研究要求已覆盖，关键证据审查通过且没有尚待解决的重要矛盾，整理现有结果。"
+        distinct_steps = _distinct_plan_steps(state, route.get("next_steps", []))
+        selected_steps = distinct_steps or next_steps
+        if route["action"] == "report" and sufficient and route["completion_confirmed"]:
             stop_reason = "sufficient"
-        elif complete and planner_steps:
-            data["plan"] = planner_steps
-            data["action"] = "research"
-            data["rationale"] = "分析审查认为主要要求已覆盖；规划器仍识别到新的可执行研究方向，继续补充资料。"
-        elif complete:
-            data["action"] = "report"
-            data["rationale"] = "分析审查认为研究已充分，但规划器没有提出新的可执行方向；报告将保留审慎的完成状态说明。"
+        elif not next_steps and not distinct_steps:
+            route.update(action="report", completion_confirmed=False)
             stop_reason = "no_distinct_research_path"
-        elif planner_steps or next_steps:
-            data["plan"] = planner_steps or next_steps
-            data["action"] = "research"
-            data["rationale"] = "仍有研究缺口，且存在未尝试的补查方向，继续研究。"
         else:
-            data["action"] = "report"
-            data["rationale"] = "仍有研究缺口，但没有新的可执行补查方向；报告将明确列出未解决要求和证据限制。"
-            stop_reason = "no_distinct_research_path"
-    elif rounds and data.get("action") == "report":
-        stop_reason = "sufficient" if _review_is_sufficient(state, state.get("current_review", {})) else "planner_reported_incomplete"
+            route.update(action="research", completion_confirmed=False)
+    steps = selected_steps or [state["research"]["query"][:500]]
+    route["rationale"] = ("核心要求已覆盖，证据审查通过。" if stop_reason == "sufficient" else
+                          "没有新的可执行补查方向，报告将说明未解决的缺口。" if stop_reason else
+                          "按当前研究方向继续检索和核验。")
+    data = {"body": body, "plan": steps}
 
     return {
         "plan": data,
+        "research_route": route,
         "current_plan": data.get("plan", []),
-        "current_source": data.get("source", state.get("current_source") or allowed[0]),
+        "current_source": route["source"],
         "core_requirements": core_requirements,
         "research_stop_reason": stop_reason,
         "errors": errors,
@@ -1729,17 +1712,19 @@ def _supervisor(state, on_stage):
     elif completed == "analyst":
         target = "planner"
     elif completed == "planner":
-        target = "researcher"
+        target = "reporter" if rounds and (state.get("research_route") or {}).get("action") == "report" else "researcher"
     else:
         target = "researcher"
     update = {"next_node": target}
     if target == "researcher":
         next_round = len(rounds) + 1
         if state.get("prepared_round", 0) != next_round:
-            mode = plan.get("source")
+            mode = (state.get("research_route") or {}).get("source", plan.get("source"))
             allowed = _available_modes(state["research"])
             if mode not in allowed:
-                mode = state.get("background", {}).get("source", allowed[0])
+                mode = state.get("background", {}).get("source")
+                if mode not in allowed:
+                    mode = allowed[0]
             update.update({
                 "current_source": mode,
                 "current_plan": plan.get("plan", []),
@@ -1758,7 +1743,7 @@ def _retry_query(state, attempted):
     normalized_attempts = {" ".join(value.casefold().split()) for value in attempted}
     choices = [
         " ".join(state.get("current_plan", [])),
-        " ".join((state.get("plan") or {}).get("requirements", [])),
+        " ".join(state.get("core_requirements") or (state.get("plan") or {}).get("requirements", [])),
         question,
     ]
     for item in choices:
@@ -1879,8 +1864,9 @@ def _researcher(state, on_stage):
             "research_depth": _depth(state),
             "current_round": state.get("current_round", 1),
             "current_source": mode,
-            "current_plan": state.get("current_plan", []),
-            "requirements": (state.get("plan") or {}).get("requirements", []),
+            "research_plan": (state.get("plan") or {}).get("body", ""),
+            "follow_up_steps": state.get("current_plan", []),
+            "requirements": state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []),
             "selected_candidate_ids": _background_summary_for_model(state.get("background", {})).get("selected_candidate_ids", []),
             "current_candidates": _candidate_summaries(
                 state, mode, limit=MAX_CANDIDATE_CONTEXT, text_limit=240,
@@ -2411,7 +2397,7 @@ def _reporter(state, on_stage):
         ),
         evidence=_evidence_views(working),
         evidence_omitted_count=len(all_evidence) - len(working),
-        final_requirements=(state.get("plan") or {}).get("requirements", []),
+        final_requirements=state.get("core_requirements") or (state.get("plan") or {}).get("requirements", []),
         outstanding_gaps=_outstanding_gaps(state),
         research_stop_reason=state.get("research_stop_reason", ""),
         prefer_primary_evidence=state.get("research", {}).get("prefer_primary_evidence", True),
@@ -2537,14 +2523,15 @@ def _node_completion_data(node, state, patch):
         data["message"] = f"已筛选 {count} 条背景候选。"
     elif node == "planner":
         plan = patch.get("plan", state.get("plan", {}))
-        action = plan.get("action")
+        route = patch.get("research_route", state.get("research_route", {}))
+        action = route.get("action")
         if action in {"research", "report"}:
             data["action"] = action
-        source = plan.get("source")
+        source = route.get("source", plan.get("source"))
         if source in {"web", "paper"}:
             data["source"] = source
             data["route"] = source
-        rationale = _safe_event_text(plan.get("rationale"), 240)
+        rationale = _safe_event_text(route.get("rationale"), 240)
         if rationale:
             data["message"] = rationale
         if plan.get("body") and not patch.get("research_stop_reason", "").endswith("_exhausted"):
@@ -2576,7 +2563,7 @@ def _node_completion_data(node, state, patch):
 _NODE_OUTPUT_FIELDS = {
     "dispatcher": ("needs_research", "content"),
     "background_investigator": ("background_decision", "background"),
-    "planner": ("plan", "research_stop_reason"),
+    "planner": ("plan", "research_route", "research_stop_reason"),
     "supervisor": ("next_node", "current_plan", "current_source", "current_round"),
     "researcher": ("current_draft", "current_findings", "round_search_queries"),
     "analyst": ("current_review", "current_findings"),
@@ -2642,15 +2629,11 @@ def _graph(on_stage, on_subtask):
         {"background_investigator": "background_investigator", "planner": "planner", END: END},
     )
     graph.add_edge("background_investigator", "planner")
-    graph.add_conditional_edges(
-        "planner",
-        lambda state: "reporter" if len(state.get("rounds", [])) >= _budget(state)["rounds"] or (state.get("rounds") and (state.get("plan") or {}).get("action") == "report") else "supervisor",
-        {"reporter": "reporter", "supervisor": "supervisor"},
-    )
+    graph.add_edge("planner", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         lambda state: state["next_node"],
-        {"researcher": "researcher", "analyst": "analyst", "planner": "planner"},
+        {"researcher": "researcher", "analyst": "analyst", "planner": "planner", "reporter": "reporter"},
     )
     graph.add_edge("researcher", "supervisor")
     graph.add_edge("analyst", "supervisor")

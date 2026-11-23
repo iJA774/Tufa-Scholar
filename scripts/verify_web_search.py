@@ -360,6 +360,10 @@ def main():
                 and json.loads(request['messages'][1]['content']).get('question') == 'two-rounds accuracy'
             ]
             assert len(reporter_payloads) == 1 and len(reporter_payloads[0]['rounds']) == 2
+            route_requests = [request for request in fixture.model_requests
+                              if '运行节点标识：route' in request['messages'][0]['content']
+                              and json.loads(request['messages'][1]['content']).get('question') == 'two-rounds accuracy']
+            assert route_requests and route_requests[0]['tools'][0]['function']['name'] == 'select_research_route'
             assert stages(two_round['run_id'])[-1:] == ['reporter']
 
             # A provider failure must still yield a completed, evidence-free report.
